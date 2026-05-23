@@ -1,7 +1,7 @@
 use crate::nix::{AttrKey, BinOp, Expr, UnOp};
 use crate::translator::NixModule;
 use cranelift_codegen::ir;
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{F32, F64, I8, I16, I32, I64};
 use cranelift_codegen::ir::{ArgumentPurpose, Block, Inst, InstructionData, Opcode};
 use cranelift_entity::EntityRef;
@@ -365,11 +365,13 @@ fn lower_function(_module: &NixModule, _func_index: u32, func: &ir::Function) ->
         .collect();
     params.push("st".into());
 
+    let free_values = block_free_values(func, vmctx);
+
     // Blocks: `blocks = rec { b0 = ...; b1 = ...; }; in blocks.b0 <args> st`
     let mut block_binds: Vec<(AttrKey, Expr)> = Vec::new();
     for block in func.layout.blocks() {
         let bname = block_name(block);
-        let bexpr = lower_block(func, block, vmctx);
+        let bexpr = lower_block(func, block, vmctx, &free_values);
         block_binds.push((AttrKey::ident(bname), bexpr));
     }
     let blocks_attrset = Expr::attrset(true, block_binds);
@@ -384,6 +386,13 @@ fn lower_function(_module: &NixModule, _func_index: u32, func: &ir::Function) ->
             .filter(|v| *v != vmctx)
             .map(|v| Expr::ident(value_name(v)))
             .collect();
+        args.extend(
+            free_values
+                .get(&entry)
+                .into_iter()
+                .flat_map(|values| values.iter())
+                .map(|v| Expr::ident(value_name(*v))),
+        );
         args.push(Expr::ident("st"));
         Expr::app(b0, args)
     };
@@ -392,7 +401,114 @@ fn lower_function(_module: &NixModule, _func_index: u32, func: &ir::Function) ->
     lambda_chain(&params, body)
 }
 
-fn lower_block(func: &ir::Function, block: Block, vmctx: ir::Value) -> Expr {
+fn block_free_values(func: &ir::Function, vmctx: ir::Value) -> BTreeMap<Block, Vec<ir::Value>> {
+    let mut result = BTreeMap::new();
+    let mut defined_by_block = BTreeMap::new();
+    let mut successors_by_block = BTreeMap::new();
+
+    for block in func.layout.blocks() {
+        let mut defined = func
+            .dfg
+            .block_params(block)
+            .iter()
+            .copied()
+            .map(|v| func.dfg.resolve_aliases(v))
+            .filter(|v| *v != vmctx)
+            .collect::<Vec<_>>();
+        let mut free = Vec::new();
+
+        for inst in func.layout.block_insts(block) {
+            for value in func.dfg.inst_values(inst) {
+                push_free_value(func, value, vmctx, &defined, &mut free);
+            }
+
+            match &func.dfg.insts[inst] {
+                InstructionData::Jump { destination, .. } => {
+                    successors_by_block
+                        .entry(block)
+                        .or_insert_with(Vec::new)
+                        .push(destination.block(&func.dfg.value_lists));
+                    for value in destination.args_slice(&func.dfg.value_lists) {
+                        push_free_value(func, *value, vmctx, &defined, &mut free);
+                    }
+                }
+                InstructionData::Brif { blocks, .. } => {
+                    for block_call in blocks {
+                        successors_by_block
+                            .entry(block)
+                            .or_insert_with(Vec::new)
+                            .push(block_call.block(&func.dfg.value_lists));
+                        for value in block_call.args_slice(&func.dfg.value_lists) {
+                            push_free_value(func, *value, vmctx, &defined, &mut free);
+                        }
+                    }
+                }
+                InstructionData::BranchTable { table, .. } => {
+                    let table_data = &func.dfg.jump_tables[*table];
+                    let successors = successors_by_block.entry(block).or_insert_with(Vec::new);
+                    successors.push(table_data.default_block().block(&func.dfg.value_lists));
+                    for block_call in table_data.as_slice() {
+                        successors.push(block_call.block(&func.dfg.value_lists));
+                    }
+                }
+                _ => {}
+            }
+            defined.extend(
+                func.dfg
+                    .inst_results(inst)
+                    .iter()
+                    .copied()
+                    .map(|v| func.dfg.resolve_aliases(v)),
+            );
+        }
+
+        defined_by_block.insert(block, defined);
+        result.insert(block, free);
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+
+        for block in func.layout.blocks() {
+            let defined = defined_by_block.get(&block).cloned().unwrap_or_default();
+            let successors = successors_by_block.get(&block).cloned().unwrap_or_default();
+            let mut free = result.get(&block).cloned().unwrap_or_default();
+
+            for successor in successors {
+                for value in result.get(&successor).cloned().unwrap_or_default() {
+                    let before = free.len();
+                    push_free_value(func, value, vmctx, &defined, &mut free);
+                    changed |= free.len() != before;
+                }
+            }
+
+            result.insert(block, free);
+        }
+    }
+
+    result
+}
+
+fn push_free_value(
+    func: &ir::Function,
+    value: ir::Value,
+    vmctx: ir::Value,
+    defined: &[ir::Value],
+    free: &mut Vec<ir::Value>,
+) {
+    let value = func.dfg.resolve_aliases(value);
+    if value != vmctx && !defined.contains(&value) && !free.contains(&value) {
+        free.push(value);
+    }
+}
+
+fn lower_block(
+    func: &ir::Function,
+    block: Block,
+    vmctx: ir::Value,
+    free_values: &BTreeMap<Block, Vec<ir::Value>>,
+) -> Expr {
     // Block parameters: block params excluding vmctx, then `st`.
     let mut params: Vec<String> = func
         .dfg
@@ -402,9 +518,16 @@ fn lower_block(func: &ir::Function, block: Block, vmctx: ir::Value) -> Expr {
         .filter(|v| *v != vmctx)
         .map(value_name)
         .collect();
+    params.extend(
+        free_values
+            .get(&block)
+            .into_iter()
+            .flat_map(|values| values.iter())
+            .map(|v| value_name(*v)),
+    );
     params.push("st".into());
 
-    let body = lower_block_body(func, block, vmctx);
+    let body = lower_block_body(func, block, vmctx, free_values);
     lambda_chain(&params, body)
 }
 
@@ -413,7 +536,12 @@ struct Step {
     force: Option<Expr>,
 }
 
-fn lower_block_body(func: &ir::Function, block: Block, vmctx: ir::Value) -> Expr {
+fn lower_block_body(
+    func: &ir::Function,
+    block: Block,
+    vmctx: ir::Value,
+    free_values: &BTreeMap<Block, Vec<ir::Value>>,
+) -> Expr {
     let mut insts: Vec<Inst> = func.layout.block_insts(block).collect();
     if insts.is_empty() {
         return Expr::app(builtin_throw(), vec![Expr::string("wasm2nix: empty block")]);
@@ -434,7 +562,7 @@ fn lower_block_body(func: &ir::Function, block: Block, vmctx: ir::Value) -> Expr
         }
     }
 
-    let mut expr = lower_terminator(func, term, &st_name, vmctx);
+    let mut expr = lower_terminator(func, term, &st_name, vmctx, free_values);
     for step in steps.into_iter().rev() {
         let body = if let Some(force) = step.force {
             Expr::app(builtin_seq(), vec![force, expr])
@@ -513,7 +641,7 @@ fn lower_inst(
                     let out = results[0];
                     let in_ty = func.dfg.value_type(*arg);
                     let out_ty = func.dfg.value_type(out);
-                    let a = value_expr(*arg, st_name, vmctx);
+                    let a = value_expr(func, *arg, st_name, vmctx);
 
                     let e = if in_ty == I8 && out_ty == I32 {
                         Expr::if_then_else(a, Expr::int(1), Expr::int(0))
@@ -531,7 +659,7 @@ fn lower_inst(
                     let out = results[0];
                     let in_ty = func.dfg.value_type(*arg);
                     let out_ty = func.dfg.value_type(out);
-                    let a = value_expr(*arg, st_name, vmctx);
+                    let a = value_expr(func, *arg, st_name, vmctx);
                     let e = match (in_ty, out_ty) {
                         (I8, I32) => Expr::app(rt_fn(&["conv", "sign_extend_8"]), vec![a]),
                         (I16, I32) => Expr::app(rt_fn(&["conv", "sign_extend_16"]), vec![a]),
@@ -545,7 +673,7 @@ fn lower_inst(
                 }
                 Opcode::Ireduce => {
                     let out = results[0];
-                    let a = value_expr(*arg, st_name, vmctx);
+                    let a = value_expr(func, *arg, st_name, vmctx);
                     let binds = vec![(
                         value_name(out),
                         Expr::app(rt_fn(&["conv", "ireduce"]), vec![a]),
@@ -555,26 +683,26 @@ fn lower_inst(
                 Opcode::Bitcast => {
                     let out = results[0];
                     // With our representation, bitcast between i32<->f32 and i64<->f64 is identity.
-                    let a = value_expr(*arg, st_name, vmctx);
+                    let a = value_expr(func, *arg, st_name, vmctx);
                     let binds = vec![(value_name(out), a)];
                     (seq_on_result(binds), None)
                 }
                 Opcode::Bnot => {
                     let out = results[0];
-                    let a = value_expr(*arg, st_name, vmctx);
+                    let a = value_expr(func, *arg, st_name, vmctx);
                     let binds =
                         vec![(value_name(out), Expr::app(rt_fn(&["int", "bnot"]), vec![a]))];
                     (seq_on_result(binds), None)
                 }
                 Opcode::Ineg => {
                     let out = results[0];
-                    let a = value_expr(*arg, st_name, vmctx);
+                    let a = value_expr(func, *arg, st_name, vmctx);
                     let binds = vec![(value_name(out), Expr::un(UnOp::Neg, a))];
                     (seq_on_result(binds), None)
                 }
                 Opcode::Clz | Opcode::Ctz | Opcode::Popcnt => {
                     let out = results[0];
-                    let a = value_expr(*arg, st_name, vmctx);
+                    let a = value_expr(func, *arg, st_name, vmctx);
                     let out_ty = func.dfg.value_type(out);
                     let ty_key = if out_ty == I32 {
                         "i32"
@@ -595,16 +723,29 @@ fn lower_inst(
                     )];
                     (seq_on_result(binds), None)
                 }
-                _ => {
+                Opcode::Fneg | Opcode::Fabs | Opcode::Sqrt => {
+                    let out = results[0];
+                    let a = value_expr(func, *arg, st_name, vmctx);
+                    let out_ty = func.dfg.value_type(out);
+                    let ty_key = if out_ty == F32 { "f32" } else { "f64" };
+                    let op_name = match op {
+                        Opcode::Fneg => "neg",
+                        Opcode::Fabs => "abs",
+                        Opcode::Sqrt => "sqrt",
+                        _ => unreachable!(),
+                    };
                     let binds = vec![(
-                        format!("_unused_{}", inst.as_u32()),
-                        Expr::app(
-                            builtin_throw(),
-                            vec![Expr::string(format!(
-                                "wasm2nix: unimplemented unary op {op}"
-                            ))],
-                        ),
+                        value_name(out),
+                        Expr::app(rt_fn(&[ty_key, op_name]), vec![a]),
                     )];
+                    (seq_on_result(binds), None)
+                }
+                _ => {
+                    let binds = unsupported_binds(
+                        inst,
+                        results,
+                        format!("wasm2nix: unimplemented unary op {op}"),
+                    );
                     (Some(Step { binds, force: None }), None)
                 }
             }
@@ -613,8 +754,8 @@ fn lower_inst(
         InstructionData::Binary {
             args: [arg1, arg2], ..
         } => {
-            let a = value_expr(*arg1, st_name, vmctx);
-            let b = value_expr(*arg2, st_name, vmctx);
+            let a = value_expr(func, *arg1, st_name, vmctx);
+            let b = value_expr(func, *arg2, st_name, vmctx);
             let out = results[0];
             let out_ty = func.dfg.value_type(out);
             let ty_key = if out_ty == I32 {
@@ -656,7 +797,7 @@ fn lower_inst(
         }
 
         InstructionData::BinaryImm64 { arg, imm, .. } => {
-            let a = value_expr(*arg, st_name, vmctx);
+            let a = value_expr(func, *arg, st_name, vmctx);
             let out = results[0];
             let out_ty = func.dfg.value_type(out);
             let imm64 = i64::from(*imm);
@@ -677,15 +818,11 @@ fn lower_inst(
                 Opcode::UshrImm => "shr_u",
                 Opcode::SshrImm => "shr_s",
                 _ => {
-                    let binds = vec![(
-                        format!("_unused_{}", inst.as_u32()),
-                        Expr::app(
-                            builtin_throw(),
-                            vec![Expr::string(format!(
-                                "wasm2nix: unimplemented binary-imm op {op}"
-                            ))],
-                        ),
-                    )];
+                    let binds = unsupported_binds(
+                        inst,
+                        results,
+                        format!("wasm2nix: unimplemented binary-imm op {op}"),
+                    );
                     return (Some(Step { binds, force: None }), None);
                 }
             };
@@ -695,10 +832,24 @@ fn lower_inst(
             (seq_on_result(binds), None)
         }
 
+        InstructionData::Ternary { args, .. }
+            if matches!(op, Opcode::Select | Opcode::SelectSpectreGuard) =>
+        {
+            let out = results[0];
+            let cond = truthy_value_expr(func, args[0], st_name, vmctx);
+            let then_value = value_expr(func, args[1], st_name, vmctx);
+            let else_value = value_expr(func, args[2], st_name, vmctx);
+            let binds = vec![(
+                value_name(out),
+                Expr::if_then_else(cond, then_value, else_value),
+            )];
+            (seq_on_result(binds), None)
+        }
+
         InstructionData::IntCompare { args, cond, .. } if op == Opcode::Icmp => {
             let out = results[0];
-            let a = value_expr(args[0], st_name, vmctx);
-            let b = value_expr(args[1], st_name, vmctx);
+            let a = value_expr(func, args[0], st_name, vmctx);
+            let b = value_expr(func, args[1], st_name, vmctx);
             let cmp_ns = if func.dfg.value_type(args[0]) == I64 {
                 "cmp_i64"
             } else {
@@ -711,7 +862,7 @@ fn lower_inst(
 
         InstructionData::IntCompareImm { arg, cond, imm, .. } if op == Opcode::IcmpImm => {
             let out = results[0];
-            let a = value_expr(*arg, st_name, vmctx);
+            let a = value_expr(func, *arg, st_name, vmctx);
             let ty = func.dfg.value_type(*arg);
             let imm64 = i64::from(*imm);
             let imm_expr = if ty == I32 {
@@ -725,10 +876,21 @@ fn lower_inst(
             (seq_on_result(binds), None)
         }
 
+        InstructionData::FloatCompare { args, cond, .. } if op == Opcode::Fcmp => {
+            let out = results[0];
+            let a = value_expr(func, args[0], st_name, vmctx);
+            let b = value_expr(func, args[1], st_name, vmctx);
+            let ty = func.dfg.value_type(args[0]);
+            let float_ns = if ty == F32 { "f32" } else { "f64" };
+            let e = Expr::app(rt_fn(&["fcmp", float_ns, floatcc_name(*cond)]), vec![a, b]);
+            let binds = vec![(value_name(out), e)];
+            (seq_on_result(binds), None)
+        }
+
         InstructionData::Load { arg, offset, .. } => {
             let out = results[0];
             let out_ty = func.dfg.value_type(out);
-            let base = value_expr(*arg, st_name, vmctx);
+            let base = value_expr(func, *arg, st_name, vmctx);
             let off: i32 = (*offset).into();
             let addr = if off == 0 {
                 base
@@ -743,8 +905,8 @@ fn lower_inst(
 
         InstructionData::Store { args, offset, .. } => {
             // Store args are [value, addr]
-            let val = value_expr(args[0], st_name, vmctx);
-            let base = value_expr(args[1], st_name, vmctx);
+            let val = value_expr(func, args[0], st_name, vmctx);
+            let base = value_expr(func, args[1], st_name, vmctx);
             let off: i32 = (*offset).into();
             let addr = if off == 0 {
                 base
@@ -771,7 +933,7 @@ fn lower_inst(
             if matches!(op, Opcode::Trapz | Opcode::Trapnz) =>
         {
             let trap_name = format!("_trap_{}", inst.as_u32());
-            let c = value_expr(*arg, st_name, vmctx);
+            let c = truthy_value_expr(func, *arg, st_name, vmctx);
             let trap_expr = Expr::app(
                 builtin_throw(),
                 vec![Expr::string(format!("wasm2nix: trap {code}"))],
@@ -813,13 +975,11 @@ fn lower_inst(
             let (fref, args) = match call_info {
                 ir::instructions::CallInfo::Direct(fref, args) => (fref, args),
                 _ => {
-                    let binds = vec![(
-                        format!("_unused_{}", inst.as_u32()),
-                        Expr::app(
-                            builtin_throw(),
-                            vec![Expr::string("wasm2nix: unsupported call kind")],
-                        ),
-                    )];
+                    let binds = unsupported_binds(
+                        inst,
+                        results,
+                        "wasm2nix: unsupported call kind".to_string(),
+                    );
                     return (Some(Step { binds, force: None }), None);
                 }
             };
@@ -834,7 +994,7 @@ fn lower_inst(
                     let arg_exprs: Vec<Expr> = args
                         .iter()
                         .copied()
-                        .map(|v| value_expr(v, st_name, vmctx))
+                        .map(|v| value_expr(func, v, st_name, vmctx))
                         .collect();
                     let e = Expr::app(callee_expr, arg_exprs);
                     let binds = vec![(value_name(out), e)];
@@ -849,14 +1009,14 @@ fn lower_inst(
                     let callee = args
                         .first()
                         .copied()
-                        .map(|v| value_expr(v, st_name, vmctx))
+                        .map(|v| value_expr(func, v, st_name, vmctx))
                         .unwrap_or_else(|| Expr::int(0));
                     let wasm_args = args
                         .iter()
                         .copied()
                         .skip(1)
                         .filter(|v| *v != vmctx)
-                        .map(|v| value_expr(v, st_name, vmctx))
+                        .map(|v| value_expr(func, v, st_name, vmctx))
                         .collect::<Vec<_>>();
                     let call_e = Expr::app(
                         callee_expr,
@@ -899,7 +1059,7 @@ fn lower_inst(
                     let arg_exprs: Vec<Expr> = args
                         .iter()
                         .copied()
-                        .map(|v| value_expr(v, st_name, vmctx))
+                        .map(|v| value_expr(func, v, st_name, vmctx))
                         .collect();
                     let call_e = Expr::app(callee_expr, arg_exprs);
 
@@ -931,7 +1091,7 @@ fn lower_inst(
                     let arg_exprs: Vec<Expr> = args
                         .iter()
                         .copied()
-                        .map(|v| value_expr(v, st_name, vmctx))
+                        .map(|v| value_expr(func, v, st_name, vmctx))
                         .collect();
                     let e = Expr::app(callee_expr, arg_exprs);
                     let binds = vec![(new_st.clone(), e)];
@@ -948,21 +1108,36 @@ fn lower_inst(
 
         // Default: unsupported instruction.
         _ => {
-            let binds = vec![(
-                format!("_unused_{}", inst.as_u32()),
-                Expr::app(
-                    builtin_throw(),
-                    vec![Expr::string(format!(
-                        "wasm2nix: unimplemented inst opcode {op}"
-                    ))],
-                ),
-            )];
+            let binds = unsupported_binds(
+                inst,
+                results,
+                format!("wasm2nix: unimplemented inst opcode {op}"),
+            );
             (Some(Step { binds, force: None }), None)
         }
     }
 }
 
-fn lower_terminator(func: &ir::Function, inst: Inst, st_name: &str, vmctx: ir::Value) -> Expr {
+fn unsupported_binds(inst: Inst, results: &[ir::Value], message: String) -> Vec<(String, Expr)> {
+    let throw_expr = || Expr::app(builtin_throw(), vec![Expr::string(message.clone())]);
+    if results.is_empty() {
+        vec![(format!("_unused_{}", inst.as_u32()), throw_expr())]
+    } else {
+        results
+            .iter()
+            .copied()
+            .map(|value| (value_name(value), throw_expr()))
+            .collect()
+    }
+}
+
+fn lower_terminator(
+    func: &ir::Function,
+    inst: Inst,
+    st_name: &str,
+    vmctx: ir::Value,
+    free_values: &BTreeMap<Block, Vec<ir::Value>>,
+) -> Expr {
     let data = &func.dfg.insts[inst];
     let op = data.opcode();
 
@@ -972,7 +1147,7 @@ fn lower_terminator(func: &ir::Function, inst: Inst, st_name: &str, vmctx: ir::V
                 .as_slice(&func.dfg.value_lists)
                 .iter()
                 .copied()
-                .map(|v| value_expr(v, st_name, vmctx))
+                .map(|v| value_expr(func, v, st_name, vmctx))
                 .collect::<Vec<_>>();
             Expr::attrset(
                 false,
@@ -984,26 +1159,32 @@ fn lower_terminator(func: &ir::Function, inst: Inst, st_name: &str, vmctx: ir::V
         }
 
         (Opcode::Jump, InstructionData::Jump { destination, .. }) => {
-            lower_block_call(func, *destination, st_name, vmctx)
+            lower_block_call(func, *destination, st_name, vmctx, free_values)
         }
 
         (Opcode::Brif, InstructionData::Brif { blocks, arg, .. }) => {
-            let cond = value_expr(*arg, st_name, vmctx);
+            let cond = truthy_value_expr(func, *arg, st_name, vmctx);
 
-            let then_call = lower_block_call(func, blocks[0], st_name, vmctx);
-            let else_call = lower_block_call(func, blocks[1], st_name, vmctx);
+            let then_call = lower_block_call(func, blocks[0], st_name, vmctx, free_values);
+            let else_call = lower_block_call(func, blocks[1], st_name, vmctx, free_values);
 
             Expr::if_then_else(cond, then_call, else_call)
         }
 
         (Opcode::BrTable, InstructionData::BranchTable { arg, table, .. }) => {
-            let index = value_expr(*arg, st_name, vmctx);
+            let index = value_expr(func, *arg, st_name, vmctx);
             let table_data = &func.dfg.jump_tables[*table];
-            let mut expr = lower_block_call(func, table_data.default_block(), st_name, vmctx);
+            let mut expr = lower_block_call(
+                func,
+                table_data.default_block(),
+                st_name,
+                vmctx,
+                free_values,
+            );
             for (i, branch) in table_data.as_slice().iter().copied().enumerate().rev() {
                 expr = Expr::if_then_else(
                     Expr::bin(BinOp::Eq, index.clone(), Expr::int(i as i64)),
-                    lower_block_call(func, branch, st_name, vmctx),
+                    lower_block_call(func, branch, st_name, vmctx, free_values),
                     expr,
                 );
             }
@@ -1021,7 +1202,7 @@ fn lower_terminator(func: &ir::Function, inst: Inst, st_name: &str, vmctx: ir::V
         ),
 
         (Opcode::Trapz, InstructionData::CondTrap { arg, code, .. }) => {
-            let c = value_expr(*arg, st_name, vmctx);
+            let c = truthy_value_expr(func, *arg, st_name, vmctx);
             // trapz: if c is false then trap.
             Expr::if_then_else(
                 c,
@@ -1040,7 +1221,7 @@ fn lower_terminator(func: &ir::Function, inst: Inst, st_name: &str, vmctx: ir::V
         }
 
         (Opcode::Trapnz, InstructionData::CondTrap { arg, code, .. }) => {
-            let c = value_expr(*arg, st_name, vmctx);
+            let c = truthy_value_expr(func, *arg, st_name, vmctx);
             let ok = Expr::attrset(
                 false,
                 vec![
@@ -1073,14 +1254,22 @@ fn lower_block_call(
     call: ir::BlockCall,
     st_name: &str,
     vmctx: ir::Value,
+    free_values: &BTreeMap<Block, Vec<ir::Value>>,
 ) -> Expr {
     let target = call.block(&func.dfg.value_lists);
     let mut args = call
         .args_slice(&func.dfg.value_lists)
         .iter()
         .copied()
-        .map(|v| value_expr(v, st_name, vmctx))
+        .map(|v| value_expr(func, v, st_name, vmctx))
         .collect::<Vec<_>>();
+    args.extend(
+        free_values
+            .get(&target)
+            .into_iter()
+            .flat_map(|values| values.iter())
+            .map(|v| value_expr(func, *v, st_name, vmctx)),
+    );
     args.push(Expr::ident(st_name));
     Expr::app(Expr::ident(block_name(target)), args)
 }
@@ -1212,6 +1401,25 @@ fn intcc_name(cc: IntCC) -> &'static str {
     }
 }
 
+fn floatcc_name(cc: FloatCC) -> &'static str {
+    match cc {
+        FloatCC::Ordered => "ord",
+        FloatCC::Unordered => "uno",
+        FloatCC::Equal => "eq",
+        FloatCC::NotEqual => "ne",
+        FloatCC::OrderedNotEqual => "one",
+        FloatCC::UnorderedOrEqual => "ueq",
+        FloatCC::LessThan => "lt",
+        FloatCC::LessThanOrEqual => "le",
+        FloatCC::GreaterThan => "gt",
+        FloatCC::GreaterThanOrEqual => "ge",
+        FloatCC::UnorderedOrLessThan => "ult",
+        FloatCC::UnorderedOrLessThanOrEqual => "ule",
+        FloatCC::UnorderedOrGreaterThan => "ugt",
+        FloatCC::UnorderedOrGreaterThanOrEqual => "uge",
+    }
+}
+
 fn value_name(v: ir::Value) -> String {
     format!("v{}", v.as_u32())
 }
@@ -1220,11 +1428,21 @@ fn block_name(b: Block) -> String {
     format!("b{}", b.as_u32())
 }
 
-fn value_expr(v: ir::Value, st_name: &str, vmctx: ir::Value) -> Expr {
+fn value_expr(func: &ir::Function, v: ir::Value, st_name: &str, vmctx: ir::Value) -> Expr {
+    let v = func.dfg.resolve_aliases(v);
     if v == vmctx {
         Expr::ident(st_name)
     } else {
         Expr::ident(value_name(v))
+    }
+}
+
+fn truthy_value_expr(func: &ir::Function, v: ir::Value, st_name: &str, vmctx: ir::Value) -> Expr {
+    let value = value_expr(func, v, st_name, vmctx);
+    if func.dfg.value_type(v) == I8 {
+        value
+    } else {
+        Expr::bin(BinOp::Neq, value, Expr::int(0))
     }
 }
 

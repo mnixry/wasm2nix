@@ -577,6 +577,112 @@ let
       ge_s = lhs: rhs: checkI64 lhs >= checkI64 rhs;
     };
 
+  floatCmpFns =
+    isNan: isZero: bitsEq: lt:
+    let
+      eval =
+        lhs: rhs:
+        let
+          unordered = isNan lhs || isNan rhs;
+          zeros = isZero lhs && isZero rhs;
+          eq = !unordered && (zeros || bitsEq lhs rhs);
+          less = !unordered && !zeros && lt lhs rhs;
+          greater = !unordered && !eq && !less;
+        in
+        {
+          ord = !unordered;
+          uno = unordered;
+          inherit eq less greater;
+          ne = unordered || less || greater;
+          one = !unordered && !eq;
+          ueq = unordered || eq;
+          le = eq || less;
+          ge = eq || greater;
+          ult = unordered || less;
+          ule = unordered || eq || less;
+          ugt = unordered || greater;
+          uge = unordered || eq || greater;
+        };
+    in
+    {
+      ord = lhs: rhs: (eval lhs rhs).ord;
+      uno = lhs: rhs: (eval lhs rhs).uno;
+      eq = lhs: rhs: (eval lhs rhs).eq;
+      ne = lhs: rhs: (eval lhs rhs).ne;
+      one = lhs: rhs: (eval lhs rhs).one;
+      ueq = lhs: rhs: (eval lhs rhs).ueq;
+      lt = lhs: rhs: (eval lhs rhs).less;
+      le = lhs: rhs: (eval lhs rhs).le;
+      gt = lhs: rhs: (eval lhs rhs).greater;
+      ge = lhs: rhs: (eval lhs rhs).ge;
+      ult = lhs: rhs: (eval lhs rhs).ult;
+      ule = lhs: rhs: (eval lhs rhs).ule;
+      ugt = lhs: rhs: (eval lhs rhs).ugt;
+      uge = lhs: rhs: (eval lhs rhs).uge;
+    };
+
+  f32Abs = value: builtins.bitAnd (u32 value) 2147483647;
+  f32IsNaN =
+    value:
+    let
+      bits = u32 value;
+    in
+    builtins.bitAnd bits 2139095040 == 2139095040 && builtins.bitAnd bits 8388607 != 0;
+  f32IsZero = value: f32Abs value == 0;
+  f32Key =
+    value:
+    let
+      bits = u32 value;
+    in
+    if bits >= i32Sign then u32Max - bits else bits + i32Sign;
+
+  f64IsNaN =
+    value:
+    let
+      parts = i64Parts value;
+      exponent = floorMod (parts.hi / 1048576) 2048;
+      fracHi = floorMod parts.hi 1048576;
+    in
+    exponent == 2047 && (fracHi != 0 || parts.lo != 0);
+  f64IsZero =
+    value:
+    let
+      parts = i64Parts value;
+    in
+    builtins.bitAnd parts.hi 2147483647 == 0 && parts.lo == 0;
+  f64Key =
+    value:
+    let
+      parts = i64Parts value;
+    in
+    if i64IsNegativeParts parts then
+      {
+        lo = u32Max - parts.lo;
+        hi = u32Max - parts.hi;
+      }
+    else
+      {
+        lo = parts.lo;
+        hi = builtins.bitOr parts.hi i32Sign;
+      };
+  f64KeyLt =
+    lhs: rhs:
+    let
+      a = f64Key lhs;
+      b = f64Key rhs;
+    in
+    a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo);
+
+  fcmp =
+    {
+      f32 = floatCmpFns f32IsNaN f32IsZero (lhs: rhs: u32 lhs == u32 rhs) (lhs: rhs: f32Key lhs < f32Key rhs);
+      f64 = floatCmpFns f64IsNaN f64IsZero (lhs: rhs: cmp_i64.eq lhs rhs) f64KeyLt;
+    };
+
+  f64MapParts =
+    f: value:
+    i64FromParts (f (i64Parts value));
+
   conv =
     {
       uextend = value: _ty: value;
@@ -825,8 +931,9 @@ rec {
     sub = unsupportedFloat "f32" "sub";
     mul = unsupportedFloat "f32" "mul";
     div = unsupportedFloat "f32" "div";
-    neg = unsupportedUnaryFloat "f32" "neg";
-    abs = unsupportedUnaryFloat "f32" "abs";
+    neg = value: u32 (builtins.bitXor (u32 value) i32Sign);
+    abs = f32Abs;
+    sqrt = value: if f32IsZero value then u32 value else unsupportedUnaryFloat "f32" "sqrt" value;
   };
 
   f64 = {
@@ -834,9 +941,12 @@ rec {
     sub = unsupportedFloat "f64" "sub";
     mul = unsupportedFloat "f64" "mul";
     div = unsupportedFloat "f64" "div";
-    neg = unsupportedUnaryFloat "f64" "neg";
-    abs = unsupportedUnaryFloat "f64" "abs";
+    neg =
+      f64MapParts (parts: parts // { hi = builtins.bitXor parts.hi i32Sign; });
+    abs =
+      f64MapParts (parts: parts // { hi = builtins.bitAnd parts.hi 2147483647; });
+    sqrt = value: if f64IsZero value then value else unsupportedUnaryFloat "f64" "sqrt" value;
   };
 
-  inherit cmp cmp_i64 conv mem global table;
+  inherit cmp cmp_i64 fcmp conv mem global table;
 }

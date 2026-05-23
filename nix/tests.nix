@@ -112,6 +112,30 @@ lib.debug.runTests {
     expr = rt.cmp_i64.lt_s (-1) 1;
     expected = true;
   };
+  test_f32_compare_equal_finite = {
+    expr = rt.fcmp.f32.eq 1077936128 1077936128;
+    expected = true;
+  };
+  test_f32_compare_nan_unordered = {
+    expr = rt.fcmp.f32.uno 2143289344 1077936128;
+    expected = true;
+  };
+  test_f64_compare_signed_zero_equal = {
+    expr = rt.fcmp.f64.eq (0 - 9223372036854775807 - 1) 0;
+    expected = true;
+  };
+  test_f32_sqrt_zero_preserves_zero = {
+    expr = rt.f32.sqrt 0;
+    expected = 0;
+  };
+  test_f32_neg_flips_sign = {
+    expr = rt.f32.neg 0;
+    expected = 2147483648;
+  };
+  test_f64_abs_negative_zero = {
+    expr = rt.f64.abs (0 - 9223372036854775807 - 1);
+    expected = 0;
+  };
   test_int_bnot_compat = {
     expr = rt.int.bnot 0;
     expected = u32Max;

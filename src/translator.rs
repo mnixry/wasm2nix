@@ -194,9 +194,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
                 WasmValType::F32 => F32,
                 WasmValType::F64 => F64,
                 WasmValType::V128 => return Err(WasmError::Unsupported("SIMD/v128".into())),
-                WasmValType::Ref(_) => {
-                    return Err(WasmError::Unsupported("reference types".into()));
-                }
+                WasmValType::Ref(_) => I32,
             };
             Ok(ir::AbiParam::new(clif_ty))
         };
@@ -442,6 +440,8 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         cranelift_wasm::wasmparser::WasmFeatures::WASM1
             .union(cranelift_wasm::wasmparser::WasmFeatures::MUTABLE_GLOBAL)
             .union(cranelift_wasm::wasmparser::WasmFeatures::SIGN_EXTENSION)
+            .union(cranelift_wasm::wasmparser::WasmFeatures::MULTI_VALUE)
+            .union(cranelift_wasm::wasmparser::WasmFeatures::REFERENCE_TYPES)
     }
 }
 
@@ -462,7 +462,7 @@ fn validate_global_type(global: Global) -> WasmResult<()> {
     match global.wasm_ty {
         WasmValType::I32 | WasmValType::I64 | WasmValType::F32 | WasmValType::F64 => Ok(()),
         WasmValType::V128 => Err(WasmError::Unsupported("SIMD/v128".into())),
-        WasmValType::Ref(_) => Err(WasmError::Unsupported("reference types".into())),
+        WasmValType::Ref(_) => Err(WasmError::Unsupported("reference types in globals".into())),
     }
 }
 
@@ -703,7 +703,7 @@ impl<'m> NixFuncEnvironment<'m> {
             WasmValType::F32 => Ok(F32),
             WasmValType::F64 => Ok(F64),
             WasmValType::V128 => Err(WasmError::Unsupported("SIMD/v128".into())),
-            WasmValType::Ref(_) => Err(WasmError::Unsupported("reference types".into())),
+            WasmValType::Ref(_) => Ok(I32),
         }
     }
 }
@@ -1066,7 +1066,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_ref_null(&mut self, _pos: FuncCursor, _ty: WasmHeapType) -> WasmResult<ir::Value> {
-        Err(WasmError::Unsupported("reference types".into()))
+        Err(WasmError::Unsupported("ref.null".into()))
     }
 
     fn translate_ref_is_null(
@@ -1074,7 +1074,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         _pos: FuncCursor,
         _value: ir::Value,
     ) -> WasmResult<ir::Value> {
-        Err(WasmError::Unsupported("reference types".into()))
+        Err(WasmError::Unsupported("ref.is_null".into()))
     }
 
     fn translate_ref_func(
@@ -1082,7 +1082,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         _pos: FuncCursor,
         _func_index: FuncIndex,
     ) -> WasmResult<ir::Value> {
-        Err(WasmError::Unsupported("reference types".into()))
+        Err(WasmError::Unsupported("ref.func".into()))
     }
 
     fn translate_custom_global_get(
