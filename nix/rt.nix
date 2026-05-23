@@ -107,6 +107,61 @@ let
     in
     u32 quotient;
 
+  range =
+    count:
+    builtins.genList (i: i) count;
+
+  bitSetU32 =
+    value: bit:
+    floorMod ((u32 value) / pow2 bit) 2 == 1;
+
+  bitSetI64 =
+    value: bit:
+    let
+      v = checkI64 value;
+    in
+    if bit == 63 then
+      v < 0
+    else
+      builtins.bitAnd v (pow2 bit) != 0;
+
+  clzBy =
+    width: bitSet: value:
+    let
+      result = builtins.foldl' (
+        acc: bit:
+        if acc.done then
+          acc
+        else if bitSet value (width - 1 - bit) then
+          acc // { done = true; }
+        else
+          acc // { count = acc.count + 1; }
+      ) { done = false; count = 0; } (range width);
+    in
+    result.count;
+
+  ctzBy =
+    width: bitSet: value:
+    let
+      result = builtins.foldl' (
+        acc: bit:
+        if acc.done then
+          acc
+        else if bitSet value bit then
+          acc // { done = true; }
+        else
+          acc // { count = acc.count + 1; }
+      ) { done = false; count = 0; } (range width);
+    in
+    result.count;
+
+  popcntBy =
+    width: bitSet: value:
+    builtins.foldl' (
+      acc: bit:
+      if bitSet value bit then acc + 1 else acc
+    ) 0 (range width);
+
   i32Bin =
     {
       add = lhs: rhs: u32 (u32 lhs + u32 rhs);
@@ -172,6 +227,9 @@ let
           u32 lhs
         else
           i32Bin.bor (i32Bin.shr_u lhs n) (i32Bin.shl lhs (32 - n));
+      clz = clzBy 32 bitSetU32;
+      ctz = ctzBy 32 bitSetU32;
+      popcnt = popcntBy 32 bitSetU32;
     };
 
   limitedI64 =
@@ -203,6 +261,9 @@ let
       shr_s = lhs: rhs: checkI64 (lhs / pow2 (floorMod rhs 63));
       rotl = lhs: _rhs: checkI64 lhs;
       rotr = lhs: _rhs: checkI64 lhs;
+      clz = value: checkI64 (clzBy 64 bitSetI64 value);
+      ctz = value: checkI64 (ctzBy 64 bitSetI64 value);
+      popcnt = value: checkI64 (popcntBy 64 bitSetI64 value);
     };
 
   unsupportedFloat =
@@ -234,6 +295,8 @@ let
       ireduce = u32;
       sign_extend_8 = value: u32 (signExtend 8 value);
       sign_extend_16 = value: u32 (signExtend 16 value);
+      sign_extend_8_i64 = value: checkI64 (signExtend 8 value);
+      sign_extend_16_i64 = value: checkI64 (signExtend 16 value);
       sign_extend_32 = value: checkI64 (signExtend 32 value);
     };
 
@@ -309,10 +372,6 @@ let
       word = getWord pages idx;
     in
     setWord pages idx (setByte word offset byte);
-
-  range =
-    count:
-    builtins.genList (i: i) count;
 
   loadBytes =
     op: width: addr: st:

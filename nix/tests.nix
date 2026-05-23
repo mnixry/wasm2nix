@@ -64,6 +64,42 @@ lib.debug.runTests {
     expr = rt.i32.shr_s 2147483648 31;
     expected = u32Max;
   };
+  test_i32_clz_zero = {
+    expr = rt.i32.clz 0;
+    expected = 32;
+  };
+  test_i32_clz_one = {
+    expr = rt.i32.clz 1;
+    expected = 31;
+  };
+  test_i32_clz_sign_bit = {
+    expr = rt.i32.clz 2147483648;
+    expected = 0;
+  };
+  test_i32_ctz_zero = {
+    expr = rt.i32.ctz 0;
+    expected = 32;
+  };
+  test_i32_ctz_sign_bit = {
+    expr = rt.i32.ctz 2147483648;
+    expected = 31;
+  };
+  test_i32_popcnt_all_bits = {
+    expr = rt.i32.popcnt u32Max;
+    expected = 32;
+  };
+  test_i64_clz_negative = {
+    expr = rt.i64.clz (-1);
+    expected = 0;
+  };
+  test_i64_ctz_min = {
+    expr = rt.i64.ctz (0 - 9223372036854775807 - 1);
+    expected = 63;
+  };
+  test_i64_popcnt_negative = {
+    expr = rt.i64.popcnt (-1);
+    expected = 64;
+  };
   test_int_bnot_compat = {
     expr = rt.int.bnot 0;
     expected = u32Max;
@@ -75,6 +111,18 @@ lib.debug.runTests {
   test_i32_signed_overflow_traps = {
     expr = tryOk (rt.i32.sdiv 2147483648 u32Max);
     expected = false;
+  };
+  test_i32_extend8_s = {
+    expr = rt.conv.sign_extend_8 128;
+    expected = 4294967168;
+  };
+  test_i32_extend16_s = {
+    expr = rt.conv.sign_extend_16 32768;
+    expected = 4294934528;
+  };
+  test_i64_extend32_s = {
+    expr = rt.conv.sign_extend_32 2147483648;
+    expected = -2147483648;
   };
 
   # Little-endian memory behavior via i32 store/load

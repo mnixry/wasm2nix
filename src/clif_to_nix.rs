@@ -2,7 +2,7 @@ use crate::nix::{AttrKey, BinOp, Expr, UnOp};
 use crate::translator::NixModule;
 use cranelift_codegen::ir;
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::types::{F32, F64, I8, I32, I64};
+use cranelift_codegen::ir::types::{F32, F64, I8, I16, I32, I64};
 use cranelift_codegen::ir::{ArgumentPurpose, Block, Inst, InstructionData, Opcode};
 use cranelift_entity::EntityRef;
 use cranelift_wasm::{ConstOp, WasmValType};
@@ -529,11 +529,18 @@ fn lower_inst(
                 }
                 Opcode::Sextend => {
                     let out = results[0];
+                    let in_ty = func.dfg.value_type(*arg);
+                    let out_ty = func.dfg.value_type(out);
                     let a = value_expr(*arg, st_name, vmctx);
-                    let binds = vec![(
-                        value_name(out),
-                        Expr::app(rt_fn(&["conv", "sextend"]), vec![a]),
-                    )];
+                    let e = match (in_ty, out_ty) {
+                        (I8, I32) => Expr::app(rt_fn(&["conv", "sign_extend_8"]), vec![a]),
+                        (I16, I32) => Expr::app(rt_fn(&["conv", "sign_extend_16"]), vec![a]),
+                        (I8, I64) => Expr::app(rt_fn(&["conv", "sign_extend_8_i64"]), vec![a]),
+                        (I16, I64) => Expr::app(rt_fn(&["conv", "sign_extend_16_i64"]), vec![a]),
+                        (I32, I64) => Expr::app(rt_fn(&["conv", "sign_extend_32"]), vec![a]),
+                        _ => Expr::app(rt_fn(&["conv", "sextend"]), vec![a]),
+                    };
+                    let binds = vec![(value_name(out), e)];
                     (seq_on_result(binds), None)
                 }
                 Opcode::Ireduce => {
@@ -563,6 +570,29 @@ fn lower_inst(
                     let out = results[0];
                     let a = value_expr(*arg, st_name, vmctx);
                     let binds = vec![(value_name(out), Expr::un(UnOp::Neg, a))];
+                    (seq_on_result(binds), None)
+                }
+                Opcode::Clz | Opcode::Ctz | Opcode::Popcnt => {
+                    let out = results[0];
+                    let a = value_expr(*arg, st_name, vmctx);
+                    let out_ty = func.dfg.value_type(out);
+                    let ty_key = if out_ty == I32 {
+                        "i32"
+                    } else if out_ty == I64 {
+                        "i64"
+                    } else {
+                        "unknown"
+                    };
+                    let op_name = match op {
+                        Opcode::Clz => "clz",
+                        Opcode::Ctz => "ctz",
+                        Opcode::Popcnt => "popcnt",
+                        _ => unreachable!(),
+                    };
+                    let binds = vec![(
+                        value_name(out),
+                        Expr::app(rt_fn(&[ty_key, op_name]), vec![a]),
+                    )];
                     (seq_on_result(binds), None)
                 }
                 _ => {
