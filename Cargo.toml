@@ -1,0 +1,17 @@
+[package]
+name = "wasm2nix"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.54", features = ["derive"] }
+cranelift-wasm = "0.112.3"
+cranelift-codegen = "*"
+cranelift-frontend = "*"
+cranelift-entity = "*"
+slog = "2.8.2"
+snafu = "0.8.9"
+
+[dependencies.wasmparser]
+version = "*"
+features = ["features"]
