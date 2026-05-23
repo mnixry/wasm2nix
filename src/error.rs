@@ -15,7 +15,7 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[snafu(display("Wasm translation failed"))]
+    #[snafu(display("Wasm translation failed: {message}"))]
     TranslateWasm { message: String },
 
     #[snafu(display("{message}"))]

@@ -409,6 +409,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
 
     fn wasm_features(&self) -> cranelift_wasm::wasmparser::WasmFeatures {
         cranelift_wasm::wasmparser::WasmFeatures::WASM1
+            .union(cranelift_wasm::wasmparser::WasmFeatures::MUTABLE_GLOBAL)
     }
 }
 

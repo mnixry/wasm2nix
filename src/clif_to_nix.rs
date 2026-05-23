@@ -4,6 +4,9 @@ use cranelift_codegen::ir;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{F32, F64, I8, I32, I64};
 use cranelift_codegen::ir::{ArgumentPurpose, Block, Inst, InstructionData, Opcode};
+use cranelift_entity::EntityRef;
+use cranelift_wasm::{ConstOp, WasmValType};
+use std::collections::BTreeMap;
 
 const FUNC_NAMESPACE: u32 = 0;
 const INTRINSIC_NAMESPACE: u32 = 1;
@@ -21,21 +24,74 @@ const INTR_GLOBAL_SET_F32: u32 = 22;
 const INTR_GLOBAL_SET_F64: u32 = 23;
 
 pub fn lower_module(module: &NixModule) -> Expr {
-    // Top-level: rt: imports: let funcs = rec { ... }; in { ...exports... }
+    // Top-level:
+    // rt: imports:
+    // let funcs = rec { ... }; st0 = { ... }; st = <after start>; exports = { ... };
+    // in exports // { instantiate = _args: { st = st; exports = exports; }; }
     let funcs_expr = lower_funcs_rec_attrset(module);
     let exports_expr = lower_exports_attrset(module);
+    let st0_expr = lower_initial_state(module);
+    let instantiate_expr = Expr::lambda(
+        "_args",
+        Expr::attrset(
+            false,
+            vec![
+                (AttrKey::ident("st"), Expr::ident("st")),
+                (AttrKey::ident("exports"), Expr::ident("exports")),
+            ],
+        ),
+    );
+    let body = Expr::bin(
+        BinOp::Update,
+        Expr::ident("exports"),
+        Expr::attrset(
+            false,
+            vec![(AttrKey::ident("instantiate"), instantiate_expr)],
+        ),
+    );
 
     Expr::lambda(
         "rt",
         Expr::lambda(
             "imports",
-            Expr::let_in(vec![("funcs".into(), funcs_expr)], exports_expr),
+            Expr::let_in(
+                vec![
+                    ("funcs".into(), funcs_expr),
+                    ("st0".into(), st0_expr),
+                    ("st".into(), lower_start_state(module)),
+                    ("exports".into(), exports_expr),
+                ],
+                body,
+            ),
         ),
     )
 }
 
+fn lower_start_state(module: &NixModule) -> Expr {
+    if let Some(start) = module.info.start_func {
+        let start_func = Expr::select(
+            Expr::ident("funcs"),
+            AttrKey::ident(format!("f{}", start.as_u32())),
+        );
+        Expr::select(
+            Expr::app(start_func, vec![Expr::ident("st0")]),
+            AttrKey::ident("st"),
+        )
+    } else {
+        Expr::ident("st0")
+    }
+}
+
 fn lower_funcs_rec_attrset(module: &NixModule) -> Expr {
     let mut binds: Vec<(AttrKey, Expr)> = Vec::new();
+
+    for (idx, (module_name, field_name)) in module.info.imported_funcs.iter().enumerate() {
+        let imported = Expr::select(
+            Expr::select(Expr::ident("imports"), AttrKey::string(module_name.clone())),
+            AttrKey::string(field_name.clone()),
+        );
+        binds.push((AttrKey::ident(format!("f{idx}")), imported));
+    }
 
     for (defined_idx, func) in module.info.function_bodies.iter() {
         let func_index = module.num_func_imports() as u32 + defined_idx.as_u32();
@@ -62,7 +118,157 @@ fn lower_exports_attrset(module: &NixModule) -> Expr {
         }
     }
 
+    for (memory_index, memory_decl) in module.info.memories.iter() {
+        for export_name in &memory_decl.export_names {
+            binds.push((
+                AttrKey::string(export_name.clone()),
+                lower_memory_export(memory_index.as_u32()),
+            ));
+        }
+    }
+
+    for (global_index, global_decl) in module.info.globals.iter() {
+        for export_name in &global_decl.export_names {
+            binds.push((
+                AttrKey::string(export_name.clone()),
+                lower_global_export(global_index.as_u32(), global_decl.entity.wasm_ty),
+            ));
+        }
+    }
+
     Expr::attrset(false, binds)
+}
+
+fn lower_initial_state(module: &NixModule) -> Expr {
+    let page_count = module
+        .info
+        .memories
+        .iter()
+        .next()
+        .map(|(_, memory)| memory.entity.minimum as i64)
+        .unwrap_or(0);
+
+    Expr::attrset(
+        false,
+        vec![
+            (
+                AttrKey::ident("mem"),
+                Expr::attrset(
+                    false,
+                    vec![
+                        (AttrKey::ident("pageCount"), Expr::int(page_count)),
+                        (AttrKey::ident("pages"), lower_initial_memory_pages(module)),
+                    ],
+                ),
+            ),
+            (AttrKey::ident("globals"), lower_initial_globals(module)),
+        ],
+    )
+}
+
+fn lower_initial_memory_pages(module: &NixModule) -> Expr {
+    let mut words: BTreeMap<u64, u32> = BTreeMap::new();
+
+    for init in &module.info.data_initializers {
+        if init.memory_index.index() != 0 || init.base.is_some() {
+            continue;
+        }
+
+        for (i, byte) in init.data.iter().copied().enumerate() {
+            let addr = init.offset + i as u64;
+            let word_index = addr / 4;
+            let shift = ((addr % 4) as u32) * 8;
+            let old_word = words.get(&word_index).copied().unwrap_or(0);
+            let mask = !(0xff_u32 << shift);
+            let new_word = (old_word & mask) | (u32::from(byte) << shift);
+            words.insert(word_index, new_word);
+        }
+    }
+
+    Expr::attrset(
+        false,
+        words
+            .into_iter()
+            .map(|(idx, word)| (AttrKey::string(idx.to_string()), Expr::int(i64::from(word))))
+            .collect(),
+    )
+}
+
+fn lower_initial_globals(module: &NixModule) -> Expr {
+    Expr::attrset(
+        false,
+        module
+            .info
+            .globals
+            .iter()
+            .filter_map(|(idx, global)| {
+                let init = module.info.global_inits.get(idx).and_then(|expr| expr.as_ref())?;
+                Some((
+                    AttrKey::string(idx.as_u32().to_string()),
+                    lower_const_expr(init, global.entity.wasm_ty),
+                ))
+            })
+            .collect(),
+    )
+}
+
+fn lower_const_expr(expr: &cranelift_wasm::ConstExpr, ty: WasmValType) -> Expr {
+    let ops = expr.ops();
+    if ops.len() != 1 {
+        return Expr::app(
+            builtin_throw(),
+            vec![Expr::string("wasm2nix: unsupported compound const expression")],
+        );
+    }
+
+    match (ops[0], ty) {
+        (ConstOp::I32Const(value), WasmValType::I32) => Expr::int(i64::from(value as u32)),
+        (ConstOp::I64Const(value), WasmValType::I64) => Expr::int(value),
+        (ConstOp::F32Const(bits), WasmValType::F32) => Expr::int(i64::from(bits)),
+        (ConstOp::F64Const(bits), WasmValType::F64) if bits <= i64::MAX as u64 => {
+            Expr::int(bits as i64)
+        }
+        _ => Expr::app(
+            builtin_throw(),
+            vec![Expr::string("wasm2nix: unsupported const expression")],
+        ),
+    }
+}
+
+fn lower_memory_export(_memory_index: u32) -> Expr {
+    Expr::select(Expr::ident("rt"), AttrKey::ident("mem"))
+}
+
+fn lower_global_export(global_index: u32, ty: WasmValType) -> Expr {
+    let get = Expr::lambda(
+        "st",
+        Expr::app(
+            rt_fn(&["global", global_get_name(ty)]),
+            vec![Expr::int(i64::from(global_index)), Expr::ident("st")],
+        ),
+    );
+    let set = Expr::lambda(
+        "value",
+        Expr::lambda(
+            "st",
+            Expr::app(
+                rt_fn(&["global", global_set_name(ty)]),
+                vec![
+                    Expr::int(i64::from(global_index)),
+                    Expr::ident("value"),
+                    Expr::ident("st"),
+                ],
+            ),
+        ),
+    );
+
+    Expr::attrset(
+        false,
+        vec![
+            (AttrKey::ident("get"), get),
+            (AttrKey::ident("set"), set),
+        ],
+    )
 }
 
 fn lower_function(_module: &NixModule, _func_index: u32, func: &ir::Function) -> Expr {
@@ -452,6 +658,46 @@ fn lower_inst(
             )
         }
 
+        InstructionData::CondTrap { arg, code, .. }
+            if matches!(op, Opcode::Trapz | Opcode::Trapnz) =>
+        {
+            let trap_name = format!("_trap_{}", inst.as_u32());
+            let c = value_expr(*arg, st_name, vmctx);
+            let trap_expr = Expr::app(
+                builtin_throw(),
+                vec![Expr::string(format!("wasm2nix: trap {code}"))],
+            );
+            let trap = if op == Opcode::Trapz {
+                Expr::if_then_else(c, Expr::int(0), trap_expr)
+            } else {
+                Expr::if_then_else(c, trap_expr, Expr::int(0))
+            };
+            (
+                Some(Step {
+                    binds: vec![(trap_name.clone(), trap)],
+                    force: Some(Expr::ident(trap_name)),
+                }),
+                None,
+            )
+        }
+
+        InstructionData::Trap { code, .. } => {
+            let trap_name = format!("_trap_{}", inst.as_u32());
+            (
+                Some(Step {
+                    binds: vec![(
+                        trap_name.clone(),
+                        Expr::app(
+                            builtin_throw(),
+                            vec![Expr::string(format!("wasm2nix: trap {code}"))],
+                        ),
+                    )],
+                    force: Some(Expr::ident(trap_name)),
+                }),
+                None,
+            )
+        }
+
         // Calls: use analyze_call() to get func_ref and args.
         _ if op == Opcode::Call => {
             let call_info = data.analyze_call(&func.dfg.value_lists);
@@ -633,39 +879,40 @@ fn lower_terminator(func: &ir::Function, inst: Inst, st_name: &str, vmctx: ir::V
 
         (Opcode::Trapz, InstructionData::CondTrap { arg, code, .. }) => {
             let c = value_expr(*arg, st_name, vmctx);
+            // trapz: if c is false then trap.
             Expr::if_then_else(
-                // trapz: if c == 0 then trap
-                Expr::bin(BinOp::Eq, c.clone(), Expr::int(0)),
-                Expr::app(
-                    builtin_throw(),
-                    vec![Expr::string(format!("wasm2nix: trapz {code}"))],
-                ),
+                c,
                 Expr::attrset(
                     false,
                     vec![
                         (AttrKey::ident("st"), Expr::ident(st_name)),
                         (AttrKey::ident("results"), Expr::list(vec![])),
                     ],
+                ),
+                Expr::app(
+                    builtin_throw(),
+                    vec![Expr::string(format!("wasm2nix: trapz {code}"))],
                 ),
             )
         }
 
         (Opcode::Trapnz, InstructionData::CondTrap { arg, code, .. }) => {
             let c = value_expr(*arg, st_name, vmctx);
+            let ok = Expr::attrset(
+                false,
+                vec![
+                    (AttrKey::ident("st"), Expr::ident(st_name)),
+                    (AttrKey::ident("results"), Expr::list(vec![])),
+                ],
+            );
+            // trapnz: if c is true then trap.
             Expr::if_then_else(
-                // trapnz: if c != 0 then trap
-                Expr::bin(BinOp::Neq, c.clone(), Expr::int(0)),
+                c,
                 Expr::app(
                     builtin_throw(),
                     vec![Expr::string(format!("wasm2nix: trapnz {code}"))],
                 ),
-                Expr::attrset(
-                    false,
-                    vec![
-                        (AttrKey::ident("st"), Expr::ident(st_name)),
-                        (AttrKey::ident("results"), Expr::list(vec![])),
-                    ],
-                ),
+                ok,
             )
         }
 
@@ -832,4 +1079,84 @@ fn rt_fn(path: &[&str]) -> Expr {
         e = Expr::select(e, AttrKey::ident(*p));
     }
     e
+}
+
+fn global_get_name(ty: WasmValType) -> &'static str {
+    match ty {
+        WasmValType::I32 => "get_i32",
+        WasmValType::I64 => "get_i64",
+        WasmValType::F32 => "get_f32",
+        WasmValType::F64 => "get_f64",
+        WasmValType::V128 | WasmValType::Ref(_) => "get_i32",
+    }
+}
+
+fn global_set_name(ty: WasmValType) -> &'static str {
+    match ty {
+        WasmValType::I32 => "set_i32",
+        WasmValType::I64 => "set_i64",
+        WasmValType::F32 => "set_f32",
+        WasmValType::F64 => "set_f64",
+        WasmValType::V128 | WasmValType::Ref(_) => "set_i32",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::translator::NixModule;
+
+    fn lower_wasm(wasm: &[u8]) -> String {
+        let module = NixModule::translate(wasm).expect("wasm should translate");
+        lower_module(&module).render()
+    }
+
+    #[test]
+    fn generated_module_keeps_compat_exports_and_instantiate() {
+        let wasm = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x60, 0x02,
+            0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x61,
+            0x64, 0x64, 0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01,
+            0x6a, 0x0b,
+        ];
+        let nix = lower_wasm(&wasm);
+
+        assert!(nix.contains("\"add\" = funcs.f0;"));
+        assert!(nix.contains("instantiate = _args:"));
+        assert!(nix.contains("st = st;"));
+        assert!(nix.contains("exports = exports;"));
+    }
+
+    #[test]
+    fn generated_module_embeds_active_data_segments() {
+        let wasm = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00,
+            0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x11,
+            0x02, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x04, 0x6c, 0x6f,
+            0x61, 0x64, 0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x41, 0x04, 0x28, 0x02,
+            0x00, 0x0b, 0x0b, 0x0a, 0x01, 0x00, 0x41, 0x04, 0x0b, 0x04, 0x01, 0x02, 0x03,
+            0x04,
+        ];
+        let nix = lower_wasm(&wasm);
+
+        assert!(nix.contains("pageCount = 1;"));
+        assert!(nix.contains("\"1\" = 67305985;"));
+        assert!(nix.contains("\"memory\" = rt.mem;"));
+    }
+
+    #[test]
+    fn generated_module_runs_start_before_exposing_instance_state() {
+        let wasm = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+            0x00, 0x03, 0x02, 0x01, 0x00, 0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x00, 0x0b,
+            0x07, 0x05, 0x01, 0x01, 0x67, 0x03, 0x00, 0x08, 0x01, 0x00, 0x0a, 0x08, 0x01,
+            0x06, 0x00, 0x41, 0x2a, 0x24, 0x00, 0x0b,
+        ];
+        let nix = lower_wasm(&wasm);
+
+        assert!(nix.contains("\"0\" = 0;"));
+        assert!(nix.contains("st = (funcs.f0 st0).st;"));
+        assert!(nix.contains("rt.global.set_i32"));
+        assert!(nix.contains("\"g\" = {"));
+    }
 }
