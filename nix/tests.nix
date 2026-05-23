@@ -182,4 +182,61 @@ lib.debug.runTests {
       rt.global.get_i32 7 st1;
     expected = 42;
   };
+
+  test_table_call_dispatches_function = {
+    expr =
+      let
+        funcs = {
+          f0 =
+            x: st:
+            {
+              inherit st;
+              results = [ (rt.i32.add x 1) ];
+            };
+        };
+        st1 = st0 // {
+          tables = {
+            "0" = {
+              size = 1;
+              elems = {
+                "0" = {
+                  func = 0;
+                  type = 0;
+                };
+              };
+            };
+          };
+        };
+      in
+      run1 (rt.table.call 0 0 funcs 0 [ 41 ] st1);
+    expected = 42;
+  };
+  test_table_call_type_mismatch_traps = {
+    expr =
+      let
+        funcs = {
+          f0 =
+            st:
+            {
+              inherit st;
+              results = [ ];
+            };
+        };
+        st1 = st0 // {
+          tables = {
+            "0" = {
+              size = 1;
+              elems = {
+                "0" = {
+                  func = 0;
+                  type = 1;
+                };
+              };
+            };
+          };
+        };
+      in
+      tryOk (rt.table.call 0 0 funcs 0 [ ] st1);
+    expected = false;
+  };
 }

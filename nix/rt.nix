@@ -440,6 +440,35 @@ let
       set_f32 = idx: value: st: set idx (u32 value) st;
       set_f64 = set;
     };
+
+  tables =
+    st: st.tables or { };
+
+  table =
+    let
+      getTable = tableIndex: st: (tables st).${toString tableIndex} or { elems = { }; size = 0; };
+      getEntry =
+        tableIndex: elemIndex: st:
+        (getTable tableIndex st).elems.${toString elemIndex} or null;
+      applyArgs = builtins.foldl' (fn: arg: fn arg);
+    in
+    {
+      call =
+        tableIndex: typeIndex: funcs: elemIndex: args: st:
+        let
+          entry = getEntry tableIndex elemIndex st;
+        in
+        if entry == null then
+          throw "wasm trap: undefined table element"
+        else if entry.type != typeIndex then
+          throw "wasm trap: indirect call type mismatch"
+        else
+          let
+            fn = builtins.getAttr ("f" + toString entry.func) funcs;
+          in
+          (applyArgs fn args) st;
+      size = tableIndex: st: (getTable tableIndex st).size or 0;
+    };
 in
 rec {
   i32 = i32Bin;
@@ -466,5 +495,5 @@ rec {
     abs = unsupportedUnaryFloat "f64" "abs";
   };
 
-  inherit cmp conv mem global;
+  inherit cmp conv mem global table;
 }

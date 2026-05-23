@@ -22,6 +22,8 @@ const INTR_GLOBAL_SET_I32: u32 = 20;
 const INTR_GLOBAL_SET_I64: u32 = 21;
 const INTR_GLOBAL_SET_F32: u32 = 22;
 const INTR_GLOBAL_SET_F64: u32 = 23;
+const INTR_CALL_INDIRECT_BASE: u32 = 1000;
+const INTR_CALL_INDIRECT_STRIDE: u32 = 10000;
 
 pub fn lower_module(module: &NixModule) -> Expr {
     // Top-level:
@@ -127,6 +129,15 @@ fn lower_exports_attrset(module: &NixModule) -> Expr {
         }
     }
 
+    for (table_index, table_decl) in module.info.tables.iter() {
+        for export_name in &table_decl.export_names {
+            binds.push((
+                AttrKey::string(export_name.clone()),
+                lower_table_export(table_index.as_u32()),
+            ));
+        }
+    }
+
     for (global_index, global_decl) in module.info.globals.iter() {
         for export_name in &global_decl.export_names {
             binds.push((
@@ -162,6 +173,7 @@ fn lower_initial_state(module: &NixModule) -> Expr {
                 ),
             ),
             (AttrKey::ident("globals"), lower_initial_globals(module)),
+            (AttrKey::ident("tables"), lower_initial_tables(module)),
         ],
     )
 }
@@ -212,6 +224,60 @@ fn lower_initial_globals(module: &NixModule) -> Expr {
     )
 }
 
+fn lower_initial_tables(module: &NixModule) -> Expr {
+    let mut table_binds: Vec<(AttrKey, Expr)> = Vec::new();
+
+    for (table_index, table_decl) in module.info.tables.iter() {
+        let mut elems: BTreeMap<u32, Expr> = BTreeMap::new();
+        for init in &module.info.table_initializers {
+            if init.table_index != table_index || init.base.is_some() {
+                continue;
+            }
+
+            for (i, func_index) in init.elements.iter().copied().enumerate() {
+                let slot = init.offset + i as u32;
+                let sig_index = module.info.functions[func_index].entity.as_u32();
+                elems.insert(
+                    slot,
+                    Expr::attrset(
+                        false,
+                        vec![
+                            (
+                                AttrKey::ident("func"),
+                                Expr::int(i64::from(func_index.as_u32())),
+                            ),
+                            (AttrKey::ident("type"), Expr::int(i64::from(sig_index))),
+                        ],
+                    ),
+                );
+            }
+        }
+
+        let elems_expr = Expr::attrset(
+            false,
+            elems
+                .into_iter()
+                .map(|(idx, entry)| (AttrKey::string(idx.to_string()), entry))
+                .collect(),
+        );
+        table_binds.push((
+            AttrKey::string(table_index.as_u32().to_string()),
+            Expr::attrset(
+                false,
+                vec![
+                    (
+                        AttrKey::ident("size"),
+                        Expr::int(i64::from(table_decl.entity.minimum)),
+                    ),
+                    (AttrKey::ident("elems"), elems_expr),
+                ],
+            ),
+        ));
+    }
+
+    Expr::attrset(false, table_binds)
+}
+
 fn lower_const_expr(expr: &cranelift_wasm::ConstExpr, ty: WasmValType) -> Expr {
     let ops = expr.ops();
     if ops.len() != 1 {
@@ -237,6 +303,10 @@ fn lower_const_expr(expr: &cranelift_wasm::ConstExpr, ty: WasmValType) -> Expr {
 
 fn lower_memory_export(_memory_index: u32) -> Expr {
     Expr::select(Expr::ident("rt"), AttrKey::ident("mem"))
+}
+
+fn lower_table_export(_table_index: u32) -> Expr {
+    Expr::select(Expr::ident("rt"), AttrKey::ident("table"))
 }
 
 fn lower_global_export(global_index: u32, ty: WasmValType) -> Expr {
@@ -731,6 +801,58 @@ fn lower_inst(
                     let binds = vec![(value_name(out), e)];
                     (seq_on_result(binds), None)
                 }
+                CallKind::Indirect {
+                    table_index,
+                    type_index,
+                } => {
+                    let tmp = format!("call_{}", inst.as_u32());
+                    let new_st = format!("st_{}", inst.as_u32());
+                    let callee = args
+                        .first()
+                        .copied()
+                        .map(|v| value_expr(v, st_name, vmctx))
+                        .unwrap_or_else(|| Expr::int(0));
+                    let wasm_args = args
+                        .iter()
+                        .copied()
+                        .skip(1)
+                        .filter(|v| *v != vmctx)
+                        .map(|v| value_expr(v, st_name, vmctx))
+                        .collect::<Vec<_>>();
+                    let call_e = Expr::app(
+                        callee_expr,
+                        vec![
+                            Expr::int(i64::from(table_index)),
+                            Expr::int(i64::from(type_index)),
+                            Expr::ident("funcs"),
+                            callee,
+                            Expr::list(wasm_args),
+                            Expr::ident(st_name),
+                        ],
+                    );
+
+                    let mut binds: Vec<(String, Expr)> = Vec::new();
+                    binds.push((tmp.clone(), call_e));
+                    binds.push((
+                        new_st.clone(),
+                        Expr::select(Expr::ident(&tmp), AttrKey::ident("st")),
+                    ));
+
+                    let results_list = Expr::select(Expr::ident(&tmp), AttrKey::ident("results"));
+                    for (i, &rv) in results.iter().enumerate() {
+                        let idx = Expr::int(i as i64);
+                        let v = Expr::app(builtin_elem_at(), vec![results_list.clone(), idx]);
+                        binds.push((value_name(rv), v));
+                    }
+
+                    (
+                        Some(Step {
+                            binds,
+                            force: Some(Expr::ident(new_st.clone())),
+                        }),
+                        Some(new_st),
+                    )
+                }
                 CallKind::StatefulRecord => {
                     let tmp = format!("call_{}", inst.as_u32());
                     let new_st = format!("st_{}", inst.as_u32());
@@ -930,6 +1052,10 @@ enum CallKind {
     Pure,
     StatefulRecord,
     StatefulState,
+    Indirect {
+        table_index: u32,
+        type_index: u32,
+    },
 }
 
 fn resolve_callee(func: &ir::Function, name: ir::ExternalName) -> (Expr, CallKind) {
@@ -957,6 +1083,19 @@ fn resolve_callee(func: &ir::Function, name: ir::ExternalName) -> (Expr, CallKin
                     INTR_GLOBAL_SET_I64 => (rt_fn(&["global", "set_i64"]), CallKind::StatefulState),
                     INTR_GLOBAL_SET_F32 => (rt_fn(&["global", "set_f32"]), CallKind::StatefulState),
                     INTR_GLOBAL_SET_F64 => (rt_fn(&["global", "set_f64"]), CallKind::StatefulState),
+
+                    other if other >= INTR_CALL_INDIRECT_BASE => {
+                        let encoded = other - INTR_CALL_INDIRECT_BASE;
+                        let table_index = encoded / INTR_CALL_INDIRECT_STRIDE;
+                        let type_index = encoded % INTR_CALL_INDIRECT_STRIDE;
+                        (
+                            rt_fn(&["table", "call"]),
+                            CallKind::Indirect {
+                                table_index,
+                                type_index,
+                            },
+                        )
+                    }
 
                     other => (
                         Expr::app(
@@ -1158,5 +1297,23 @@ mod tests {
         assert!(nix.contains("st = (funcs.f0 st0).st;"));
         assert!(nix.contains("rt.global.set_i32"));
         assert!(nix.contains("\"g\" = {"));
+    }
+
+    #[test]
+    fn generated_module_lowers_call_indirect_through_table_runtime() {
+        let wasm = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01,
+            0x7f, 0x01, 0x7f, 0x03, 0x03, 0x02, 0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00,
+            0x01, 0x07, 0x08, 0x01, 0x04, 0x63, 0x61, 0x6c, 0x6c, 0x00, 0x01, 0x09, 0x07,
+            0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00, 0x0a, 0x13, 0x02, 0x07, 0x00, 0x20,
+            0x00, 0x41, 0x01, 0x6a, 0x0b, 0x09, 0x00, 0x20, 0x00, 0x41, 0x00, 0x11, 0x00,
+            0x00, 0x0b,
+        ];
+        let nix = lower_wasm(&wasm);
+
+        assert!(nix.contains("rt.table.call 0 0 funcs"));
+        assert!(nix.contains("tables = {"));
+        assert!(nix.contains("func = 0;"));
+        assert!(nix.contains("type = 0;"));
     }
 }

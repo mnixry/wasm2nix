@@ -7,9 +7,10 @@ use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_entity::{EntityRef, PrimaryMap, SecondaryMap};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_wasm::{
-    ConstExpr, DataIndex, DefinedFuncIndex, FuncEnvironment, FuncIndex, FuncTranslator, Global,
-    GlobalIndex, GlobalVariable, Heap, HeapData, HeapStyle, Memory, MemoryIndex, ModuleEnvironment,
-    TableIndex, TargetEnvironment, TypeConvert, TypeIndex, WASM32_MAX_SIZE, WasmError,
+    ConstExpr, DataIndex, DefinedFuncIndex, ElemIndex, FuncEnvironment, FuncIndex,
+    FuncTranslator, Global, GlobalIndex, GlobalVariable, Heap, HeapData, HeapStyle, Memory,
+    MemoryIndex, ModuleEnvironment, Table, TableIndex, TargetEnvironment, TypeConvert, TypeIndex,
+    WASM32_MAX_SIZE, WasmError,
     WasmFuncType, WasmHeapType, WasmResult, WasmValType, translate_module,
 };
 
@@ -27,6 +28,8 @@ const INTR_GLOBAL_SET_I32: u32 = 20;
 const INTR_GLOBAL_SET_I64: u32 = 21;
 const INTR_GLOBAL_SET_F32: u32 = 22;
 const INTR_GLOBAL_SET_F64: u32 = 23;
+const INTR_CALL_INDIRECT_BASE: u32 = 1000;
+const INTR_CALL_INDIRECT_STRIDE: u32 = 10000;
 
 #[derive(Debug, Clone)]
 pub struct Exportable<T> {
@@ -51,6 +54,14 @@ pub struct DataInitializer {
     pub data: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TableInitializer {
+    pub table_index: TableIndex,
+    pub base: Option<GlobalIndex>,
+    pub offset: u32,
+    pub elements: Vec<FuncIndex>,
+}
+
 #[derive(Clone)]
 pub struct NixModuleInfo {
     config: TargetFrontendConfig,
@@ -60,17 +71,20 @@ pub struct NixModuleInfo {
     pub imported_funcs: Vec<(String, String)>,
     pub imported_globals: Vec<(String, String)>,
     pub imported_memories: Vec<(String, String)>,
+    pub imported_tables: Vec<(String, String)>,
 
     pub functions: PrimaryMap<FuncIndex, Exportable<TypeIndex>>,
     pub function_bodies: PrimaryMap<DefinedFuncIndex, ir::Function>,
 
     pub memories: PrimaryMap<MemoryIndex, Exportable<Memory>>,
+    pub tables: PrimaryMap<TableIndex, Exportable<Table>>,
     pub globals: PrimaryMap<GlobalIndex, Exportable<Global>>,
 
     pub global_inits: SecondaryMap<GlobalIndex, Option<ConstExpr>>,
 
     pub passive_data: SecondaryMap<DataIndex, Vec<u8>>,
     pub data_initializers: Vec<DataInitializer>,
+    pub table_initializers: Vec<TableInitializer>,
 
     pub start_func: Option<FuncIndex>,
 }
@@ -83,13 +97,16 @@ impl NixModuleInfo {
             imported_funcs: Vec::new(),
             imported_globals: Vec::new(),
             imported_memories: Vec::new(),
+            imported_tables: Vec::new(),
             functions: PrimaryMap::new(),
             function_bodies: PrimaryMap::new(),
             memories: PrimaryMap::new(),
+            tables: PrimaryMap::new(),
             globals: PrimaryMap::new(),
             global_inits: SecondaryMap::new(),
             passive_data: SecondaryMap::new(),
             data_initializers: Vec::new(),
+            table_initializers: Vec::new(),
             start_func: None,
         }
     }
@@ -220,11 +237,15 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
 
     fn declare_table_import(
         &mut self,
-        _table: cranelift_wasm::Table,
-        _module: &'data str,
-        _field: &'data str,
+        table: Table,
+        module: &'data str,
+        field: &'data str,
     ) -> WasmResult<()> {
-        Err(WasmError::Unsupported("tables".into()))
+        self.info.tables.push(Exportable::new(table));
+        self.info
+            .imported_tables
+            .push((module.to_string(), field.to_string()));
+        Ok(())
     }
 
     fn declare_memory_import(
@@ -260,8 +281,9 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         Ok(())
     }
 
-    fn declare_table(&mut self, _table: cranelift_wasm::Table) -> WasmResult<()> {
-        Err(WasmError::Unsupported("tables".into()))
+    fn declare_table(&mut self, table: Table) -> WasmResult<()> {
+        self.info.tables.push(Exportable::new(table));
+        Ok(())
     }
 
     fn declare_memory(&mut self, memory: Memory) -> WasmResult<()> {
@@ -286,10 +308,13 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
 
     fn declare_table_export(
         &mut self,
-        _table_index: TableIndex,
-        _name: &'data str,
+        table_index: TableIndex,
+        name: &'data str,
     ) -> WasmResult<()> {
-        Err(WasmError::Unsupported("tables".into()))
+        self.info.tables[table_index]
+            .export_names
+            .push(name.to_string());
+        Ok(())
     }
 
     fn declare_memory_export(
@@ -321,20 +346,26 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
 
     fn declare_table_elements(
         &mut self,
-        _table_index: TableIndex,
-        _base: Option<GlobalIndex>,
-        _offset: u32,
-        _elements: Box<[FuncIndex]>,
+        table_index: TableIndex,
+        base: Option<GlobalIndex>,
+        offset: u32,
+        elements: Box<[FuncIndex]>,
     ) -> WasmResult<()> {
-        Err(WasmError::Unsupported("tables".into()))
+        self.info.table_initializers.push(TableInitializer {
+            table_index,
+            base,
+            offset,
+            elements: elements.into_vec(),
+        });
+        Ok(())
     }
 
     fn declare_passive_element(
         &mut self,
-        _index: cranelift_wasm::ElemIndex,
+        _index: ElemIndex,
         _elements: Box<[FuncIndex]>,
     ) -> WasmResult<()> {
-        Err(WasmError::Unsupported("tables".into()))
+        Err(WasmError::Unsupported("passive element segments".into()))
     }
 
     fn declare_passive_data(&mut self, data_index: DataIndex, data: &'data [u8]) -> WasmResult<()> {
@@ -650,6 +681,20 @@ impl<'m> NixFuncEnvironment<'m> {
         }
     }
 
+    fn intrinsic_call_indirect(
+        &mut self,
+        func: &mut ir::Function,
+        table_index: TableIndex,
+        sig_index: TypeIndex,
+    ) -> ir::FuncRef {
+        let mut sig = self.vmctx_sig(sig_index);
+        sig.params.insert(0, ir::AbiParam::new(I32));
+        let intrinsic_index = INTR_CALL_INDIRECT_BASE
+            + table_index.as_u32() * INTR_CALL_INDIRECT_STRIDE
+            + sig_index.as_u32();
+        self.import_intrinsic(func, intrinsic_index, sig)
+    }
+
     fn wasm_ty_to_clif_ty(ty: WasmValType) -> WasmResult<ir::Type> {
         match ty {
             WasmValType::I32 => Ok(I32),
@@ -767,10 +812,10 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
 
     fn make_indirect_sig(
         &mut self,
-        _func: &mut ir::Function,
-        _index: TypeIndex,
+        func: &mut ir::Function,
+        index: TypeIndex,
     ) -> WasmResult<ir::SigRef> {
-        Err(WasmError::Unsupported("call_indirect".into()))
+        Ok(func.import_signature(self.vmctx_sig(index)))
     }
 
     fn make_direct_func(
@@ -812,14 +857,23 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
 
     fn translate_call_indirect(
         &mut self,
-        _builder: &mut FunctionBuilder,
-        _table_index: TableIndex,
-        _sig_index: TypeIndex,
+        builder: &mut FunctionBuilder,
+        table_index: TableIndex,
+        sig_index: TypeIndex,
         _sig_ref: ir::SigRef,
-        _callee: ir::Value,
-        _call_args: &[ir::Value],
+        callee: ir::Value,
+        call_args: &[ir::Value],
     ) -> WasmResult<Option<ir::Inst>> {
-        Err(WasmError::Unsupported("call_indirect".into()))
+        let vmctx = builder
+            .func
+            .special_param(ir::ArgumentPurpose::VMContext)
+            .expect("Missing vmctx parameter");
+        let fref = self.intrinsic_call_indirect(builder.func, table_index, sig_index);
+        let mut args = Vec::with_capacity(call_args.len() + 2);
+        args.push(callee);
+        args.extend(call_args.iter().cloned());
+        args.push(vmctx);
+        Ok(Some(builder.ins().call(fref, &args)))
     }
 
     fn translate_return_call_indirect(
