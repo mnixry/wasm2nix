@@ -14,6 +14,10 @@ const INTRINSIC_NAMESPACE: u32 = 1;
 // Must match `translator.rs`
 const INTR_MEM_GROW: u32 = 0;
 const INTR_MEM_SIZE: u32 = 1;
+const INTR_MEM_COPY: u32 = 2;
+const INTR_MEM_FILL: u32 = 3;
+const INTR_MEM_INIT: u32 = 4;
+const INTR_DATA_DROP: u32 = 5;
 const INTR_GLOBAL_GET_I32: u32 = 10;
 const INTR_GLOBAL_GET_I64: u32 = 11;
 const INTR_GLOBAL_GET_F32: u32 = 12;
@@ -22,6 +26,9 @@ const INTR_GLOBAL_SET_I32: u32 = 20;
 const INTR_GLOBAL_SET_I64: u32 = 21;
 const INTR_GLOBAL_SET_F32: u32 = 22;
 const INTR_GLOBAL_SET_F64: u32 = 23;
+const INTR_TABLE_COPY: u32 = 30;
+const INTR_TABLE_INIT: u32 = 31;
+const INTR_ELEM_DROP: u32 = 32;
 const INTR_CALL_INDIRECT_BASE: u32 = 1000;
 const INTR_CALL_INDIRECT_STRIDE: u32 = 10000;
 
@@ -174,6 +181,11 @@ fn lower_initial_state(module: &NixModule) -> Expr {
             ),
             (AttrKey::ident("globals"), lower_initial_globals(module)),
             (AttrKey::ident("tables"), lower_initial_tables(module)),
+            (AttrKey::ident("data"), lower_data_segments(module)),
+            (
+                AttrKey::ident("elemSegments"),
+                lower_element_segments(module),
+            ),
         ],
     )
 }
@@ -202,6 +214,28 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
         words
             .into_iter()
             .map(|(idx, word)| (AttrKey::string(idx.to_string()), Expr::int(i64::from(word))))
+            .collect(),
+    )
+}
+
+fn lower_data_segments(module: &NixModule) -> Expr {
+    Expr::attrset(
+        false,
+        module
+            .info
+            .data_segments
+            .iter()
+            .map(|(idx, data)| {
+                (
+                    AttrKey::string(idx.as_u32().to_string()),
+                    Expr::list(
+                        data.iter()
+                            .copied()
+                            .map(|byte| Expr::int(i64::from(byte)))
+                            .collect(),
+                    ),
+                )
+            })
             .collect(),
     )
 }
@@ -240,23 +274,7 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
 
             for (i, func_index) in init.elements.iter().copied().enumerate() {
                 let slot = init.offset + i as u32;
-                let sig_index = module
-                    .info
-                    .canonical_type_index(module.info.functions[func_index].entity)
-                    .as_u32();
-                elems.insert(
-                    slot,
-                    Expr::attrset(
-                        false,
-                        vec![
-                            (
-                                AttrKey::ident("func"),
-                                Expr::int(i64::from(func_index.as_u32())),
-                            ),
-                            (AttrKey::ident("type"), Expr::int(i64::from(sig_index))),
-                        ],
-                    ),
-                );
+                elems.insert(slot, lower_table_entry(module, func_index));
             }
         }
 
@@ -283,6 +301,49 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
     }
 
     Expr::attrset(false, table_binds)
+}
+
+fn lower_element_segments(module: &NixModule) -> Expr {
+    Expr::attrset(
+        false,
+        module
+            .info
+            .element_segments
+            .iter()
+            .map(|(idx, elements)| {
+                (
+                    AttrKey::string(idx.as_u32().to_string()),
+                    Expr::list(
+                        elements
+                            .iter()
+                            .copied()
+                            .map(|func_index| lower_table_entry(module, func_index))
+                            .collect(),
+                    ),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn lower_table_entry(module: &NixModule, func_index: cranelift_wasm::FuncIndex) -> Expr {
+    let Some(function) = module.info.functions.get(func_index) else {
+        return Expr::ident("null");
+    };
+    let sig_index = module
+        .info
+        .canonical_type_index(function.entity)
+        .as_u32();
+    Expr::attrset(
+        false,
+        vec![
+            (
+                AttrKey::ident("func"),
+                Expr::int(i64::from(func_index.as_u32())),
+            ),
+            (AttrKey::ident("type"), Expr::int(i64::from(sig_index))),
+        ],
+    )
 }
 
 fn lower_const_expr(expr: &cranelift_wasm::ConstExpr, ty: WasmValType) -> Expr {
@@ -1304,6 +1365,13 @@ fn resolve_callee(func: &ir::Function, name: ir::ExternalName) -> (Expr, CallKin
                 INTRINSIC_NAMESPACE => match user.index {
                     INTR_MEM_GROW => (rt_fn(&["mem", "grow"]), CallKind::StatefulRecord),
                     INTR_MEM_SIZE => (rt_fn(&["mem", "size"]), CallKind::Pure),
+                    INTR_MEM_COPY => (rt_fn(&["mem", "copy"]), CallKind::StatefulState),
+                    INTR_MEM_FILL => (rt_fn(&["mem", "fill"]), CallKind::StatefulState),
+                    INTR_MEM_INIT => (rt_fn(&["mem", "init"]), CallKind::StatefulState),
+                    INTR_DATA_DROP => (rt_fn(&["mem", "data_drop"]), CallKind::StatefulState),
+                    INTR_TABLE_COPY => (rt_fn(&["table", "copy"]), CallKind::StatefulState),
+                    INTR_TABLE_INIT => (rt_fn(&["table", "init"]), CallKind::StatefulState),
+                    INTR_ELEM_DROP => (rt_fn(&["table", "elem_drop"]), CallKind::StatefulState),
 
                     INTR_GLOBAL_GET_I32 => (rt_fn(&["global", "get_i32"]), CallKind::Pure),
                     INTR_GLOBAL_GET_I64 => (rt_fn(&["global", "get_i64"]), CallKind::Pure),

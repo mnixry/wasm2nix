@@ -20,6 +20,10 @@ const INTRINSIC_NAMESPACE: u32 = 1;
 // Intrinsic indices within `INTRINSIC_NAMESPACE`.
 const INTR_MEM_GROW: u32 = 0;
 const INTR_MEM_SIZE: u32 = 1;
+const INTR_MEM_COPY: u32 = 2;
+const INTR_MEM_FILL: u32 = 3;
+const INTR_MEM_INIT: u32 = 4;
+const INTR_DATA_DROP: u32 = 5;
 const INTR_GLOBAL_GET_I32: u32 = 10;
 const INTR_GLOBAL_GET_I64: u32 = 11;
 const INTR_GLOBAL_GET_F32: u32 = 12;
@@ -28,6 +32,9 @@ const INTR_GLOBAL_SET_I32: u32 = 20;
 const INTR_GLOBAL_SET_I64: u32 = 21;
 const INTR_GLOBAL_SET_F32: u32 = 22;
 const INTR_GLOBAL_SET_F64: u32 = 23;
+const INTR_TABLE_COPY: u32 = 30;
+const INTR_TABLE_INIT: u32 = 31;
+const INTR_ELEM_DROP: u32 = 32;
 const INTR_CALL_INDIRECT_BASE: u32 = 1000;
 const INTR_CALL_INDIRECT_STRIDE: u32 = 10000;
 
@@ -48,6 +55,7 @@ impl<T> Exportable<T> {
 
 #[derive(Debug, Clone)]
 pub struct DataInitializer {
+    pub data_index: DataIndex,
     pub memory_index: MemoryIndex,
     pub base: Option<GlobalIndex>,
     pub offset: u64,
@@ -56,6 +64,7 @@ pub struct DataInitializer {
 
 #[derive(Debug, Clone)]
 pub struct TableInitializer {
+    pub elem_index: ElemIndex,
     pub table_index: TableIndex,
     pub base: Option<GlobalIndex>,
     pub offset: u32,
@@ -83,9 +92,14 @@ pub struct NixModuleInfo {
     pub global_inits: SecondaryMap<GlobalIndex, Option<ConstExpr>>,
 
     pub passive_data: SecondaryMap<DataIndex, Vec<u8>>,
+    pub data_segments: SecondaryMap<DataIndex, Vec<u8>>,
     pub data_initializers: Vec<DataInitializer>,
     pub table_initializers: Vec<TableInitializer>,
+    pub passive_elements: SecondaryMap<ElemIndex, Vec<FuncIndex>>,
+    pub element_segments: SecondaryMap<ElemIndex, Vec<FuncIndex>>,
 
+    data_segment_count: usize,
+    elem_segment_count: usize,
     pub start_func: Option<FuncIndex>,
 }
 
@@ -105,8 +119,13 @@ impl NixModuleInfo {
             globals: PrimaryMap::new(),
             global_inits: SecondaryMap::new(),
             passive_data: SecondaryMap::new(),
+            data_segments: SecondaryMap::new(),
             data_initializers: Vec::new(),
             table_initializers: Vec::new(),
+            passive_elements: SecondaryMap::new(),
+            element_segments: SecondaryMap::new(),
+            data_segment_count: 0,
+            elem_segment_count: 0,
             start_func: None,
         }
     }
@@ -355,6 +374,16 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         Ok(())
     }
 
+    fn reserve_table_elements(&mut self, num: u32) -> WasmResult<()> {
+        if self.info.passive_elements.is_empty() {
+            self.info.passive_elements = SecondaryMap::with_capacity(num as usize);
+        }
+        if self.info.element_segments.is_empty() {
+            self.info.element_segments = SecondaryMap::with_capacity(num as usize);
+        }
+        Ok(())
+    }
+
     fn declare_table_elements(
         &mut self,
         table_index: TableIndex,
@@ -362,25 +391,36 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         offset: u32,
         elements: Box<[FuncIndex]>,
     ) -> WasmResult<()> {
+        let elem_index = ElemIndex::new(self.info.elem_segment_count);
+        self.info.elem_segment_count += 1;
+        let elements = elements.into_vec();
+        self.info.element_segments[elem_index] = elements.clone();
         self.info.table_initializers.push(TableInitializer {
+            elem_index,
             table_index,
             base,
             offset,
-            elements: elements.into_vec(),
+            elements,
         });
         Ok(())
     }
 
     fn declare_passive_element(
         &mut self,
-        _index: ElemIndex,
-        _elements: Box<[FuncIndex]>,
+        index: ElemIndex,
+        elements: Box<[FuncIndex]>,
     ) -> WasmResult<()> {
-        Err(WasmError::Unsupported("passive element segments".into()))
+        let elements = elements.into_vec();
+        self.info.passive_elements[index] = elements.clone();
+        self.info.element_segments[index] = elements;
+        self.info.elem_segment_count = self.info.elem_segment_count.max(index.index() + 1);
+        Ok(())
     }
 
     fn declare_passive_data(&mut self, data_index: DataIndex, data: &'data [u8]) -> WasmResult<()> {
         self.info.passive_data[data_index] = data.to_vec();
+        self.info.data_segments[data_index] = data.to_vec();
+        self.info.data_segment_count = self.info.data_segment_count.max(data_index.index() + 1);
         Ok(())
     }
 
@@ -414,7 +454,11 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         offset: u64,
         data: &'data [u8],
     ) -> WasmResult<()> {
+        let data_index = DataIndex::new(self.info.data_segment_count);
+        self.info.data_segment_count += 1;
+        self.info.data_segments[data_index] = data.to_vec();
         self.info.data_initializers.push(DataInitializer {
+            data_index,
             memory_index,
             base,
             offset,
@@ -446,6 +490,9 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         if self.info.passive_data.is_empty() {
             self.info.passive_data = SecondaryMap::with_capacity(count as usize);
         }
+        if self.info.data_segments.is_empty() {
+            self.info.data_segments = SecondaryMap::with_capacity(count as usize);
+        }
         Ok(())
     }
 
@@ -455,6 +502,8 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
             .union(cranelift_wasm::wasmparser::WasmFeatures::SIGN_EXTENSION)
             .union(cranelift_wasm::wasmparser::WasmFeatures::MULTI_VALUE)
             .union(cranelift_wasm::wasmparser::WasmFeatures::REFERENCE_TYPES)
+            .union(cranelift_wasm::wasmparser::WasmFeatures::SATURATING_FLOAT_TO_INT)
+            .union(cranelift_wasm::wasmparser::WasmFeatures::BULK_MEMORY)
     }
 }
 
@@ -483,6 +532,13 @@ fn validate_global_type(global: Global) -> WasmResult<()> {
 struct Intrinsics {
     mem_grow: Option<ir::FuncRef>,
     mem_size: Option<ir::FuncRef>,
+    mem_copy: Option<ir::FuncRef>,
+    mem_fill: Option<ir::FuncRef>,
+    mem_init: Option<ir::FuncRef>,
+    data_drop: Option<ir::FuncRef>,
+    table_copy: Option<ir::FuncRef>,
+    table_init: Option<ir::FuncRef>,
+    elem_drop: Option<ir::FuncRef>,
 
     global_get_i32: Option<ir::FuncRef>,
     global_get_i64: Option<ir::FuncRef>,
@@ -568,6 +624,119 @@ impl<'m> NixFuncEnvironment<'m> {
 
         let fref = self.import_intrinsic(func, INTR_MEM_SIZE, sig);
         self.intrinsics.mem_size = Some(fref);
+        fref
+    }
+
+    fn intrinsic_mem_copy(&mut self, func: &mut ir::Function) -> ir::FuncRef {
+        if let Some(f) = self.intrinsics.mem_copy {
+            return f;
+        }
+        let ptr = self.pointer_type();
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params
+            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
+        let fref = self.import_intrinsic(func, INTR_MEM_COPY, sig);
+        self.intrinsics.mem_copy = Some(fref);
+        fref
+    }
+
+    fn intrinsic_mem_fill(&mut self, func: &mut ir::Function) -> ir::FuncRef {
+        if let Some(f) = self.intrinsics.mem_fill {
+            return f;
+        }
+        let ptr = self.pointer_type();
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params
+            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
+        let fref = self.import_intrinsic(func, INTR_MEM_FILL, sig);
+        self.intrinsics.mem_fill = Some(fref);
+        fref
+    }
+
+    fn intrinsic_mem_init(&mut self, func: &mut ir::Function) -> ir::FuncRef {
+        if let Some(f) = self.intrinsics.mem_init {
+            return f;
+        }
+        let ptr = self.pointer_type();
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params
+            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
+        let fref = self.import_intrinsic(func, INTR_MEM_INIT, sig);
+        self.intrinsics.mem_init = Some(fref);
+        fref
+    }
+
+    fn intrinsic_data_drop(&mut self, func: &mut ir::Function) -> ir::FuncRef {
+        if let Some(f) = self.intrinsics.data_drop {
+            return f;
+        }
+        let ptr = self.pointer_type();
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params
+            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
+        let fref = self.import_intrinsic(func, INTR_DATA_DROP, sig);
+        self.intrinsics.data_drop = Some(fref);
+        fref
+    }
+
+    fn intrinsic_table_copy(&mut self, func: &mut ir::Function) -> ir::FuncRef {
+        if let Some(f) = self.intrinsics.table_copy {
+            return f;
+        }
+        let ptr = self.pointer_type();
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params
+            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
+        let fref = self.import_intrinsic(func, INTR_TABLE_COPY, sig);
+        self.intrinsics.table_copy = Some(fref);
+        fref
+    }
+
+    fn intrinsic_table_init(&mut self, func: &mut ir::Function) -> ir::FuncRef {
+        if let Some(f) = self.intrinsics.table_init {
+            return f;
+        }
+        let ptr = self.pointer_type();
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params
+            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
+        let fref = self.import_intrinsic(func, INTR_TABLE_INIT, sig);
+        self.intrinsics.table_init = Some(fref);
+        fref
+    }
+
+    fn intrinsic_elem_drop(&mut self, func: &mut ir::Function) -> ir::FuncRef {
+        if let Some(f) = self.intrinsics.elem_drop {
+            return f;
+        }
+        let ptr = self.pointer_type();
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params
+            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
+        let fref = self.import_intrinsic(func, INTR_ELEM_DROP, sig);
+        self.intrinsics.elem_drop = Some(fref);
         fref
     }
 
@@ -962,45 +1131,80 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
 
     fn translate_memory_copy(
         &mut self,
-        _pos: FuncCursor,
-        _src_index: MemoryIndex,
+        mut pos: FuncCursor,
+        src_index: MemoryIndex,
         _src_heap: Heap,
-        _dst_index: MemoryIndex,
+        dst_index: MemoryIndex,
         _dst_heap: Heap,
-        _dst: ir::Value,
-        _src: ir::Value,
-        _len: ir::Value,
+        dst: ir::Value,
+        src: ir::Value,
+        len: ir::Value,
     ) -> WasmResult<()> {
-        Err(WasmError::Unsupported("memory.copy".into()))
+        if src_index.index() != 0 || dst_index.index() != 0 {
+            return Err(WasmError::Unsupported("multiple memories".into()));
+        }
+        let vmctx = pos
+            .func
+            .special_param(ir::ArgumentPurpose::VMContext)
+            .expect("Missing vmctx parameter");
+        let fref = self.intrinsic_mem_copy(pos.func);
+        pos.ins().call(fref, &[dst, src, len, vmctx]);
+        Ok(())
     }
 
     fn translate_memory_fill(
         &mut self,
-        _pos: FuncCursor,
-        _index: MemoryIndex,
+        mut pos: FuncCursor,
+        index: MemoryIndex,
         _heap: Heap,
-        _dst: ir::Value,
-        _val: ir::Value,
-        _len: ir::Value,
+        dst: ir::Value,
+        val: ir::Value,
+        len: ir::Value,
     ) -> WasmResult<()> {
-        Err(WasmError::Unsupported("memory.fill".into()))
+        if index.index() != 0 {
+            return Err(WasmError::Unsupported("multiple memories".into()));
+        }
+        let vmctx = pos
+            .func
+            .special_param(ir::ArgumentPurpose::VMContext)
+            .expect("Missing vmctx parameter");
+        let fref = self.intrinsic_mem_fill(pos.func);
+        pos.ins().call(fref, &[dst, val, len, vmctx]);
+        Ok(())
     }
 
     fn translate_memory_init(
         &mut self,
-        _pos: FuncCursor,
-        _index: MemoryIndex,
+        mut pos: FuncCursor,
+        index: MemoryIndex,
         _heap: Heap,
-        _seg_index: u32,
-        _dst: ir::Value,
-        _src: ir::Value,
-        _len: ir::Value,
+        seg_index: u32,
+        dst: ir::Value,
+        src: ir::Value,
+        len: ir::Value,
     ) -> WasmResult<()> {
-        Err(WasmError::Unsupported("memory.init".into()))
+        if index.index() != 0 {
+            return Err(WasmError::Unsupported("multiple memories".into()));
+        }
+        let vmctx = pos
+            .func
+            .special_param(ir::ArgumentPurpose::VMContext)
+            .expect("Missing vmctx parameter");
+        let seg = pos.ins().iconst(I32, i64::from(seg_index));
+        let fref = self.intrinsic_mem_init(pos.func);
+        pos.ins().call(fref, &[seg, dst, src, len, vmctx]);
+        Ok(())
     }
 
-    fn translate_data_drop(&mut self, _pos: FuncCursor, _seg_index: u32) -> WasmResult<()> {
-        Err(WasmError::Unsupported("data.drop".into()))
+    fn translate_data_drop(&mut self, mut pos: FuncCursor, seg_index: u32) -> WasmResult<()> {
+        let vmctx = pos
+            .func
+            .special_param(ir::ArgumentPurpose::VMContext)
+            .expect("Missing vmctx parameter");
+        let seg = pos.ins().iconst(I32, i64::from(seg_index));
+        let fref = self.intrinsic_data_drop(pos.func);
+        pos.ins().call(fref, &[seg, vmctx]);
+        Ok(())
     }
 
     fn translate_table_size(
@@ -1042,14 +1246,23 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
 
     fn translate_table_copy(
         &mut self,
-        _pos: FuncCursor,
-        _dst_table_index: TableIndex,
-        _src_table_index: TableIndex,
-        _dst: ir::Value,
-        _src: ir::Value,
-        _len: ir::Value,
+        mut pos: FuncCursor,
+        dst_table_index: TableIndex,
+        src_table_index: TableIndex,
+        dst: ir::Value,
+        src: ir::Value,
+        len: ir::Value,
     ) -> WasmResult<()> {
-        Err(WasmError::Unsupported("tables".into()))
+        let vmctx = pos
+            .func
+            .special_param(ir::ArgumentPurpose::VMContext)
+            .expect("Missing vmctx parameter");
+        let dst_table = pos.ins().iconst(I32, i64::from(dst_table_index.as_u32()));
+        let src_table = pos.ins().iconst(I32, i64::from(src_table_index.as_u32()));
+        let fref = self.intrinsic_table_copy(pos.func);
+        pos.ins()
+            .call(fref, &[dst_table, src_table, dst, src, len, vmctx]);
+        Ok(())
     }
 
     fn translate_table_fill(
@@ -1065,18 +1278,33 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
 
     fn translate_table_init(
         &mut self,
-        _pos: FuncCursor,
-        _seg_index: u32,
-        _table_index: TableIndex,
-        _dst: ir::Value,
-        _src: ir::Value,
-        _len: ir::Value,
+        mut pos: FuncCursor,
+        seg_index: u32,
+        table_index: TableIndex,
+        dst: ir::Value,
+        src: ir::Value,
+        len: ir::Value,
     ) -> WasmResult<()> {
-        Err(WasmError::Unsupported("tables".into()))
+        let vmctx = pos
+            .func
+            .special_param(ir::ArgumentPurpose::VMContext)
+            .expect("Missing vmctx parameter");
+        let table = pos.ins().iconst(I32, i64::from(table_index.as_u32()));
+        let seg = pos.ins().iconst(I32, i64::from(seg_index));
+        let fref = self.intrinsic_table_init(pos.func);
+        pos.ins().call(fref, &[table, seg, dst, src, len, vmctx]);
+        Ok(())
     }
 
-    fn translate_elem_drop(&mut self, _pos: FuncCursor, _seg_index: u32) -> WasmResult<()> {
-        Err(WasmError::Unsupported("tables".into()))
+    fn translate_elem_drop(&mut self, mut pos: FuncCursor, seg_index: u32) -> WasmResult<()> {
+        let vmctx = pos
+            .func
+            .special_param(ir::ArgumentPurpose::VMContext)
+            .expect("Missing vmctx parameter");
+        let seg = pos.ins().iconst(I32, i64::from(seg_index));
+        let fref = self.intrinsic_elem_drop(pos.func);
+        pos.ins().call(fref, &[seg, vmctx]);
+        Ok(())
     }
 
     fn translate_ref_null(&mut self, _pos: FuncCursor, _ty: WasmHeapType) -> WasmResult<ir::Value> {

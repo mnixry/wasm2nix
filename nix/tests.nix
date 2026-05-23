@@ -277,6 +277,54 @@ lib.debug.runTests {
     expr = rt.mem.size (rt.mem.grow 2 st0).st;
     expected = 3;
   };
+  test_mem_fill_sets_bytes = {
+    expr =
+      let
+        st1 = rt.mem.fill 1 255 3 st0;
+      in
+      [
+        (rt.mem.load_u8 0 st1)
+        (rt.mem.load_u8 1 st1)
+        (rt.mem.load_u8 2 st1)
+        (rt.mem.load_u8 3 st1)
+      ];
+    expected = [ 0 255 255 255 ];
+  };
+  test_mem_copy_uses_original_source_for_overlap = {
+    expr =
+      let
+        st1 = rt.mem.store_i32 3721182122 0 st0;
+        st2 = rt.mem.copy 1 0 4 st1;
+      in
+      [
+        (rt.mem.load_u8 1 st2)
+        (rt.mem.load_u8 2 st2)
+        (rt.mem.load_u8 3 st2)
+        (rt.mem.load_u8 4 st2)
+      ];
+    expected = [ 170 187 204 221 ];
+  };
+  test_mem_init_reads_data_segment = {
+    expr =
+      let
+        st1 = st0 // { data = { "0" = [ 170 187 204 ]; }; };
+        st2 = rt.mem.init 0 4 1 2 st1;
+      in
+      [
+        (rt.mem.load_u8 4 st2)
+        (rt.mem.load_u8 5 st2)
+      ];
+    expected = [ 187 204 ];
+  };
+  test_data_drop_makes_segment_empty = {
+    expr =
+      let
+        st1 = st0 // { data = { "0" = [ 1 ]; }; };
+        st2 = rt.mem.data_drop 0 st1;
+      in
+      tryOk (rt.mem.init 0 0 0 1 st2);
+    expected = false;
+  };
 
   test_global_set_get_i32 = {
     expr =
@@ -341,6 +389,62 @@ lib.debug.runTests {
         };
       in
       tryOk (rt.table.call 0 0 funcs 0 [ ] st1);
+    expected = false;
+  };
+  test_table_init_copies_element_segment = {
+    expr =
+      let
+        funcs = {
+          f0 =
+            st:
+            {
+              inherit st;
+              results = [ 42 ];
+            };
+        };
+        st1 = st0 // {
+          tables = {
+            "0" = {
+              size = 1;
+              elems = { };
+            };
+          };
+          elemSegments = {
+            "0" = [
+              {
+                func = 0;
+                type = 0;
+              }
+            ];
+          };
+        };
+        st2 = rt.table.init 0 0 0 0 1 st1;
+      in
+      run1 (rt.table.call 0 0 funcs 0 [ ] st2);
+    expected = 42;
+  };
+  test_elem_drop_makes_segment_empty = {
+    expr =
+      let
+        st1 = st0 // {
+          tables = {
+            "0" = {
+              size = 1;
+              elems = { };
+            };
+          };
+          elemSegments = {
+            "0" = [
+              {
+                func = 0;
+                type = 0;
+              }
+            ];
+          };
+        };
+        st2 = rt.table.elem_drop 0 st1;
+      in
+      tryOk (rt.table.init 0 0 0 0 1 st2);
     expected = false;
   };
 }

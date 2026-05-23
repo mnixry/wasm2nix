@@ -897,6 +897,15 @@ let
       };
     };
 
+  dataSegments = st: st.data or { };
+  getDataSegment = idx: st: (dataSegments st).${toString idx} or [ ];
+  setDataSegment =
+    idx: bytes: st:
+    st
+    // {
+      data = (dataSegments st) // { "${toString idx}" = bytes; };
+    };
+
   checkAccess =
     op: width: addr: st:
     let
@@ -905,6 +914,16 @@ let
       end = addr + width;
     in
     if addr < 0 || end > limit then
+      throw "wasm trap: ${op} out of bounds"
+    else
+      true;
+
+  checkSegmentAccess =
+    op: segment: offset: width:
+    let
+      end = offset + width;
+    in
+    if offset < 0 || end > length segment then
       throw "wasm trap: ${op} out of bounds"
     else
       true;
@@ -918,7 +937,11 @@ let
 
   setWord =
     pages: idx: value:
-    pages // { "${toString idx}" = u32 value; };
+    let
+      key = toString idx;
+      v = u32 value;
+    in
+    if v == 0 then builtins.removeAttrs pages [ key ] else pages // { "${key}" = v; };
 
   byteAt =
     word: offset:
@@ -1045,6 +1068,35 @@ let
             st = setPageCount new st;
             results = [ old ];
           };
+      fill =
+        dst: value: len: st:
+        builtins.seq (checkAccess "memory.fill" len dst st) (
+          let
+            byte = floorMod value 256;
+            pages = builtins.foldl' (
+              acc: i:
+              setByteUnchecked acc (dst + i) byte
+            ) (getPages st) (range len);
+          in
+          setPages pages st
+        );
+      copy =
+        dst: src: len: st:
+        let
+          bytes = loadBytes "memory.copy" len src st;
+        in
+        storeBytes "memory.copy" bytes dst st;
+      init =
+        segIndex: dst: src: len: st:
+        let
+          segment = getDataSegment segIndex st;
+          bytes =
+            builtins.seq (checkSegmentAccess "memory.init segment" segment src len) (
+              builtins.genList (i: elemAt segment (src + i)) len
+            );
+        in
+        storeBytes "memory.init" bytes dst st;
+      data_drop = segIndex: st: setDataSegment segIndex [ ] st;
     };
 
   globals =
@@ -1077,16 +1129,49 @@ let
   table =
     let
       getTable = tableIndex: st: (tables st).${toString tableIndex} or { elems = { }; size = 0; };
+      setTable =
+        tableIndex: tableValue: st:
+        st
+        // {
+          tables = (tables st) // { "${toString tableIndex}" = tableValue; };
+        };
       getEntry =
-        tableIndex: elemIndex: st:
-        (getTable tableIndex st).elems.${toString elemIndex} or null;
+        tableValue: elemIndex:
+        tableValue.elems.${toString elemIndex} or null;
+      setEntry =
+        tableValue: elemIndex: entry:
+        let
+          key = toString elemIndex;
+          elems = tableValue.elems or { };
+        in
+        tableValue
+        // {
+          elems = if entry == null then builtins.removeAttrs elems [ key ] else elems // { "${key}" = entry; };
+        };
+      checkTableAccess =
+        op: tableValue: offset: width:
+        let
+          end = offset + width;
+        in
+        if offset < 0 || end > (tableValue.size or 0) then
+          throw "wasm trap: ${op} out of bounds"
+        else
+          true;
+      elemSegments = st: st.elemSegments or { };
+      getElemSegment = segIndex: st: (elemSegments st).${toString segIndex} or [ ];
+      setElemSegment =
+        segIndex: values: st:
+        st
+        // {
+          elemSegments = (elemSegments st) // { "${toString segIndex}" = values; };
+        };
       applyArgs = builtins.foldl' (fn: arg: fn arg);
     in
     {
       call =
         tableIndex: typeIndex: funcs: elemIndex: args: st:
         let
-          entry = getEntry tableIndex elemIndex st;
+          entry = getEntry (getTable tableIndex st) elemIndex;
         in
         if entry == null then
           throw "wasm trap: undefined table element"
@@ -1098,6 +1183,47 @@ let
           in
           (applyArgs fn args) st;
       size = tableIndex: st: (getTable tableIndex st).size or 0;
+      init =
+        tableIndex: segIndex: dst: src: len: st:
+        let
+          tableValue = getTable tableIndex st;
+          segment = getElemSegment segIndex st;
+          checked =
+            builtins.seq (checkTableAccess "table.init" tableValue dst len) (
+              builtins.seq (checkSegmentAccess "table.init segment" segment src len) true
+            );
+          entries =
+            builtins.seq checked (builtins.genList (i: elemAt segment (src + i)) len);
+          newTable =
+            builtins.seq checked (
+              builtins.foldl' (
+                acc: i:
+                setEntry acc (dst + i) (elemAt entries i)
+              ) tableValue (range len)
+            );
+        in
+        builtins.deepSeq newTable (setTable tableIndex newTable st);
+      elem_drop = segIndex: st: setElemSegment segIndex [ ] st;
+      copy =
+        dstTableIndex: srcTableIndex: dst: src: len: st:
+        let
+          dstTable = getTable dstTableIndex st;
+          srcTable = getTable srcTableIndex st;
+          checked =
+            builtins.seq (checkTableAccess "table.copy destination" dstTable dst len) (
+              builtins.seq (checkTableAccess "table.copy source" srcTable src len) true
+            );
+          entries =
+            builtins.seq checked (builtins.genList (i: getEntry srcTable (src + i)) len);
+          newDstTable =
+            builtins.seq checked (
+              builtins.foldl' (
+                acc: i:
+                setEntry acc (dst + i) (elemAt entries i)
+              ) dstTable (range len)
+            );
+        in
+        builtins.deepSeq newDstTable (setTable dstTableIndex newDstTable st);
     };
 in
 rec {
