@@ -5,6 +5,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cranelift_entity::EntityRef;
 use serde_json::Value as JsonValue;
 use wasm2nix::translator::NixModule;
 use wast::core::{NanPattern, WastArgCore, WastRetCore};
@@ -59,14 +60,18 @@ fn run_wast_script(script: &str) -> Result<(), String> {
     let mut current_module: Option<String> = None;
     let mut next_anon_module = 0usize;
 
-    for directive in wast.directives {
+    for (directive_index, directive) in wast.directives.into_iter().enumerate() {
         match directive {
             WastDirective::Module(mut module) => {
                 let module_name = module.name().map(|id| id.name().to_string());
                 let wasm = module.encode().map_err(|e| e.to_string())?;
                 let translated = NixModule::translate(&wasm).map_err(|e| e.to_string())?;
                 let imported_tables = translated.info.imported_tables.clone();
+                let imported_globals = translated.info.imported_globals.clone();
+                let imported_memories = translated.info.imported_memories.clone();
                 let table_exports = table_exports(&translated);
+                let global_exports = global_exports(&translated);
+                let memory_exports = memory_exports(&translated);
                 let nix = wasm2nix::clif_to_nix::lower_module(&translated).render();
                 let path = write_generated_module(&nix)?;
                 let key = module_name.unwrap_or_else(|| {
@@ -81,10 +86,16 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                         path,
                         state: Some(state),
                         imported_tables,
+                        imported_globals,
+                        imported_memories,
                         table_exports,
+                        global_exports,
+                        memory_exports,
                     },
                 );
                 merge_imported_table_initializers(&key, &mut modules, &aliases)?;
+                sync_memory_imports_to_targets(&key, &mut modules, &aliases);
+                sync_global_imports_from_targets(&mut modules, &aliases);
                 current_module = Some(key);
             }
             WastDirective::Register { name, module, .. } => {
@@ -108,21 +119,32 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                             invoke.name,
                             &invoke.args,
                             state.as_deref(),
-                        )?;
+                        )
+                        .map_err(|e| {
+                            format!(
+                                "directive {directive_index}: invoke {} failed: {e}",
+                                invoke.name
+                            )
+                        })?;
                         modules
                             .get_mut(&key)
                             .ok_or_else(|| format!("unknown module {key}"))?
                             .state = Some(actual.state.clone());
+                        sync_global_imports_to_targets(&key, &mut modules, &aliases);
+                        sync_memory_imports_to_targets(&key, &mut modules, &aliases);
+                        sync_global_imports_from_targets(&mut modules, &aliases);
                         actual
                     }
                     WastExecute::Get { module, global, .. } => {
                         let key = select_module_key(module, current_module.as_deref(), &aliases)?;
+                        sync_global_imports_from_targets(&mut modules, &aliases);
                         let state = modules
                             .get(&key)
                             .ok_or_else(|| format!("unknown module {key}"))?
                             .state
                             .clone();
-                        eval_get(&key, &modules, &aliases, global, state.as_deref())?
+                        eval_get(&key, &modules, &aliases, global, state.as_deref())
+                            .map_err(|e| format!("directive {directive_index}: {e}"))?
                     }
                     WastExecute::Wat(_) => {
                         return Err(
@@ -134,7 +156,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                 let expected = expected_results_json(&results)?;
                 if !results_match(&results, &actual.results)? {
                     return Err(format!(
-                        "assert_return mismatch: expected {expected}, got {}",
+                        "directive {directive_index}: assert_return mismatch: expected {expected}, got {}",
                         actual.results
                     ));
                 }
@@ -168,7 +190,14 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                         return Err(format!("assert_trap get {global} did not trap"));
                     }
                 }
-                WastExecute::Wat(_) => {}
+                WastExecute::Wat(mut wat) => {
+                    apply_trapping_module_side_effects(
+                        directive_index,
+                        &mut wat,
+                        &mut modules,
+                        &aliases,
+                    )?;
+                }
             },
             WastDirective::Invoke(invoke) => {
                 let key = select_module_key(invoke.module, current_module.as_deref(), &aliases)?;
@@ -189,6 +218,9 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                     .get_mut(&key)
                     .ok_or_else(|| format!("unknown module {key}"))?
                     .state = Some(actual.state);
+                sync_global_imports_to_targets(&key, &mut modules, &aliases);
+                sync_memory_imports_to_targets(&key, &mut modules, &aliases);
+                sync_global_imports_from_targets(&mut modules, &aliases);
             }
             _ => {}
         }
@@ -201,7 +233,11 @@ struct HarnessModule {
     path: PathBuf,
     state: Option<String>,
     imported_tables: Vec<(String, String)>,
+    imported_globals: Vec<(String, String)>,
+    imported_memories: Vec<(String, String)>,
     table_exports: HashMap<String, u32>,
+    global_exports: HashMap<String, u32>,
+    memory_exports: HashMap<String, u32>,
 }
 
 fn select_module_key(
@@ -253,6 +289,36 @@ fn table_exports(module: &NixModule) -> HashMap<String, u32> {
         .collect()
 }
 
+fn global_exports(module: &NixModule) -> HashMap<String, u32> {
+    module
+        .info
+        .globals
+        .iter()
+        .flat_map(|(idx, global)| {
+            global
+                .export_names
+                .iter()
+                .cloned()
+                .map(move |name| (name, idx.as_u32()))
+        })
+        .collect()
+}
+
+fn memory_exports(module: &NixModule) -> HashMap<String, u32> {
+    module
+        .info
+        .memories
+        .iter()
+        .flat_map(|(idx, memory)| {
+            memory
+                .export_names
+                .iter()
+                .cloned()
+                .map(move |name| (name, idx.as_u32()))
+        })
+        .collect()
+}
+
 struct InvokeResult {
     results: String,
     state: String,
@@ -268,6 +334,24 @@ fn eval_instantiate(
     let imports = imports_expr(module_key, aliases, &world.module_vars);
     let expr = format!(
         "let rt = {}; {} m_new = import {} rt {imports}; i = m_new.instantiate {{}}; in i.st",
+        rt_import_expr()?,
+        world.binds,
+        module.display(),
+    );
+    let value = eval_nix_json(&expr)?;
+    json_to_nix(&value)
+}
+
+fn eval_initial_state(
+    module: &PathBuf,
+    module_key: &str,
+    modules: &HashMap<String, HarnessModule>,
+    aliases: &HashMap<String, String>,
+) -> Result<String, String> {
+    let world = EvalWorld::new(modules, aliases);
+    let imports = imports_expr(module_key, aliases, &world.module_vars);
+    let expr = format!(
+        "let rt = {}; {} m_new = import {} rt {imports}; in m_new.\"__wasm2nix\".st0",
         rt_import_expr()?,
         world.binds,
         module.display(),
@@ -442,7 +526,326 @@ fn imports_expr(
 }
 
 fn spectest_imports_expr() -> String {
-    "{ global_i32 = 666; global_i64 = 666; global_f32 = 1143383654; global_f64 = 4649074691427585229; memory = { pageCount = 1; maxPageCount = 2; pages = { }; }; print = st: { results = [ ]; inherit st; }; print_i32 = _v: st: { results = [ ]; inherit st; }; print_i64 = _v: st: { results = [ ]; inherit st; }; print_f32 = _v: st: { results = [ ]; inherit st; }; print_f64 = _v: st: { results = [ ]; inherit st; }; print_i32_f32 = _i: _f: st: { results = [ ]; inherit st; }; print_f64_f64 = _a: _b: st: { results = [ ]; inherit st; }; }".to_string()
+    "{ global_i32 = 666; global_i64 = 666; global_f32 = 1143383654; global_f64 = 4649074691427585229; memory = { pageCount = 1; maxPageCount = 2; pages = { }; }; table = { size = 10; maxSize = 20; elems = { }; }; print = st: { results = [ ]; inherit st; }; print_i32 = _v: st: { results = [ ]; inherit st; }; print_i64 = _v: st: { results = [ ]; inherit st; }; print_f32 = _v: st: { results = [ ]; inherit st; }; print_f64 = _v: st: { results = [ ]; inherit st; }; print_i32_f32 = _i: _f: st: { results = [ ]; inherit st; }; print_f64_f64 = _a: _b: st: { results = [ ]; inherit st; }; }".to_string()
+}
+
+fn apply_trapping_module_side_effects(
+    directive_index: usize,
+    wat: &mut wast::Wat<'_>,
+    modules: &mut HashMap<String, HarnessModule>,
+    aliases: &HashMap<String, String>,
+) -> Result<(), String> {
+    let wasm = wat
+        .encode()
+        .map_err(|e| format!("directive {directive_index}: {e}"))?;
+    let translated =
+        NixModule::translate(&wasm).map_err(|e| format!("directive {directive_index}: {e}"))?;
+    let nix = wasm2nix::clif_to_nix::lower_module(&translated).render();
+    let path = write_generated_module(&nix)?;
+    let transient_key = format!("__trap{directive_index}");
+    let source_state = eval_initial_state(&path, &transient_key, modules, aliases)
+        .map_err(|e| format!("directive {directive_index}: {e}"))?;
+    modules.insert(
+        transient_key,
+        HarnessModule {
+            path,
+            state: Some(source_state.clone()),
+            imported_tables: translated.info.imported_tables.clone(),
+            imported_globals: translated.info.imported_globals.clone(),
+            imported_memories: translated.info.imported_memories.clone(),
+            table_exports: table_exports(&translated),
+            global_exports: global_exports(&translated),
+            memory_exports: memory_exports(&translated),
+        },
+    );
+    apply_trapping_table_side_effects(&translated, &source_state, modules, aliases);
+    apply_trapping_memory_side_effects(&translated, &source_state, modules, aliases);
+    Ok(())
+}
+
+fn apply_trapping_table_side_effects(
+    module: &NixModule,
+    source_state: &str,
+    modules: &mut HashMap<String, HarnessModule>,
+    aliases: &HashMap<String, String>,
+) {
+    for init in &module.info.table_initializers {
+        if init.base.is_some() {
+            continue;
+        }
+        let Some((import_module, import_field)) =
+            module.info.imported_tables.get(init.table_index.index())
+        else {
+            continue;
+        };
+        let table_size = module.info.tables[init.table_index].entity.minimum;
+        let end = init.offset.saturating_add(init.elements.len() as u32);
+        if end > table_size {
+            break;
+        }
+
+        let target_key = aliases
+            .get(import_module)
+            .cloned()
+            .unwrap_or_else(|| import_module.clone());
+        let Some(target_module) = modules.get(&target_key) else {
+            continue;
+        };
+        let Some(target_table_index) = target_module.table_exports.get(import_field).copied()
+        else {
+            continue;
+        };
+        let Some(target_state) = target_module.state.clone() else {
+            continue;
+        };
+        let merged = merge_table_entries_expr(
+            &target_state,
+            target_table_index,
+            source_state,
+            init.table_index.as_u32(),
+            init.offset,
+            init.elements.len() as u32,
+        );
+        if let Some(module) = modules.get_mut(&target_key) {
+            module.state = Some(merged);
+        }
+    }
+}
+
+fn merge_table_entries_expr(
+    target_state: &str,
+    target_table_index: u32,
+    source_state: &str,
+    source_table_index: u32,
+    offset: u32,
+    len: u32,
+) -> String {
+    let entries = (0..len)
+        .map(|i| {
+            let slot = offset + i;
+            format!(
+                "{} = srcTable.elems.{};",
+                nix_string(&slot.to_string()),
+                nix_string(&slot.to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "(let dstSt = {target_state}; srcSt = {source_state}; dstTables = dstSt.tables or {{}}; srcTables = srcSt.tables or {{}}; dstTable = dstTables.{} or {{ size = 0; elems = {{}}; }}; srcTable = srcTables.{} or {{ elems = {{}}; }}; mergedTable = dstTable // {{ elems = (dstTable.elems or {{}}) // {{ {entries} }}; }}; in dstSt // {{ tables = dstTables // {{ {} = mergedTable; }}; }})",
+        nix_string(&target_table_index.to_string()),
+        nix_string(&source_table_index.to_string()),
+        nix_string(&target_table_index.to_string())
+    )
+}
+
+fn apply_trapping_memory_side_effects(
+    module: &NixModule,
+    source_state: &str,
+    modules: &mut HashMap<String, HarnessModule>,
+    aliases: &HashMap<String, String>,
+) {
+    for init in &module.info.data_initializers {
+        if init.base.is_some() {
+            continue;
+        }
+        let Some((import_module, import_field)) =
+            module.info.imported_memories.get(init.memory_index.index())
+        else {
+            continue;
+        };
+        let memory_min_pages = module.info.memories[init.memory_index].entity.minimum;
+        let end = init.offset.saturating_add(init.data.len() as u64);
+        if end > memory_min_pages.saturating_mul(65536) {
+            break;
+        }
+
+        let target_key = aliases
+            .get(import_module)
+            .cloned()
+            .unwrap_or_else(|| import_module.clone());
+        let Some(target_module) = modules.get(&target_key) else {
+            continue;
+        };
+        let Some(_target_memory_index) = target_module.memory_exports.get(import_field).copied()
+        else {
+            continue;
+        };
+        let Some(target_state) = target_module.state.clone() else {
+            continue;
+        };
+        let merged =
+            merge_memory_words_expr(&target_state, source_state, init.offset, init.data.len());
+        if let Some(module) = modules.get_mut(&target_key) {
+            module.state = Some(merged);
+        }
+    }
+}
+
+fn merge_memory_words_expr(
+    target_state: &str,
+    source_state: &str,
+    offset: u64,
+    len: usize,
+) -> String {
+    let first_word = offset / 4;
+    let last_word = if len == 0 {
+        first_word
+    } else {
+        (offset + len as u64 - 1) / 4
+    };
+    let entries = (first_word..=last_word)
+        .map(|word| {
+            format!(
+                "{} = srcPages.{};",
+                nix_string(&word.to_string()),
+                nix_string(&word.to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "(let dstSt = {target_state}; srcSt = {source_state}; dstMem = dstSt.mem or {{}}; srcMem = srcSt.mem or {{}}; dstPages = dstMem.pages or {{}}; srcPages = srcMem.pages or {{}}; in dstSt // {{ mem = dstMem // {{ pages = dstPages // {{ {entries} }}; }}; }})"
+    )
+}
+
+fn sync_global_imports_from_targets(
+    modules: &mut HashMap<String, HarnessModule>,
+    aliases: &HashMap<String, String>,
+) {
+    let mut keys = modules.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+
+    for source_key in keys {
+        let Some(source_module) = modules.get(&source_key) else {
+            continue;
+        };
+        let mut source_state = match source_module.state.clone() {
+            Some(state) => state,
+            None => continue,
+        };
+        let imports = source_module.imported_globals.clone();
+
+        for (source_global_index, (import_module, import_field)) in imports.iter().enumerate() {
+            let target_key = aliases
+                .get(import_module)
+                .cloned()
+                .unwrap_or_else(|| import_module.clone());
+            let Some(target_module) = modules.get(&target_key) else {
+                continue;
+            };
+            let Some(target_global_index) = target_module.global_exports.get(import_field).copied()
+            else {
+                continue;
+            };
+            let Some(target_state) = target_module.state.clone() else {
+                continue;
+            };
+            source_state = sync_global_state_expr(
+                &source_state,
+                source_global_index as u32,
+                &target_state,
+                target_global_index,
+            );
+        }
+
+        if let Some(module) = modules.get_mut(&source_key) {
+            module.state = Some(source_state);
+        }
+    }
+}
+
+fn sync_global_imports_to_targets(
+    source_key: &str,
+    modules: &mut HashMap<String, HarnessModule>,
+    aliases: &HashMap<String, String>,
+) {
+    let Some(source_module) = modules.get(source_key) else {
+        return;
+    };
+    let Some(source_state) = source_module.state.clone() else {
+        return;
+    };
+    let imports = source_module.imported_globals.clone();
+
+    for (source_global_index, (import_module, import_field)) in imports.iter().enumerate() {
+        let target_key = aliases
+            .get(import_module)
+            .cloned()
+            .unwrap_or_else(|| import_module.clone());
+        let Some(target_module) = modules.get(&target_key) else {
+            continue;
+        };
+        let Some(target_global_index) = target_module.global_exports.get(import_field).copied()
+        else {
+            continue;
+        };
+        let Some(target_state) = target_module.state.clone() else {
+            continue;
+        };
+        let synced = sync_global_state_expr(
+            &target_state,
+            target_global_index,
+            &source_state,
+            source_global_index as u32,
+        );
+        if let Some(module) = modules.get_mut(&target_key) {
+            module.state = Some(synced);
+        }
+    }
+}
+
+fn sync_global_state_expr(
+    dst_state: &str,
+    dst_global_index: u32,
+    src_state: &str,
+    src_global_index: u32,
+) -> String {
+    format!(
+        "(let dstSt = {dst_state}; srcSt = {src_state}; dstGlobals = dstSt.globals or {{}}; srcGlobals = srcSt.globals or {{}}; value = srcGlobals.{} or 0; in dstSt // {{ globals = dstGlobals // {{ {} = value; }}; }})",
+        nix_string(&src_global_index.to_string()),
+        nix_string(&dst_global_index.to_string())
+    )
+}
+
+fn sync_memory_imports_to_targets(
+    source_key: &str,
+    modules: &mut HashMap<String, HarnessModule>,
+    aliases: &HashMap<String, String>,
+) {
+    let Some(source_module) = modules.get(source_key) else {
+        return;
+    };
+    let Some(source_state) = source_module.state.clone() else {
+        return;
+    };
+    let imports = source_module.imported_memories.clone();
+
+    for (source_memory_index, (import_module, import_field)) in imports.iter().enumerate() {
+        let target_key = aliases
+            .get(import_module)
+            .cloned()
+            .unwrap_or_else(|| import_module.clone());
+        let Some(target_module) = modules.get(&target_key) else {
+            continue;
+        };
+        let Some(_target_memory_index) = target_module.memory_exports.get(import_field).copied()
+        else {
+            continue;
+        };
+        let Some(target_state) = target_module.state.clone() else {
+            continue;
+        };
+        let synced =
+            sync_memory_state_expr(&target_state, &source_state, source_memory_index as u32);
+        if let Some(module) = modules.get_mut(&target_key) {
+            module.state = Some(synced);
+        }
+    }
+}
+
+fn sync_memory_state_expr(dst_state: &str, src_state: &str, _src_memory_index: u32) -> String {
+    format!("(let dstSt = {dst_state}; srcSt = {src_state}; in dstSt // {{ mem = srcSt.mem; }})")
 }
 
 fn merge_imported_table_initializers(

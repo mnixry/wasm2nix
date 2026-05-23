@@ -41,6 +41,7 @@ pub fn lower_module(module: &NixModule) -> Expr {
                         vec![
                             (AttrKey::ident("funcs"), Expr::ident("funcs")),
                             (AttrKey::ident("moduleId"), Expr::ident("moduleId")),
+                            (AttrKey::ident("st0"), Expr::ident("st0")),
                         ],
                     ),
                 ),
@@ -121,10 +122,10 @@ fn lower_funcs_rec_attrset(module: &NixModule) -> Expr {
     let mut binds: Vec<(AttrKey, Expr)> = Vec::new();
 
     for (idx, (module_name, field_name)) in module.info.imported_funcs.iter().enumerate() {
-        let imported = Expr::select(
-            Expr::select(Expr::ident("imports"), AttrKey::string(module_name.clone())),
-            AttrKey::string(field_name.clone()),
-        );
+        let func_index = cranelift_wasm::FuncIndex::from_u32(idx as u32);
+        let sig_index = module.info.functions[func_index].entity;
+        let imported =
+            lower_imported_func(module_name, field_name, &module.info.signatures[sig_index]);
         binds.push((AttrKey::ident(format!("f{idx}")), imported));
     }
 
@@ -136,6 +137,41 @@ fn lower_funcs_rec_attrset(module: &NixModule) -> Expr {
     }
 
     Expr::attrset(true, binds)
+}
+
+fn lower_imported_func(module_name: &str, field_name: &str, sig: &ir::Signature) -> Expr {
+    let module = Expr::select(
+        Expr::ident("imports"),
+        AttrKey::string(module_name.to_string()),
+    );
+    let imported = Expr::select(module.clone(), AttrKey::string(field_name.to_string()));
+    let mut params = (0..sig.params.len())
+        .map(|idx| format!("arg{idx}"))
+        .collect::<Vec<_>>();
+    params.push("st".to_string());
+
+    let mut call_args = params
+        .iter()
+        .take(sig.params.len())
+        .cloned()
+        .map(Expr::ident)
+        .collect::<Vec<_>>();
+    call_args.push(lower_imported_extern_state(module));
+    let call = Expr::app(imported, call_args);
+    let body = Expr::let_in(
+        vec![("call".into(), call)],
+        Expr::attrset(
+            false,
+            vec![
+                (
+                    AttrKey::ident("results"),
+                    Expr::select(Expr::ident("call"), AttrKey::ident("results")),
+                ),
+                (AttrKey::ident("st"), Expr::ident("st")),
+            ],
+        ),
+    );
+    lambda_chain(&params, body)
 }
 
 fn lower_exports_attrset(module: &NixModule) -> Expr {
@@ -388,8 +424,40 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
                 .map(|(idx, entry)| (AttrKey::string(idx.to_string()), entry))
                 .collect(),
         );
-        table_binds.push((
-            AttrKey::string(table_index.as_u32().to_string()),
+
+        let table_expr = if let Some((module_name, field_name)) =
+            module.info.imported_tables.get(table_index.index())
+        {
+            let imported = lower_imported_table(module_name, field_name);
+            Expr::let_in(
+                vec![("importedTable".into(), imported)],
+                Expr::attrset(
+                    false,
+                    vec![
+                        (
+                            AttrKey::ident("size"),
+                            lower_attr_or(
+                                Expr::ident("importedTable"),
+                                "size",
+                                Expr::int(i64::from(table_decl.entity.minimum)),
+                            ),
+                        ),
+                        (
+                            AttrKey::ident("elems"),
+                            Expr::bin(
+                                BinOp::Update,
+                                lower_attr_or(
+                                    Expr::ident("importedTable"),
+                                    "elems",
+                                    Expr::attrset(false, vec![]),
+                                ),
+                                elems_expr,
+                            ),
+                        ),
+                    ],
+                ),
+            )
+        } else {
             Expr::attrset(
                 false,
                 vec![
@@ -399,11 +467,39 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
                     ),
                     (AttrKey::ident("elems"), elems_expr),
                 ],
-            ),
+            )
+        };
+
+        table_binds.push((
+            AttrKey::string(table_index.as_u32().to_string()),
+            table_expr,
         ));
     }
 
     Expr::attrset(false, table_binds)
+}
+
+fn lower_imported_table(module_name: &str, field_name: &str) -> Expr {
+    let module = Expr::select(
+        Expr::ident("imports"),
+        AttrKey::string(module_name.to_string()),
+    );
+    let imported = Expr::select(module.clone(), AttrKey::string(field_name.to_string()));
+    Expr::if_then_else(
+        Expr::bin(
+            BinOp::And,
+            Expr::app(builtin_is_attrs(), vec![imported.clone()]),
+            Expr::app(
+                builtin_has_attr(),
+                vec![Expr::string("get"), imported.clone()],
+            ),
+        ),
+        Expr::app(
+            Expr::select(imported.clone(), AttrKey::ident("get")),
+            vec![lower_imported_extern_state(module)],
+        ),
+        imported,
+    )
 }
 
 fn lower_element_segments(module: &NixModule) -> Expr {
@@ -433,7 +529,6 @@ fn lower_table_entry(module: &NixModule, func_index: cranelift_wasm::FuncIndex) 
     let Some(function) = module.info.functions.get(func_index) else {
         return Expr::ident("null");
     };
-    let sig_index = module.info.canonical_type_index(function.entity).as_u32();
     Expr::attrset(
         false,
         vec![
@@ -442,9 +537,32 @@ fn lower_table_entry(module: &NixModule, func_index: cranelift_wasm::FuncIndex) 
                 AttrKey::ident("func"),
                 Expr::int(i64::from(func_index.as_u32())),
             ),
-            (AttrKey::ident("type"), Expr::int(i64::from(sig_index))),
+            (
+                AttrKey::ident("type"),
+                lower_signature_id(module, function.entity),
+            ),
         ],
     )
+}
+
+fn lower_signature_id(module: &NixModule, sig_index: cranelift_wasm::TypeIndex) -> Expr {
+    Expr::string(signature_id(&module.info.signatures[sig_index]))
+}
+
+fn signature_id(sig: &ir::Signature) -> String {
+    let params = sig
+        .params
+        .iter()
+        .map(|param| param.value_type.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let returns = sig
+        .returns
+        .iter()
+        .map(|param| param.value_type.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("({params})->({returns})")
 }
 
 fn lower_imported_global(module_name: &str, field_name: &str) -> Expr {
@@ -598,7 +716,23 @@ fn lower_memory_export(_memory_index: u32) -> Expr {
 }
 
 fn lower_table_export(_table_index: u32) -> Expr {
-    Expr::select(Expr::ident("rt"), AttrKey::ident("table"))
+    Expr::bin(
+        BinOp::Update,
+        Expr::select(Expr::ident("rt"), AttrKey::ident("table")),
+        Expr::attrset(
+            false,
+            vec![(
+                AttrKey::ident("get"),
+                Expr::lambda(
+                    "st",
+                    Expr::select(
+                        Expr::select(Expr::ident("st"), AttrKey::ident("tables")),
+                        AttrKey::string(_table_index.to_string()),
+                    ),
+                ),
+            )],
+        ),
+    )
 }
 
 fn lower_global_export(global_index: u32, ty: WasmValType) -> Expr {
@@ -630,7 +764,7 @@ fn lower_global_export(global_index: u32, ty: WasmValType) -> Expr {
     )
 }
 
-fn lower_function(_module: &NixModule, _func_index: u32, func: &ir::Function) -> Expr {
+fn lower_function(module: &NixModule, _func_index: u32, func: &ir::Function) -> Expr {
     let entry = func
         .layout
         .entry_block()
@@ -657,7 +791,7 @@ fn lower_function(_module: &NixModule, _func_index: u32, func: &ir::Function) ->
     let mut block_binds: Vec<(AttrKey, Expr)> = Vec::new();
     for block in func.layout.blocks() {
         let bname = block_name(block);
-        let bexpr = lower_block(func, block, vmctx, &free_values);
+        let bexpr = lower_block(module, func, block, vmctx, &free_values);
         block_binds.push((AttrKey::ident(bname), bexpr));
     }
     let blocks_attrset = Expr::attrset(true, block_binds);
@@ -790,6 +924,7 @@ fn push_free_value(
 }
 
 fn lower_block(
+    module: &NixModule,
     func: &ir::Function,
     block: Block,
     vmctx: ir::Value,
@@ -813,7 +948,7 @@ fn lower_block(
     );
     params.push("st".into());
 
-    let body = lower_block_body(func, block, vmctx, free_values);
+    let body = lower_block_body(module, func, block, vmctx, free_values);
     lambda_chain(&params, body)
 }
 
@@ -823,6 +958,7 @@ struct Step {
 }
 
 fn lower_block_body(
+    module: &NixModule,
     func: &ir::Function,
     block: Block,
     vmctx: ir::Value,
@@ -839,7 +975,7 @@ fn lower_block_body(
     let mut st_name = "st".to_string();
 
     for inst in insts {
-        let (step, new_st) = lower_inst(func, inst, &st_name, vmctx);
+        let (step, new_st) = lower_inst(module, func, inst, &st_name, vmctx);
         if let Some(step) = step {
             steps.push(step);
         }
@@ -862,6 +998,7 @@ fn lower_block_body(
 }
 
 fn lower_inst(
+    module: &NixModule,
     func: &ir::Function,
     inst: Inst,
     st_name: &str,
@@ -1375,7 +1512,7 @@ fn lower_inst(
             };
 
             let callee = func.dfg.ext_funcs[fref].name.clone();
-            let (callee_expr, call_kind) = resolve_callee(func, callee);
+            let (callee_expr, call_kind) = resolve_callee(module, func, callee);
 
             match call_kind {
                 CallKind::Pure => {
@@ -1392,7 +1529,7 @@ fn lower_inst(
                 }
                 CallKind::Indirect {
                     table_index,
-                    type_index,
+                    type_id,
                 } => {
                     let tmp = format!("call_{}", inst.as_u32());
                     let new_st = format!("st_{}", inst.as_u32());
@@ -1412,7 +1549,7 @@ fn lower_inst(
                         callee_expr,
                         vec![
                             Expr::int(i64::from(table_index)),
-                            Expr::int(i64::from(type_index)),
+                            Expr::string(type_id),
                             Expr::ident("moduleId"),
                             Expr::ident("funcs"),
                             Expr::ident("funcRegistry"),
@@ -1666,15 +1803,19 @@ fn lower_block_call(
     Expr::app(Expr::ident(block_name(target)), args)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum CallKind {
     Pure,
     StatefulRecord,
     StatefulState,
-    Indirect { table_index: u32, type_index: u32 },
+    Indirect { table_index: u32, type_id: String },
 }
 
-fn resolve_callee(func: &ir::Function, name: ir::ExternalName) -> (Expr, CallKind) {
+fn resolve_callee(
+    module: &NixModule,
+    func: &ir::Function,
+    name: ir::ExternalName,
+) -> (Expr, CallKind) {
     match name {
         ir::ExternalName::User(user_ref) => {
             let user = &func.params.user_named_funcs()[user_ref];
@@ -1721,11 +1862,15 @@ fn resolve_callee(func: &ir::Function, name: ir::ExternalName) -> (Expr, CallKin
                         let encoded = other - intr::CALL_INDIRECT_BASE;
                         let table_index = encoded / intr::CALL_INDIRECT_STRIDE;
                         let type_index = encoded % intr::CALL_INDIRECT_STRIDE;
+                        let type_id = signature_id(
+                            &module.info.signatures
+                                [cranelift_wasm::TypeIndex::from_u32(type_index)],
+                        );
                         (
                             rt_fn(&["table", "call"]),
                             CallKind::Indirect {
                                 table_index,
-                                type_index,
+                                type_id,
                             },
                         )
                     }
@@ -2010,10 +2155,10 @@ mod tests {
         ];
         let nix = lower_wasm(&wasm);
 
-        assert!(nix.contains("rt.table.call 0 0 moduleId funcs funcRegistry"));
+        assert!(nix.contains("rt.table.call 0 \"(i32)->(i32)\" moduleId funcs funcRegistry"));
         assert!(nix.contains("tables = {"));
         assert!(nix.contains("module = moduleId;"));
         assert!(nix.contains("func = 0;"));
-        assert!(nix.contains("type = 0;"));
+        assert!(nix.contains("type = \"(i32)->(i32)\";"));
     }
 }
