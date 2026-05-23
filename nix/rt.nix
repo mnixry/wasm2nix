@@ -271,6 +271,7 @@ let
 
   i64IsZeroParts = parts: parts.lo == 0 && parts.hi == 0;
   i64IsNegativeParts = parts: parts.hi >= i32Sign;
+  i64PartsEq = lhs: rhs: lhs.lo == rhs.lo && lhs.hi == rhs.hi;
 
   i64BitSetParts =
     parts: bit:
@@ -322,6 +323,9 @@ let
   i64UnsignedGteParts =
     lhs: rhs:
     lhs.hi > rhs.hi || (lhs.hi == rhs.hi && lhs.lo >= rhs.lo);
+  i64UnsignedGtParts =
+    lhs: rhs:
+    i64UnsignedGteParts lhs rhs && !(i64PartsEq lhs rhs);
 
   i64ShlParts =
     parts: amount:
@@ -864,6 +868,358 @@ let
       in
       if q * b == a then f64FromExactInt "div" q else exactIntFloatError "f64" "div" "rounded result";
 
+  u64PartsFromNonNegative =
+    value:
+    {
+      lo = floorMod value u32Mod;
+      hi = value / u32Mod;
+    };
+
+  u64ZeroParts = { lo = 0; hi = 0; };
+  i32MaxParts = { lo = 2147483647; hi = 0; };
+  i32MinMagnitudeParts = { lo = i32Sign; hi = 0; };
+  i64MaxParts = { lo = u32Max; hi = 2147483647; };
+  i64MinMagnitudeParts = { lo = 0; hi = i32Sign; };
+
+  f32TruncInfo =
+    value:
+    let
+      parts = f32Parts value;
+      exp = parts.rawExp - 127;
+      sig = 8388608 + parts.frac;
+      magnitude =
+        if parts.rawExp == 0 || exp < 0 then
+          u64ZeroParts
+        else if exp > 63 then
+          u64ZeroParts
+        else if exp >= 23 then
+          i64ShlParts (u64PartsFromNonNegative sig) (exp - 23)
+        else
+          u64PartsFromNonNegative (sig / pow2 (23 - exp));
+    in
+    {
+      inherit (parts) sign;
+      isNan = parts.rawExp == 255 && parts.frac != 0;
+      isInf = parts.rawExp == 255 && parts.frac == 0;
+      overflowU64 = parts.rawExp != 0 && exp > 63;
+      parts = magnitude;
+    };
+
+  f64TruncInfo =
+    value:
+    let
+      parts = f64Parts value;
+      frac = parts.fracHi * u32Mod + parts.fracLo;
+      exp = parts.rawExp - 1023;
+      sig = 4503599627370496 + frac;
+      magnitude =
+        if parts.rawExp == 0 || exp < 0 then
+          u64ZeroParts
+        else if exp > 63 then
+          u64ZeroParts
+        else if exp >= 52 then
+          i64ShlParts (u64PartsFromNonNegative sig) (exp - 52)
+        else
+          u64PartsFromNonNegative (sig / pow2 (52 - exp));
+    in
+    {
+      inherit (parts) sign;
+      isNan = parts.rawExp == 2047 && frac != 0;
+      isInf = parts.rawExp == 2047 && frac == 0;
+      overflowU64 = parts.rawExp != 0 && exp > 63;
+      parts = magnitude;
+    };
+
+  truncInvalid = throw "wasm trap: invalid conversion to integer";
+  truncOverflow = throw "wasm trap: integer overflow";
+
+  truncInfo = ty: if ty == "f32" then f32TruncInfo else f64TruncInfo;
+  truncResultI64 = parts: i64FromParts parts;
+  truncNegResultI64 = parts: i64FromParts (i64NegParts parts);
+
+  truncToI32Signed =
+    saturating: floatTy: value:
+    let
+      info = (truncInfo floatTy) value;
+      tooPositive = info.overflowU64 || i64UnsignedGtParts info.parts i32MaxParts;
+      tooNegative = info.overflowU64 || i64UnsignedGtParts info.parts i32MinMagnitudeParts;
+      magnitude = if info.parts.hi == 0 then info.parts.lo else 0;
+    in
+    if info.isNan then
+      if saturating then 0 else truncInvalid
+    else if info.isInf then
+      if saturating then (if info.sign then i32Sign else 2147483647) else truncOverflow
+    else if info.sign then
+      if tooNegative then
+        if saturating then i32Sign else truncOverflow
+      else
+        u32 (0 - magnitude)
+    else if tooPositive then
+      if saturating then 2147483647 else truncOverflow
+    else
+      u32 magnitude;
+
+  truncToI32Unsigned =
+    saturating: floatTy: value:
+    let
+      info = (truncInfo floatTy) value;
+      tooPositive = info.overflowU64 || info.parts.hi != 0;
+      negativeNonZero = info.sign && !(i64IsZeroParts info.parts);
+    in
+    if info.isNan then
+      if saturating then 0 else truncInvalid
+    else if info.isInf then
+      if saturating then (if info.sign then 0 else u32Max) else truncOverflow
+    else if negativeNonZero then
+      if saturating then 0 else truncOverflow
+    else if tooPositive then
+      if saturating then u32Max else truncOverflow
+    else
+      u32 info.parts.lo;
+
+  truncToI64Signed =
+    saturating: floatTy: value:
+    let
+      info = (truncInfo floatTy) value;
+      tooPositive = info.overflowU64 || i64UnsignedGtParts info.parts i64MaxParts;
+      tooNegative = info.overflowU64 || i64UnsignedGtParts info.parts i64MinMagnitudeParts;
+    in
+    if info.isNan then
+      if saturating then 0 else truncInvalid
+    else if info.isInf then
+      if saturating then (if info.sign then i64Min else i64Max) else truncOverflow
+    else if info.sign then
+      if tooNegative then
+        if saturating then i64Min else truncOverflow
+      else
+        truncNegResultI64 info.parts
+    else if tooPositive then
+      if saturating then i64Max else truncOverflow
+    else
+      truncResultI64 info.parts;
+
+  truncToI64Unsigned =
+    saturating: floatTy: value:
+    let
+      info = (truncInfo floatTy) value;
+      negativeNonZero = info.sign && !(i64IsZeroParts info.parts);
+    in
+    if info.isNan then
+      if saturating then 0 else truncInvalid
+    else if info.isInf then
+      if saturating then (if info.sign then 0 else -1) else truncOverflow
+    else if negativeNonZero then
+      if saturating then 0 else truncOverflow
+    else if info.overflowU64 then
+      if saturating then -1 else truncOverflow
+    else
+      truncResultI64 info.parts;
+
+  u64BitLengthParts = parts: 64 - clzBy 64 i64BitSetParts parts;
+
+  u64LowBits =
+    parts: bits:
+    if bits <= 0 then
+      0
+    else if bits < 32 then
+      floorMod parts.lo (pow2 bits)
+    else if bits == 32 then
+      parts.lo
+    else
+      parts.lo + floorMod parts.hi (pow2 (bits - 32)) * u32Mod;
+
+  u64PartsToSmall = parts: parts.hi * u32Mod + parts.lo;
+
+  u64RoundToPrecision =
+    precision: parts:
+    let
+      bitLength = u64BitLengthParts parts;
+    in
+    if bitLength == 0 then
+      {
+        isZero = true;
+        exponent = 0;
+        significand = 0;
+      }
+    else
+      let
+        exponent = bitLength - 1;
+        rounded =
+          if bitLength <= precision then
+            u64PartsToSmall parts * pow2 (precision - bitLength)
+          else
+            let
+              shift = bitLength - precision;
+              quotient = u64PartsToSmall (i64ShrUParts parts shift);
+              remainder = u64LowBits parts shift;
+              half = pow2 (shift - 1);
+              roundUp = remainder > half || (remainder == half && floorMod quotient 2 == 1);
+            in
+            quotient + (if roundUp then 1 else 0);
+        carry = rounded == pow2 precision;
+      in
+      {
+        isZero = false;
+        exponent = if carry then exponent + 1 else exponent;
+        significand = if carry then pow2 (precision - 1) else rounded;
+      };
+
+  f32FromUnsignedParts =
+    sign: parts:
+    let
+      rounded = u64RoundToPrecision 24 parts;
+      signBit = if sign && !rounded.isZero then i32Sign else 0;
+      frac = rounded.significand - 8388608;
+    in
+    if rounded.isZero then
+      signBit
+    else
+      u32 (signBit + (rounded.exponent + 127) * 8388608 + frac);
+
+  f64FromUnsignedParts =
+    sign: parts:
+    let
+      rounded = u64RoundToPrecision 53 parts;
+      signBit = if sign && !rounded.isZero then i32Sign else 0;
+      frac = rounded.significand - 4503599627370496;
+      fracHi = frac / u32Mod;
+      fracLo = floorMod frac u32Mod;
+    in
+    if rounded.isZero then
+      i64FromParts {
+        lo = 0;
+        hi = signBit;
+      }
+    else
+      i64FromParts {
+        lo = fracLo;
+        hi = u32 (signBit + (rounded.exponent + 1023) * 1048576 + fracHi);
+      };
+
+  f64FromRaw =
+    sign: rawExp: fracHi: fracLo:
+    i64FromParts {
+      lo = fracLo;
+      hi = u32 ((if sign then i32Sign else 0) + rawExp * 1048576 + fracHi);
+    };
+
+  roundSmallRight =
+    value: shift:
+    if shift <= 0 then
+      value * pow2 (0 - shift)
+    else
+      let
+        divisor = pow2 shift;
+        quotient = value / divisor;
+        remainder = floorMod value divisor;
+        half = pow2 (shift - 1);
+        roundUp = remainder > half || (remainder == half && floorMod quotient 2 == 1);
+      in
+      quotient + (if roundUp then 1 else 0);
+
+  f64PromoteF32 =
+    value:
+    let
+      parts = f32Parts value;
+      sign = parts.sign;
+    in
+    if parts.rawExp == 255 && parts.frac != 0 then
+      f64FromRaw false 2047 524288 0
+    else if parts.rawExp == 255 then
+      f64FromRaw sign 2047 0 0
+    else if parts.rawExp == 0 then
+      if parts.frac == 0 then
+        f64FromRaw sign 0 0 0
+      else
+        let
+          bitLength = intBitLength parts.frac;
+          exponent = bitLength - 150;
+          significand = parts.frac * pow2 (53 - bitLength);
+          frac = significand - 4503599627370496;
+        in
+        f64FromRaw sign (exponent + 1023) (frac / u32Mod) (floorMod frac u32Mod)
+    else
+      let
+        exponent = parts.rawExp - 127;
+        frac = parts.frac * pow2 29;
+      in
+      f64FromRaw sign (exponent + 1023) (frac / u32Mod) (floorMod frac u32Mod);
+
+  f32DemoteF64 =
+    value:
+    let
+      parts = f64Parts value;
+      signBit = if parts.sign then i32Sign else 0;
+      frac = parts.fracHi * u32Mod + parts.fracLo;
+    in
+    if parts.rawExp == 2047 && frac != 0 then
+      2143289344
+    else if parts.rawExp == 2047 then
+      u32 (signBit + 2139095040)
+    else if parts.rawExp == 0 then
+      signBit
+    else
+      let
+        exponent = parts.rawExp - 1023;
+        significand = 4503599627370496 + frac;
+      in
+      if exponent >= 128 then
+        u32 (signBit + 2139095040)
+      else if exponent >= -126 then
+        let
+          rounded = roundSmallRight significand 29;
+          carry = rounded == 16777216;
+          exponent2 = if carry then exponent + 1 else exponent;
+          significand2 = if carry then 8388608 else rounded;
+        in
+        if exponent2 >= 128 then
+          u32 (signBit + 2139095040)
+        else
+          u32 (signBit + (exponent2 + 127) * 8388608 + (significand2 - 8388608))
+      else if exponent < -150 then
+        signBit
+      else
+        let
+          rounded = roundSmallRight significand (0 - exponent - 97);
+        in
+        if rounded == 0 then
+          signBit
+        else if rounded == 8388608 then
+          u32 (signBit + 8388608)
+        else
+          u32 (signBit + rounded);
+
+  intMagnitudeParts =
+    signed: intTy: value:
+    if intTy == "i32" then
+      let
+        signedValue = toI32 value;
+        negative = signed && signedValue < 0;
+      in
+      {
+        sign = negative;
+        parts = u64PartsFromNonNegative (if negative then 0 - signedValue else u32 value);
+      }
+    else
+      let
+        parts = i64Parts value;
+        negative = signed && i64IsNegativeParts parts;
+      in
+      {
+        sign = negative;
+        parts = if negative then i64NegParts parts else parts;
+      };
+
+  convertIntToFloat =
+    signed: intTy: floatTy: value:
+    let
+      magnitude = intMagnitudeParts signed intTy value;
+    in
+    if floatTy == "f32" then
+      f32FromUnsignedParts magnitude.sign magnitude.parts
+    else
+      f64FromUnsignedParts magnitude.sign magnitude.parts;
+
   conv =
     {
       uextend = value: _ty: value;
@@ -874,6 +1230,66 @@ let
       sign_extend_8_i64 = value: checkI64 (signExtend 8 value);
       sign_extend_16_i64 = value: checkI64 (signExtend 16 value);
       sign_extend_32 = value: checkI64 (signExtend 32 value);
+      trunc_s = {
+        f32 = {
+          i32 = truncToI32Signed false "f32";
+          i64 = truncToI64Signed false "f32";
+        };
+        f64 = {
+          i32 = truncToI32Signed false "f64";
+          i64 = truncToI64Signed false "f64";
+        };
+      };
+      trunc_u = {
+        f32 = {
+          i32 = truncToI32Unsigned false "f32";
+          i64 = truncToI64Unsigned false "f32";
+        };
+        f64 = {
+          i32 = truncToI32Unsigned false "f64";
+          i64 = truncToI64Unsigned false "f64";
+        };
+      };
+      trunc_sat_s = {
+        f32 = {
+          i32 = truncToI32Signed true "f32";
+          i64 = truncToI64Signed true "f32";
+        };
+        f64 = {
+          i32 = truncToI32Signed true "f64";
+          i64 = truncToI64Signed true "f64";
+        };
+      };
+      trunc_sat_u = {
+        f32 = {
+          i32 = truncToI32Unsigned true "f32";
+          i64 = truncToI64Unsigned true "f32";
+        };
+        f64 = {
+          i32 = truncToI32Unsigned true "f64";
+          i64 = truncToI64Unsigned true "f64";
+        };
+      };
+      convert_s = {
+        i32 = {
+          f32 = convertIntToFloat true "i32" "f32";
+          f64 = convertIntToFloat true "i32" "f64";
+        };
+        i64 = {
+          f32 = convertIntToFloat true "i64" "f32";
+          f64 = convertIntToFloat true "i64" "f64";
+        };
+      };
+      convert_u = {
+        i32 = {
+          f32 = convertIntToFloat false "i32" "f32";
+          f64 = convertIntToFloat false "i32" "f64";
+        };
+        i64 = {
+          f32 = convertIntToFloat false "i64" "f32";
+          f64 = convertIntToFloat false "i64" "f64";
+        };
+      };
     };
 
   getMem = st: st.mem or { };
@@ -1241,6 +1657,7 @@ rec {
     neg = value: u32 (builtins.bitXor (u32 value) i32Sign);
     abs = f32Abs;
     sqrt = value: if f32IsZero value then u32 value else unsupportedUnaryFloat "f32" "sqrt" value;
+    demote_f64 = f32DemoteF64;
   };
 
   f64 = {
@@ -1253,6 +1670,7 @@ rec {
     abs =
       f64MapParts (parts: parts // { hi = builtins.bitAnd parts.hi 2147483647; });
     sqrt = value: if f64IsZero value then value else unsupportedUnaryFloat "f64" "sqrt" value;
+    promote_f32 = f64PromoteF32;
   };
 
   inherit cmp cmp_i64 fcmp conv mem global table;

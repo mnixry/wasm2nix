@@ -180,6 +180,74 @@ lib.debug.runTests {
     expr = rt.conv.sign_extend_32 2147483648;
     expected = -2147483648;
   };
+  test_i32_trunc_f32_s = {
+    expr = rt.conv.trunc_s.f32.i32 1065353216;
+    expected = 1;
+  };
+  test_i32_trunc_f32_s_nan_traps = {
+    expr = tryOk (rt.conv.trunc_s.f32.i32 2143289344);
+    expected = false;
+  };
+  test_i32_trunc_f32_s_overflow_traps = {
+    expr = tryOk (rt.conv.trunc_s.f32.i32 1325400064);
+    expected = false;
+  };
+  test_i32_trunc_sat_f32_s_nan_is_zero = {
+    expr = rt.conv.trunc_sat_s.f32.i32 2143289344;
+    expected = 0;
+  };
+  test_i32_trunc_sat_f32_s_overflow_clamps = {
+    expr = rt.conv.trunc_sat_s.f32.i32 1325400064;
+    expected = 2147483647;
+  };
+  test_i64_trunc_f64_u_large = {
+    expr = rt.conv.trunc_u.f64.i64 4846369599423283200;
+    expected = 10000000000000000;
+  };
+  test_i64_trunc_sat_f64_u_overflow_clamps = {
+    expr = rt.conv.trunc_sat_u.f64.i64 4895412794951729152;
+    expected = -1;
+  };
+  test_f32_convert_i32_s_rounds_to_even_down = {
+    expr = rt.conv.convert_s.i32.f32 16777217;
+    expected = 1266679808;
+  };
+  test_f32_convert_i32_s_rounds_to_even_up = {
+    expr = rt.conv.convert_s.i32.f32 16777219;
+    expected = 1266679810;
+  };
+  test_f64_convert_i64_s_rounds_to_even = {
+    expr = rt.conv.convert_s.i64.f64 9007199254740993;
+    expected = 4845873199050653696;
+  };
+  test_f32_convert_i64_u_max_rounds_to_2p64 = {
+    expr = rt.conv.convert_u.i64.f32 (-1);
+    expected = 1602224128;
+  };
+  test_f64_convert_i64_u_max_rounds_to_2p64 = {
+    expr = rt.conv.convert_u.i64.f64 (-1);
+    expected = 4895412794951729152;
+  };
+  test_f64_promote_f32_one = {
+    expr = rt.f64.promote_f32 1065353216;
+    expected = 4607182418800017408;
+  };
+  test_f64_promote_f32_min_subnormal = {
+    expr = rt.f64.promote_f32 1;
+    expected = 3936146074321813504;
+  };
+  test_f32_demote_f64_one = {
+    expr = rt.f32.demote_f64 4607182418800017408;
+    expected = 1065353216;
+  };
+  test_f32_demote_f64_tiny_negative_preserves_zero_sign = {
+    expr = rt.f32.demote_f64 (-9223372036854775807);
+    expected = 2147483648;
+  };
+  test_f32_demote_f64_rounds_to_even_up = {
+    expr = rt.f32.demote_f64 4607182419068452865;
+    expected = 1065353217;
+  };
 
   # Little-endian memory behavior via i32 store/load
   # 16909060 == 0x01020304, bytes in memory are [4,3,2,1]

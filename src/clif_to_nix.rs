@@ -330,10 +330,7 @@ fn lower_table_entry(module: &NixModule, func_index: cranelift_wasm::FuncIndex) 
     let Some(function) = module.info.functions.get(func_index) else {
         return Expr::ident("null");
     };
-    let sig_index = module
-        .info
-        .canonical_type_index(function.entity)
-        .as_u32();
+    let sig_index = module.info.canonical_type_index(function.entity).as_u32();
     Expr::attrset(
         false,
         vec![
@@ -658,6 +655,14 @@ fn lower_inst(
         Some(Step { binds, force })
     };
 
+    if op == Opcode::Bitcast {
+        let out = results[0];
+        let arg = data.arguments(&func.dfg.value_lists)[0];
+        let a = value_expr(func, arg, st_name, vmctx);
+        let binds = vec![(value_name(out), a)];
+        return (seq_on_result(binds), None);
+    }
+
     match data {
         InstructionData::UnaryImm { imm, .. } if op == Opcode::Iconst => {
             let dst = results[0];
@@ -749,6 +754,85 @@ fn lower_inst(
                     // With our representation, bitcast between i32<->f32 and i64<->f64 is identity.
                     let a = value_expr(func, *arg, st_name, vmctx);
                     let binds = vec![(value_name(out), a)];
+                    (seq_on_result(binds), None)
+                }
+                Opcode::FcvtToSint
+                | Opcode::FcvtToUint
+                | Opcode::FcvtToSintSat
+                | Opcode::FcvtToUintSat => {
+                    let out = results[0];
+                    let in_ty = func.dfg.value_type(*arg);
+                    let out_ty = func.dfg.value_type(out);
+                    let float_key = if in_ty == F32 {
+                        "f32"
+                    } else if in_ty == F64 {
+                        "f64"
+                    } else {
+                        "unknown"
+                    };
+                    let int_key = if out_ty == I32 {
+                        "i32"
+                    } else if out_ty == I64 {
+                        "i64"
+                    } else {
+                        "unknown"
+                    };
+                    let conv_name = match op {
+                        Opcode::FcvtToSint => "trunc_s",
+                        Opcode::FcvtToUint => "trunc_u",
+                        Opcode::FcvtToSintSat => "trunc_sat_s",
+                        Opcode::FcvtToUintSat => "trunc_sat_u",
+                        _ => unreachable!(),
+                    };
+                    let a = value_expr(func, *arg, st_name, vmctx);
+                    let binds = vec![(
+                        value_name(out),
+                        Expr::app(rt_fn(&["conv", conv_name, float_key, int_key]), vec![a]),
+                    )];
+                    (seq_on_result(binds), None)
+                }
+                Opcode::FcvtFromSint | Opcode::FcvtFromUint => {
+                    let out = results[0];
+                    let in_ty = func.dfg.value_type(*arg);
+                    let out_ty = func.dfg.value_type(out);
+                    let int_key = if in_ty == I32 {
+                        "i32"
+                    } else if in_ty == I64 {
+                        "i64"
+                    } else {
+                        "unknown"
+                    };
+                    let float_key = if out_ty == F32 {
+                        "f32"
+                    } else if out_ty == F64 {
+                        "f64"
+                    } else {
+                        "unknown"
+                    };
+                    let conv_name = match op {
+                        Opcode::FcvtFromSint => "convert_s",
+                        Opcode::FcvtFromUint => "convert_u",
+                        _ => unreachable!(),
+                    };
+                    let a = value_expr(func, *arg, st_name, vmctx);
+                    let binds = vec![(
+                        value_name(out),
+                        Expr::app(rt_fn(&["conv", conv_name, int_key, float_key]), vec![a]),
+                    )];
+                    (seq_on_result(binds), None)
+                }
+                Opcode::Fpromote | Opcode::Fdemote => {
+                    let out = results[0];
+                    let a = value_expr(func, *arg, st_name, vmctx);
+                    let (ty_key, op_name) = if op == Opcode::Fpromote {
+                        ("f64", "promote_f32")
+                    } else {
+                        ("f32", "demote_f64")
+                    };
+                    let binds = vec![(
+                        value_name(out),
+                        Expr::app(rt_fn(&[ty_key, op_name]), vec![a]),
+                    )];
                     (seq_on_result(binds), None)
                 }
                 Opcode::Bnot => {

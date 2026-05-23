@@ -76,7 +76,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                     eval_invoke(module, invoke.name, &invoke.args, current_state.as_deref())?;
                 current_state = Some(actual.state);
                 let expected = expected_results_json(&results)?;
-                if actual.results != expected {
+                if !results_match(&results, &actual.results)? {
                     return Err(format!(
                         "assert_return mismatch for {}: expected {expected}, got {}",
                         invoke.name, actual.results
@@ -218,8 +218,81 @@ fn expected_result_to_json(ret: &WastRet<'_>) -> Result<String, String> {
         WastRet::Core(WastRetCore::F64(NanPattern::Value(value))) => {
             Ok((value.bits as i64).to_string())
         }
+        WastRet::Core(WastRetCore::F32(NanPattern::CanonicalNan))
+        | WastRet::Core(WastRetCore::F64(NanPattern::CanonicalNan)) => Ok("nan:canonical".into()),
+        WastRet::Core(WastRetCore::F32(NanPattern::ArithmeticNan))
+        | WastRet::Core(WastRetCore::F64(NanPattern::ArithmeticNan)) => Ok("nan:arithmetic".into()),
         WastRet::Core(WastRetCore::RefExtern(Some(value))) => Ok(value.to_string()),
         WastRet::Core(WastRetCore::RefNull(_)) => Ok("0".to_string()),
         _ => Err("unsupported assert_return result for this harness slice".into()),
     }
+}
+
+fn results_match(expected: &[WastRet<'_>], actual: &str) -> Result<bool, String> {
+    let value: JsonValue =
+        serde_json::from_str(actual).map_err(|e| format!("invalid actual results JSON: {e}"))?;
+    let JsonValue::Array(actual_items) = value else {
+        return Err("actual results must be a JSON array".into());
+    };
+    if actual_items.len() != expected.len() {
+        return Ok(false);
+    }
+    for (expected, actual) in expected.iter().zip(actual_items.iter()) {
+        if !result_matches(expected, actual)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn result_matches(expected: &WastRet<'_>, actual: &JsonValue) -> Result<bool, String> {
+    match expected {
+        WastRet::Core(WastRetCore::F32(NanPattern::CanonicalNan)) => {
+            let bits = json_number_to_u64(actual)? as u32;
+            Ok(f32_canonical_nan(bits))
+        }
+        WastRet::Core(WastRetCore::F32(NanPattern::ArithmeticNan)) => {
+            let bits = json_number_to_u64(actual)? as u32;
+            Ok(f32_arithmetic_nan(bits))
+        }
+        WastRet::Core(WastRetCore::F64(NanPattern::CanonicalNan)) => {
+            let bits = json_number_to_u64(actual)?;
+            Ok(f64_canonical_nan(bits))
+        }
+        WastRet::Core(WastRetCore::F64(NanPattern::ArithmeticNan)) => {
+            let bits = json_number_to_u64(actual)?;
+            Ok(f64_arithmetic_nan(bits))
+        }
+        _ => Ok(actual.to_string() == expected_result_to_json(expected)?),
+    }
+}
+
+fn json_number_to_u64(value: &JsonValue) -> Result<u64, String> {
+    let JsonValue::Number(number) = value else {
+        return Err("expected numeric result".into());
+    };
+    if let Some(value) = number.as_u64() {
+        Ok(value)
+    } else if let Some(value) = number.as_i64() {
+        Ok(value as u64)
+    } else {
+        Err("expected integer result".into())
+    }
+}
+
+fn f32_canonical_nan(bits: u32) -> bool {
+    (bits & 0x7f80_0000) == 0x7f80_0000 && (bits & 0x007f_ffff) == 0x0040_0000
+}
+
+fn f32_arithmetic_nan(bits: u32) -> bool {
+    (bits & 0x7f80_0000) == 0x7f80_0000 && (bits & 0x0040_0000) != 0
+}
+
+fn f64_canonical_nan(bits: u64) -> bool {
+    (bits & 0x7ff0_0000_0000_0000) == 0x7ff0_0000_0000_0000
+        && (bits & 0x000f_ffff_ffff_ffff) == 0x0008_0000_0000_0000
+}
+
+fn f64_arithmetic_nan(bits: u64) -> bool {
+    (bits & 0x7ff0_0000_0000_0000) == 0x7ff0_0000_0000_0000 && (bits & 0x0008_0000_0000_0000) != 0
 }
