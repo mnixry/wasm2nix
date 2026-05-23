@@ -184,27 +184,10 @@ fn lower_exports_attrset(module: &NixModule) -> Expr {
 }
 
 fn lower_initial_state(module: &NixModule) -> Expr {
-    let page_count = module
-        .info
-        .memories
-        .iter()
-        .next()
-        .map(|(_, memory)| memory.entity.minimum as i64)
-        .unwrap_or(0);
-
     Expr::attrset(
         false,
         vec![
-            (
-                AttrKey::ident("mem"),
-                Expr::attrset(
-                    false,
-                    vec![
-                        (AttrKey::ident("pageCount"), Expr::int(page_count)),
-                        (AttrKey::ident("pages"), lower_initial_memory_pages(module)),
-                    ],
-                ),
-            ),
+            (AttrKey::ident("mem"), lower_initial_memory(module)),
             (AttrKey::ident("globals"), lower_initial_globals(module)),
             (AttrKey::ident("tables"), lower_initial_tables(module)),
             (AttrKey::ident("data"), lower_data_segments(module)),
@@ -214,6 +197,65 @@ fn lower_initial_state(module: &NixModule) -> Expr {
             ),
         ],
     )
+}
+
+fn lower_initial_memory(module: &NixModule) -> Expr {
+    let Some((memory_index, memory)) = module.info.memories.iter().next() else {
+        return Expr::attrset(
+            false,
+            vec![
+                (AttrKey::ident("pageCount"), Expr::int(0)),
+                (AttrKey::ident("maxPageCount"), Expr::int(0)),
+                (AttrKey::ident("pages"), Expr::attrset(false, vec![])),
+            ],
+        );
+    };
+
+    let declared_min = Expr::int(memory.entity.minimum as i64);
+    let declared_max = Expr::int(memory.entity.maximum.unwrap_or(65536) as i64);
+    let overlay_pages = lower_initial_memory_pages(module);
+
+    if let Some((module_name, field_name)) = module.info.imported_memories.get(memory_index.index())
+    {
+        let imported = lower_imported_memory(module_name, field_name);
+        Expr::let_in(
+            vec![("importedMem".into(), imported)],
+            Expr::attrset(
+                false,
+                vec![
+                    (
+                        AttrKey::ident("pageCount"),
+                        lower_attr_or(Expr::ident("importedMem"), "pageCount", declared_min),
+                    ),
+                    (
+                        AttrKey::ident("maxPageCount"),
+                        lower_attr_or(Expr::ident("importedMem"), "maxPageCount", declared_max),
+                    ),
+                    (
+                        AttrKey::ident("pages"),
+                        Expr::bin(
+                            BinOp::Update,
+                            lower_attr_or(
+                                Expr::ident("importedMem"),
+                                "pages",
+                                Expr::attrset(false, vec![]),
+                            ),
+                            overlay_pages,
+                        ),
+                    ),
+                ],
+            ),
+        )
+    } else {
+        Expr::attrset(
+            false,
+            vec![
+                (AttrKey::ident("pageCount"), declared_min),
+                (AttrKey::ident("maxPageCount"), declared_max),
+                (AttrKey::ident("pages"), overlay_pages),
+            ],
+        )
+    }
 }
 
 fn lower_initial_memory_pages(module: &NixModule) -> Expr {
@@ -241,6 +283,29 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
             .into_iter()
             .map(|(idx, word)| (AttrKey::string(idx.to_string()), Expr::int(i64::from(word))))
             .collect(),
+    )
+}
+
+fn lower_imported_memory(module_name: &str, field_name: &str) -> Expr {
+    let module = Expr::select(
+        Expr::ident("imports"),
+        AttrKey::string(module_name.to_string()),
+    );
+    let imported = Expr::select(module.clone(), AttrKey::string(field_name.to_string()));
+    Expr::if_then_else(
+        Expr::bin(
+            BinOp::And,
+            Expr::app(builtin_is_attrs(), vec![imported.clone()]),
+            Expr::app(
+                builtin_has_attr(),
+                vec![Expr::string("get"), imported.clone()],
+            ),
+        ),
+        Expr::app(
+            Expr::select(imported.clone(), AttrKey::ident("get")),
+            vec![lower_imported_extern_state(module)],
+        ),
+        imported,
     )
 }
 
@@ -399,30 +464,56 @@ fn lower_imported_global(module_name: &str, field_name: &str) -> Expr {
         ),
         Expr::app(
             Expr::select(imported.clone(), AttrKey::ident("get")),
-            vec![lower_imported_global_state(module)],
+            vec![lower_imported_extern_state(module)],
         ),
         imported,
     )
 }
 
-fn lower_imported_global_state(module: Expr) -> Expr {
+fn lower_imported_extern_state(module: Expr) -> Expr {
     Expr::if_then_else(
         Expr::bin(
             BinOp::And,
             Expr::app(builtin_is_attrs(), vec![module.clone()]),
             Expr::app(
                 builtin_has_attr(),
-                vec![Expr::string("instantiate"), module.clone()],
+                vec![Expr::string("__wasm2nixState"), module.clone()],
             ),
         ),
-        Expr::select(
+        Expr::select(module.clone(), AttrKey::string("__wasm2nixState")),
+        Expr::if_then_else(
+            Expr::bin(
+                BinOp::And,
+                Expr::app(builtin_is_attrs(), vec![module.clone()]),
+                Expr::app(
+                    builtin_has_attr(),
+                    vec![Expr::string("instantiate"), module.clone()],
+                ),
+            ),
+            Expr::select(
+                Expr::app(
+                    Expr::select(module, AttrKey::ident("instantiate")),
+                    vec![Expr::attrset(false, vec![])],
+                ),
+                AttrKey::ident("st"),
+            ),
+            Expr::attrset(false, vec![]),
+        ),
+    )
+}
+
+fn lower_attr_or(expr: Expr, attr: &str, default: Expr) -> Expr {
+    Expr::if_then_else(
+        Expr::bin(
+            BinOp::And,
+            Expr::app(builtin_is_attrs(), vec![expr.clone()]),
             Expr::app(
-                Expr::select(module, AttrKey::ident("instantiate")),
-                vec![Expr::attrset(false, vec![])],
+                builtin_has_attr(),
+                vec![Expr::string(attr.to_string()), expr.clone()],
             ),
-            AttrKey::ident("st"),
         ),
-        Expr::attrset(false, vec![]),
+        Expr::select(expr, AttrKey::ident(attr.to_string())),
+        default,
     )
 }
 
@@ -493,7 +584,17 @@ fn unsupported_const_expr() -> Expr {
 }
 
 fn lower_memory_export(_memory_index: u32) -> Expr {
-    Expr::select(Expr::ident("rt"), AttrKey::ident("mem"))
+    Expr::bin(
+        BinOp::Update,
+        Expr::select(Expr::ident("rt"), AttrKey::ident("mem")),
+        Expr::attrset(
+            false,
+            vec![(
+                AttrKey::ident("get"),
+                Expr::lambda("st", Expr::select(Expr::ident("st"), AttrKey::ident("mem"))),
+            )],
+        ),
+    )
 }
 
 fn lower_table_export(_table_index: u32) -> Expr {
@@ -1857,7 +1958,7 @@ mod tests {
 
         assert!(nix.contains("pageCount = 1;"));
         assert!(nix.contains("\"1\" = 67305985;"));
-        assert!(nix.contains("\"memory\" = rt.mem;"));
+        assert!(nix.contains("\"memory\" = rt.mem // {"));
     }
 
     #[test]

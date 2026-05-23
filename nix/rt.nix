@@ -2286,8 +2286,9 @@ let
         let
           old = pageCount st;
           new = old + delta;
+          memoryMaxPages = (getMem st).maxPageCount or maxPages;
         in
-        if delta < 0 || new > maxPages then
+        if delta < 0 || new > memoryMaxPages then
           {
             inherit st;
             results = [ u32Max ];

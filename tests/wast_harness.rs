@@ -74,7 +74,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                     next_anon_module += 1;
                     key
                 });
-                let state = eval_instantiate(&path, &key)?;
+                let state = eval_instantiate(&path, &key, &modules, &aliases)?;
                 modules.insert(
                     key.clone(),
                     HarnessModule {
@@ -258,12 +258,19 @@ struct InvokeResult {
     state: String,
 }
 
-fn eval_instantiate(module: &PathBuf, module_key: &str) -> Result<String, String> {
+fn eval_instantiate(
+    module: &PathBuf,
+    module_key: &str,
+    modules: &HashMap<String, HarnessModule>,
+    aliases: &HashMap<String, String>,
+) -> Result<String, String> {
+    let world = EvalWorld::new(modules, aliases);
+    let imports = imports_expr(module_key, aliases, &world.module_vars);
     let expr = format!(
-        "let rt = {}; m = import {} rt {}; i = m.instantiate {{}}; in i.st",
+        "let rt = {}; {} m_new = import {} rt {imports}; i = m_new.instantiate {{}}; in i.st",
         rt_import_expr()?,
+        world.binds,
         module.display(),
-        initial_imports_expr(module_key),
     );
     let value = eval_nix_json(&expr)?;
     json_to_nix(&value)
@@ -360,20 +367,36 @@ impl EvalWorld {
         let mut keys = modules.keys().cloned().collect::<Vec<_>>();
         keys.sort();
 
-        let module_vars = keys
+        let raw_module_vars = keys
             .iter()
             .enumerate()
             .map(|(i, key)| (key.clone(), format!("m{i}")))
             .collect::<HashMap<_, _>>();
+        let module_vars = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (key.clone(), format!("m{i}_import")))
+            .collect::<HashMap<_, _>>();
 
         let mut binds = String::new();
-        for key in &keys {
+        for (i, key) in keys.iter().enumerate() {
             let module = &modules[key];
-            let var = &module_vars[key];
+            let raw_var = &raw_module_vars[key];
+            let import_var = &module_vars[key];
+            let state_var = format!("m{i}_state");
             let imports = imports_expr(key, aliases, &module_vars);
             binds.push_str(&format!(
-                "{var} = import {} rt {imports}; ",
+                "{raw_var} = import {} rt {imports}; ",
                 module.path.display()
+            ));
+            let state_expr = module
+                .state
+                .as_deref()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("({raw_var}.instantiate {{}}).st"));
+            binds.push_str(&format!("{state_var} = {state_expr}; "));
+            binds.push_str(&format!(
+                "{import_var} = {raw_var} // {{ \"__wasm2nixState\" = {state_var}; }}; "
             ));
         }
 
@@ -418,16 +441,8 @@ fn imports_expr(
     format!("{{ {body} }}")
 }
 
-fn initial_imports_expr(module_key: &str) -> String {
-    format!(
-        "{{ \"__moduleId\" = {}; \"__funcRegistry\" = {{}}; \"spectest\" = {}; }}",
-        nix_string(module_key),
-        spectest_imports_expr()
-    )
-}
-
 fn spectest_imports_expr() -> String {
-    "{ global_i32 = 666; global_i64 = 666; print = st: { results = [ ]; inherit st; }; print_i32 = _v: st: { results = [ ]; inherit st; }; print_i64 = _v: st: { results = [ ]; inherit st; }; print_f32 = _v: st: { results = [ ]; inherit st; }; print_f64 = _v: st: { results = [ ]; inherit st; }; print_i32_f32 = _i: _f: st: { results = [ ]; inherit st; }; print_f64_f64 = _a: _b: st: { results = [ ]; inherit st; }; }".to_string()
+    "{ global_i32 = 666; global_i64 = 666; global_f32 = 1143383654; global_f64 = 4649074691427585229; memory = { pageCount = 1; maxPageCount = 2; pages = { }; }; print = st: { results = [ ]; inherit st; }; print_i32 = _v: st: { results = [ ]; inherit st; }; print_i64 = _v: st: { results = [ ]; inherit st; }; print_f32 = _v: st: { results = [ ]; inherit st; }; print_f64 = _v: st: { results = [ ]; inherit st; }; print_i32_f32 = _i: _f: st: { results = [ ]; inherit st; }; print_f64_f64 = _a: _b: st: { results = [ ]; inherit st; }; }".to_string()
 }
 
 fn merge_imported_table_initializers(
