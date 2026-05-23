@@ -787,7 +787,8 @@ fn lower_function(module: &NixModule, _func_index: u32, func: &ir::Function) -> 
 
     let free_values = block_free_values(func, vmctx);
 
-    // Blocks: `blocks = rec { b0 = ...; b1 = ...; }; in blocks.b0 <args> st`
+    // Blocks return either a jump record or a done record. The trampoline below
+    // keeps Wasm loops from consuming the Nix evaluator call stack.
     let mut block_binds: Vec<(AttrKey, Expr)> = Vec::new();
     for block in func.layout.blocks() {
         let bname = block_name(block);
@@ -796,28 +797,149 @@ fn lower_function(module: &NixModule, _func_index: u32, func: &ir::Function) -> 
     }
     let blocks_attrset = Expr::attrset(true, block_binds);
 
-    let entry_call = {
-        let b0 = Expr::select(Expr::ident("blocks"), AttrKey::ident(block_name(entry)));
-        let mut args: Vec<Expr> = func
-            .dfg
-            .block_params(entry)
-            .iter()
-            .copied()
-            .filter(|v| *v != vmctx)
-            .map(|v| Expr::ident(value_name(v)))
-            .collect();
-        args.extend(
-            free_values
-                .get(&entry)
-                .into_iter()
-                .flat_map(|values| values.iter())
-                .map(|v| Expr::ident(value_name(*v))),
-        );
-        args.push(Expr::ident("st"));
-        Expr::app(b0, args)
-    };
+    let mut entry_args: Vec<Expr> = func
+        .dfg
+        .block_params(entry)
+        .iter()
+        .copied()
+        .filter(|v| *v != vmctx)
+        .map(|v| Expr::ident(value_name(v)))
+        .collect();
+    entry_args.extend(
+        free_values
+            .get(&entry)
+            .into_iter()
+            .flat_map(|values| values.iter())
+            .map(|v| Expr::ident(value_name(*v))),
+    );
 
-    let body = Expr::let_in(vec![("blocks".into(), blocks_attrset)], entry_call);
+    let entry_with_key = lower_jump_record_with_key(entry, entry_args, Expr::ident("st"), 0);
+    let apply_args = Expr::lambda(
+        "fn",
+        Expr::lambda(
+            "args",
+            Expr::app(
+                builtin_foldl_strict(),
+                vec![
+                    Expr::lambda(
+                        "f",
+                        Expr::lambda("arg", Expr::app(Expr::ident("f"), vec![Expr::ident("arg")])),
+                    ),
+                    Expr::ident("fn"),
+                    Expr::ident("args"),
+                ],
+            ),
+        ),
+    );
+    let apply_block = Expr::lambda(
+        "block",
+        Expr::lambda(
+            "args",
+            Expr::lambda(
+                "blockSt",
+                Expr::app(
+                    Expr::app(
+                        Expr::ident("applyArgs"),
+                        vec![
+                            Expr::app(
+                                builtin_get_attr(),
+                                vec![Expr::ident("block"), Expr::ident("blocks")],
+                            ),
+                            Expr::ident("args"),
+                        ],
+                    ),
+                    vec![Expr::ident("blockSt")],
+                ),
+            ),
+        ),
+    );
+    let step_item = Expr::lambda(
+        "current",
+        Expr::if_then_else(
+            Expr::bin(
+                BinOp::Eq,
+                Expr::select(Expr::ident("current"), AttrKey::ident("tag")),
+                Expr::string("done"),
+            ),
+            Expr::list(vec![]),
+            Expr::list(vec![Expr::app(
+                builtin_seq(),
+                vec![
+                    Expr::bool(true),
+                    Expr::let_in(
+                        vec![(
+                            "next".into(),
+                            Expr::app(
+                                Expr::ident("applyBlock"),
+                                vec![
+                                    Expr::select(Expr::ident("current"), AttrKey::ident("block")),
+                                    Expr::select(Expr::ident("current"), AttrKey::ident("args")),
+                                    Expr::select(Expr::ident("current"), AttrKey::ident("st")),
+                                ],
+                            ),
+                        )],
+                        Expr::bin(
+                            BinOp::Update,
+                            Expr::ident("next"),
+                            Expr::attrset(
+                                false,
+                                vec![(
+                                    AttrKey::ident("key"),
+                                    Expr::bin(
+                                        BinOp::Add,
+                                        Expr::select(Expr::ident("current"), AttrKey::ident("key")),
+                                        Expr::int(1),
+                                    ),
+                                )],
+                            ),
+                        ),
+                    ),
+                ],
+            )]),
+        ),
+    );
+    let trace_expr = Expr::app(
+        builtin_generic_closure(),
+        vec![Expr::attrset(
+            false,
+            vec![
+                (AttrKey::ident("startSet"), Expr::list(vec![entry_with_key])),
+                (AttrKey::ident("operator"), Expr::ident("stepItem")),
+            ],
+        )],
+    );
+    let result_index = Expr::bin(
+        BinOp::Sub,
+        Expr::app(builtin_length(), vec![Expr::ident("trace")]),
+        Expr::int(1),
+    );
+    let return_result = Expr::attrset(
+        false,
+        vec![
+            (
+                AttrKey::ident("st"),
+                Expr::select(Expr::ident("result"), AttrKey::ident("st")),
+            ),
+            (
+                AttrKey::ident("results"),
+                Expr::select(Expr::ident("result"), AttrKey::ident("results")),
+            ),
+        ],
+    );
+    let body = Expr::let_in(
+        vec![
+            ("blocks".into(), blocks_attrset),
+            ("applyArgs".into(), apply_args),
+            ("applyBlock".into(), apply_block),
+            ("stepItem".into(), step_item),
+            ("trace".into(), trace_expr),
+            (
+                "result".into(),
+                Expr::app(builtin_elem_at(), vec![Expr::ident("trace"), result_index]),
+            ),
+        ],
+        return_result,
+    );
     lambda_chain(&params, body)
 }
 
@@ -1678,13 +1800,7 @@ fn lower_terminator(
                 .copied()
                 .map(|v| value_expr(func, v, st_name, vmctx))
                 .collect::<Vec<_>>();
-            Expr::attrset(
-                false,
-                vec![
-                    (AttrKey::ident("st"), Expr::ident(st_name)),
-                    (AttrKey::ident("results"), Expr::list(rvs)),
-                ],
-            )
+            lower_done_record(Expr::ident(st_name), rvs)
         }
 
         (Opcode::Jump, InstructionData::Jump { destination, .. }) => {
@@ -1735,13 +1851,7 @@ fn lower_terminator(
             // trapz: if c is false then trap.
             Expr::if_then_else(
                 c,
-                Expr::attrset(
-                    false,
-                    vec![
-                        (AttrKey::ident("st"), Expr::ident(st_name)),
-                        (AttrKey::ident("results"), Expr::list(vec![])),
-                    ],
-                ),
+                lower_done_record(Expr::ident(st_name), vec![]),
                 Expr::app(
                     builtin_throw(),
                     vec![Expr::string(format!("wasm2nix: trapz {code}"))],
@@ -1751,13 +1861,7 @@ fn lower_terminator(
 
         (Opcode::Trapnz, InstructionData::CondTrap { arg, code, .. }) => {
             let c = truthy_value_expr(func, *arg, st_name, vmctx);
-            let ok = Expr::attrset(
-                false,
-                vec![
-                    (AttrKey::ident("st"), Expr::ident(st_name)),
-                    (AttrKey::ident("results"), Expr::list(vec![])),
-                ],
-            );
+            let ok = lower_done_record(Expr::ident(st_name), vec![]);
             // trapnz: if c is true then trap.
             Expr::if_then_else(
                 c,
@@ -1799,8 +1903,39 @@ fn lower_block_call(
             .flat_map(|values| values.iter())
             .map(|v| value_expr(func, *v, st_name, vmctx)),
     );
-    args.push(Expr::ident(st_name));
-    Expr::app(Expr::ident(block_name(target)), args)
+    lower_jump_record(target, args, Expr::ident(st_name))
+}
+
+fn lower_jump_record(target: Block, args: Vec<Expr>, st: Expr) -> Expr {
+    lower_jump_record_binds(target, args, st, None)
+}
+
+fn lower_jump_record_with_key(target: Block, args: Vec<Expr>, st: Expr, key: i64) -> Expr {
+    lower_jump_record_binds(target, args, st, Some(key))
+}
+
+fn lower_jump_record_binds(target: Block, args: Vec<Expr>, st: Expr, key: Option<i64>) -> Expr {
+    let mut binds = vec![
+        (AttrKey::ident("tag"), Expr::string("jump")),
+        (AttrKey::ident("block"), Expr::string(block_name(target))),
+        (AttrKey::ident("args"), Expr::list(args)),
+        (AttrKey::ident("st"), st),
+    ];
+    if let Some(key) = key {
+        binds.push((AttrKey::ident("key"), Expr::int(key)));
+    }
+    Expr::attrset(false, binds)
+}
+
+fn lower_done_record(st: Expr, results: Vec<Expr>) -> Expr {
+    Expr::attrset(
+        false,
+        vec![
+            (AttrKey::ident("tag"), Expr::string("done")),
+            (AttrKey::ident("st"), st),
+            (AttrKey::ident("results"), Expr::list(results)),
+        ],
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -2018,12 +2153,28 @@ fn builtin_elem_at() -> Expr {
     Expr::select(Expr::ident("builtins"), AttrKey::ident("elemAt"))
 }
 
+fn builtin_foldl_strict() -> Expr {
+    Expr::select(Expr::ident("builtins"), AttrKey::string("foldl'"))
+}
+
+fn builtin_generic_closure() -> Expr {
+    Expr::select(Expr::ident("builtins"), AttrKey::ident("genericClosure"))
+}
+
+fn builtin_get_attr() -> Expr {
+    Expr::select(Expr::ident("builtins"), AttrKey::ident("getAttr"))
+}
+
 fn builtin_has_attr() -> Expr {
     Expr::select(Expr::ident("builtins"), AttrKey::ident("hasAttr"))
 }
 
 fn builtin_is_attrs() -> Expr {
     Expr::select(Expr::ident("builtins"), AttrKey::ident("isAttrs"))
+}
+
+fn builtin_length() -> Expr {
+    Expr::select(Expr::ident("builtins"), AttrKey::ident("length"))
 }
 
 fn builtin_throw() -> Expr {

@@ -326,7 +326,7 @@ impl Printer {
                         if i > 0 {
                             p.push(" ");
                         }
-                        p.expr(item, Prec::Top);
+                        p.expr(item, Prec::Atom);
                     }
                     p.push(" ");
                 }
