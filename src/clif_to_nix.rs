@@ -267,25 +267,37 @@ fn lower_data_segments(module: &NixModule) -> Expr {
 }
 
 fn lower_initial_globals(module: &NixModule) -> Expr {
-    Expr::attrset(
-        false,
-        module
+    let mut binds = Vec::new();
+    let mut global_attrs = Vec::new();
+
+    for (idx, global) in module.info.globals.iter() {
+        let bind_name = global_bind_name(idx);
+        let value = if let Some((module_name, field_name)) =
+            module.info.imported_globals.get(idx.index())
+        {
+            lower_imported_global(module_name, field_name)
+        } else if let Some(init) = module
             .info
-            .globals
-            .iter()
-            .filter_map(|(idx, global)| {
-                let init = module
-                    .info
-                    .global_inits
-                    .get(idx)
-                    .and_then(|expr| expr.as_ref())?;
-                Some((
-                    AttrKey::string(idx.as_u32().to_string()),
-                    lower_const_expr(init, global.entity.wasm_ty),
-                ))
-            })
-            .collect(),
-    )
+            .global_inits
+            .get(idx)
+            .and_then(|expr| expr.as_ref())
+        {
+            lower_const_expr(module, init, global.entity.wasm_ty)
+        } else {
+            Expr::app(
+                builtin_throw(),
+                vec![Expr::string("wasm2nix: global has no initializer")],
+            )
+        };
+
+        binds.push((bind_name.clone(), value));
+        global_attrs.push((
+            AttrKey::string(idx.as_u32().to_string()),
+            Expr::ident(bind_name),
+        ));
+    }
+
+    Expr::let_in(binds, Expr::attrset(false, global_attrs))
 }
 
 fn lower_initial_tables(module: &NixModule) -> Expr {
@@ -370,29 +382,114 @@ fn lower_table_entry(module: &NixModule, func_index: cranelift_wasm::FuncIndex) 
     )
 }
 
-fn lower_const_expr(expr: &cranelift_wasm::ConstExpr, ty: WasmValType) -> Expr {
-    let ops = expr.ops();
-    if ops.len() != 1 {
-        return Expr::app(
-            builtin_throw(),
-            vec![Expr::string(
-                "wasm2nix: unsupported compound const expression",
-            )],
-        );
+fn lower_imported_global(module_name: &str, field_name: &str) -> Expr {
+    let module = Expr::select(
+        Expr::ident("imports"),
+        AttrKey::string(module_name.to_string()),
+    );
+    let imported = Expr::select(module.clone(), AttrKey::string(field_name.to_string()));
+    Expr::if_then_else(
+        Expr::bin(
+            BinOp::And,
+            Expr::app(builtin_is_attrs(), vec![imported.clone()]),
+            Expr::app(
+                builtin_has_attr(),
+                vec![Expr::string("get"), imported.clone()],
+            ),
+        ),
+        Expr::app(
+            Expr::select(imported.clone(), AttrKey::ident("get")),
+            vec![lower_imported_global_state(module)],
+        ),
+        imported,
+    )
+}
+
+fn lower_imported_global_state(module: Expr) -> Expr {
+    Expr::if_then_else(
+        Expr::bin(
+            BinOp::And,
+            Expr::app(builtin_is_attrs(), vec![module.clone()]),
+            Expr::app(
+                builtin_has_attr(),
+                vec![Expr::string("instantiate"), module.clone()],
+            ),
+        ),
+        Expr::select(
+            Expr::app(
+                Expr::select(module, AttrKey::ident("instantiate")),
+                vec![Expr::attrset(false, vec![])],
+            ),
+            AttrKey::ident("st"),
+        ),
+        Expr::attrset(false, vec![]),
+    )
+}
+
+fn global_bind_name(idx: cranelift_wasm::GlobalIndex) -> String {
+    format!("g{}", idx.as_u32())
+}
+
+fn lower_const_expr(module: &NixModule, expr: &cranelift_wasm::ConstExpr, ty: WasmValType) -> Expr {
+    let mut stack = Vec::new();
+
+    for op in expr.ops().iter().copied() {
+        match op {
+            ConstOp::I32Const(value) => stack.push(Expr::int(i64::from(value as u32))),
+            ConstOp::I64Const(value) => stack.push(Expr::int(value)),
+            ConstOp::F32Const(bits) => stack.push(Expr::int(i64::from(bits))),
+            ConstOp::F64Const(bits) => stack.push(Expr::int(bits as i64)),
+            ConstOp::GlobalGet(idx) => stack.push(Expr::ident(global_bind_name(idx))),
+            ConstOp::RefNull if matches!(ty, WasmValType::Ref(_)) => stack.push(Expr::int(0)),
+            ConstOp::RefFunc(func_index) if matches!(ty, WasmValType::Ref(_)) => {
+                stack.push(lower_table_entry(module, func_index));
+            }
+            ConstOp::I32Add | ConstOp::I32Sub | ConstOp::I32Mul => {
+                let Some(rhs) = stack.pop() else {
+                    return unsupported_const_expr();
+                };
+                let Some(lhs) = stack.pop() else {
+                    return unsupported_const_expr();
+                };
+                let op_name = match op {
+                    ConstOp::I32Add => "add",
+                    ConstOp::I32Sub => "sub",
+                    ConstOp::I32Mul => "mul",
+                    _ => unreachable!(),
+                };
+                stack.push(Expr::app(rt_fn(&["i32", op_name]), vec![lhs, rhs]));
+            }
+            ConstOp::I64Add | ConstOp::I64Sub | ConstOp::I64Mul => {
+                let Some(rhs) = stack.pop() else {
+                    return unsupported_const_expr();
+                };
+                let Some(lhs) = stack.pop() else {
+                    return unsupported_const_expr();
+                };
+                let op_name = match op {
+                    ConstOp::I64Add => "add",
+                    ConstOp::I64Sub => "sub",
+                    ConstOp::I64Mul => "mul",
+                    _ => unreachable!(),
+                };
+                stack.push(Expr::app(rt_fn(&["i64", op_name]), vec![lhs, rhs]));
+            }
+            _ => return unsupported_const_expr(),
+        }
     }
 
-    match (ops[0], ty) {
-        (ConstOp::I32Const(value), WasmValType::I32) => Expr::int(i64::from(value as u32)),
-        (ConstOp::I64Const(value), WasmValType::I64) => Expr::int(value),
-        (ConstOp::F32Const(bits), WasmValType::F32) => Expr::int(i64::from(bits)),
-        (ConstOp::F64Const(bits), WasmValType::F64) if bits <= i64::MAX as u64 => {
-            Expr::int(bits as i64)
-        }
-        _ => Expr::app(
-            builtin_throw(),
-            vec![Expr::string("wasm2nix: unsupported const expression")],
-        ),
+    if stack.len() == 1 {
+        stack.pop().unwrap()
+    } else {
+        unsupported_const_expr()
     }
+}
+
+fn unsupported_const_expr() -> Expr {
+    Expr::app(
+        builtin_throw(),
+        vec![Expr::string("wasm2nix: unsupported const expression")],
+    )
 }
 
 fn lower_memory_export(_memory_index: u32) -> Expr {
@@ -1675,6 +1772,14 @@ fn builtin_elem_at() -> Expr {
     Expr::select(Expr::ident("builtins"), AttrKey::ident("elemAt"))
 }
 
+fn builtin_has_attr() -> Expr {
+    Expr::select(Expr::ident("builtins"), AttrKey::ident("hasAttr"))
+}
+
+fn builtin_is_attrs() -> Expr {
+    Expr::select(Expr::ident("builtins"), AttrKey::ident("isAttrs"))
+}
+
 fn builtin_throw() -> Expr {
     Expr::ident("throw")
 }
@@ -1715,6 +1820,12 @@ mod tests {
     fn lower_wasm(wasm: &[u8]) -> String {
         let module = NixModule::translate(wasm).expect("wasm should translate");
         lower_module(&module).render()
+    }
+
+    fn lower_wat(wat: &str) -> String {
+        let buf = wast::parser::ParseBuffer::new(wat).expect("wat should parse");
+        let mut wat = wast::parser::parse::<wast::Wat<'_>>(&buf).expect("wat should parse");
+        lower_wasm(&wat.encode().expect("wat should encode"))
     }
 
     #[test]
@@ -1759,10 +1870,32 @@ mod tests {
         ];
         let nix = lower_wasm(&wasm);
 
-        assert!(nix.contains("\"0\" = 0;"));
+        assert!(nix.contains("g0 = 0;"));
+        assert!(nix.contains("\"0\" = g0;"));
         assert!(nix.contains("st = (funcs.f0 st0).st;"));
         assert!(nix.contains("rt.global.set_i32"));
         assert!(nix.contains("\"g\" = {"));
+    }
+
+    #[test]
+    fn generated_module_initializes_imported_global_get_and_ref_null_globals() {
+        let nix = lower_wat(
+            r#"
+            (module
+              (global (import "spectest" "global_i32") i32)
+              (global $copy i32 (global.get 0))
+              (global $r externref (ref.null extern))
+              (func (export "copy") (result i32) (global.get $copy))
+              (func (export "ref") (result externref) (global.get $r)))
+            "#,
+        );
+
+        assert!(nix.contains("g0 = if builtins.isAttrs imports.\"spectest\".\"global_i32\""));
+        assert!(nix.contains("g1 = g0;"));
+        assert!(nix.contains("g2 = 0;"));
+        assert!(nix.contains("\"0\" = g0;"));
+        assert!(nix.contains("\"1\" = g1;"));
+        assert!(nix.contains("\"2\" = g2;"));
     }
 
     #[test]

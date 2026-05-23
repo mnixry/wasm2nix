@@ -260,10 +260,10 @@ struct InvokeResult {
 
 fn eval_instantiate(module: &PathBuf, module_key: &str) -> Result<String, String> {
     let expr = format!(
-        "let rt = {}; m = import {} rt {{ \"__moduleId\" = {}; \"__funcRegistry\" = {{}}; }}; i = m.instantiate {{}}; in i.st",
+        "let rt = {}; m = import {} rt {}; i = m.instantiate {{}}; in i.st",
         rt_import_expr()?,
         module.display(),
-        nix_string(module_key),
+        initial_imports_expr(module_key),
     );
     let value = eval_nix_json(&expr)?;
     json_to_nix(&value)
@@ -399,6 +399,7 @@ fn imports_expr(
     let mut fields = BTreeMap::new();
     fields.insert("__moduleId".to_string(), nix_string(module_key));
     fields.insert("__funcRegistry".to_string(), "funcRegistry".to_string());
+    fields.insert("spectest".to_string(), spectest_imports_expr());
 
     for (key, var) in module_vars {
         fields.insert(key.clone(), var.clone());
@@ -415,6 +416,18 @@ fn imports_expr(
         .collect::<Vec<_>>()
         .join(" ");
     format!("{{ {body} }}")
+}
+
+fn initial_imports_expr(module_key: &str) -> String {
+    format!(
+        "{{ \"__moduleId\" = {}; \"__funcRegistry\" = {{}}; \"spectest\" = {}; }}",
+        nix_string(module_key),
+        spectest_imports_expr()
+    )
+}
+
+fn spectest_imports_expr() -> String {
+    "{ global_i32 = 666; global_i64 = 666; print = st: { results = [ ]; inherit st; }; print_i32 = _v: st: { results = [ ]; inherit st; }; print_i64 = _v: st: { results = [ ]; inherit st; }; print_f32 = _v: st: { results = [ ]; inherit st; }; print_f64 = _v: st: { results = [ ]; inherit st; }; print_i32_f32 = _i: _f: st: { results = [ ]; inherit st; }; print_f64_f64 = _a: _b: st: { results = [ ]; inherit st; }; }".to_string()
 }
 
 fn merge_imported_table_initializers(

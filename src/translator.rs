@@ -509,9 +509,12 @@ fn validate_memory_type(memory: Memory) -> WasmResult<()> {
 
 fn validate_global_type(global: Global) -> WasmResult<()> {
     match global.wasm_ty {
-        WasmValType::I32 | WasmValType::I64 | WasmValType::F32 | WasmValType::F64 => Ok(()),
+        WasmValType::I32
+        | WasmValType::I64
+        | WasmValType::F32
+        | WasmValType::F64
+        | WasmValType::Ref(_) => Ok(()),
         WasmValType::V128 => Err(WasmError::Unsupported("SIMD/v128".into())),
-        WasmValType::Ref(_) => Err(WasmError::Unsupported("reference types in globals".into())),
     }
 }
 
