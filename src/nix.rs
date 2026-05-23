@@ -303,6 +303,12 @@ impl Printer {
 
         self.parens_if(need_parens, |p| match e {
             Expr::Ident(s) => p.push(s),
+            Expr::Int(v) if *v == i64::MIN => p.push("(0 - 9223372036854775807 - 1)"),
+            Expr::Int(v) if *v < 0 => {
+                p.push("(");
+                p.push(&v.to_string());
+                p.push(")");
+            }
             Expr::Int(v) => p.push(&v.to_string()),
             Expr::Bool(true) => p.push("true"),
             Expr::Bool(false) => p.push("false"),

@@ -111,8 +111,18 @@ fn eval_invoke(module: &PathBuf, name: &str, args: &[WastArg<'_>]) -> Result<Str
 fn wast_arg_to_nix(arg: &WastArg<'_>) -> Result<String, String> {
     match arg {
         WastArg::Core(WastArgCore::I32(value)) => Ok((*value as u32).to_string()),
-        WastArg::Core(WastArgCore::I64(value)) => Ok(value.to_string()),
+        WastArg::Core(WastArgCore::I64(value)) => Ok(nix_int_literal(*value)),
         _ => Err("only i32/i64 invoke arguments are supported by this harness slice".into()),
+    }
+}
+
+fn nix_int_literal(value: i64) -> String {
+    if value == i64::MIN {
+        "(0 - 9223372036854775807 - 1)".to_string()
+    } else if value < 0 {
+        format!("({value})")
+    } else {
+        value.to_string()
     }
 }
 

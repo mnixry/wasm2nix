@@ -100,6 +100,18 @@ lib.debug.runTests {
     expr = rt.i64.popcnt (-1);
     expected = 64;
   };
+  test_i64_add_wrap_to_min = {
+    expr = rt.i64.add 9223372036854775807 1;
+    expected = 0 - 9223372036854775807 - 1;
+  };
+  test_i64_unsigned_compare_high_bit = {
+    expr = rt.cmp_i64.lt_u 1 (-1);
+    expected = true;
+  };
+  test_i64_signed_compare_high_bit = {
+    expr = rt.cmp_i64.lt_s (-1) 1;
+    expected = true;
+  };
   test_int_bnot_compat = {
     expr = rt.int.bnot 0;
     expected = u32Max;

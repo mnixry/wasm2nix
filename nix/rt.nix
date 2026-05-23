@@ -117,13 +117,7 @@ let
 
   bitSetI64 =
     value: bit:
-    let
-      v = checkI64 value;
-    in
-    if bit == 63 then
-      v < 0
-    else
-      builtins.bitAnd v (pow2 bit) != 0;
+    i64BitSetParts (i64Parts value) bit;
 
   clzBy =
     width: bitSet: value:
@@ -232,35 +226,303 @@ let
       popcnt = popcntBy 32 bitSetU32;
     };
 
-  limitedI64 =
-    op: f:
+  isI64Parts =
+    value:
+    builtins.isAttrs value && value ? lo && value ? hi;
+
+  i64Parts =
+    value:
+    if isI64Parts value then
+      {
+        lo = u32 value.lo;
+        hi = u32 value.hi;
+      }
+    else
+      let
+        v = checkI64 value;
+      in
+      if v < 0 then
+        let
+          lower = v - i64Min;
+        in
+        {
+          lo = floorMod lower u32Mod;
+          hi = i32Sign + lower / u32Mod;
+        }
+      else
+        {
+          lo = floorMod v u32Mod;
+          hi = v / u32Mod;
+        };
+
+  i64FromParts =
+    parts:
+    let
+      hi = u32 parts.hi;
+      lo = u32 parts.lo;
+    in
+    if hi >= i32Sign then
+      let
+        lower = (hi - i32Sign) * u32Mod + lo;
+      in
+      i64Min + lower
+    else
+      hi * u32Mod + lo;
+
+  i64IsZeroParts = parts: parts.lo == 0 && parts.hi == 0;
+  i64IsNegativeParts = parts: parts.hi >= i32Sign;
+
+  i64BitSetParts =
+    parts: bit:
+    if bit < 32 then bitSetU32 parts.lo bit else bitSetU32 parts.hi (bit - 32);
+
+  i64SetBitParts =
+    parts: bit:
+    if bit < 32 then
+      parts // { lo = u32 (builtins.bitOr parts.lo (pow2 bit)); }
+    else
+      parts // { hi = u32 (builtins.bitOr parts.hi (pow2 (bit - 32))); };
+
+  i64AddParts =
     lhs: rhs:
-    checkI64 (f (checkI64 lhs) (checkI64 rhs));
+    let
+      loSum = lhs.lo + rhs.lo;
+      lo = floorMod loSum u32Mod;
+      carry = loSum / u32Mod;
+      hi = u32 (lhs.hi + rhs.hi + carry);
+    in
+    { inherit lo hi; };
+
+  i64SubParts =
+    lhs: rhs:
+    let
+      loRaw = lhs.lo - rhs.lo;
+      borrow = if loRaw < 0 then 1 else 0;
+      lo = floorMod loRaw u32Mod;
+      hi = u32 (lhs.hi - rhs.hi - borrow);
+    in
+    { inherit lo hi; };
+
+  i64NegParts =
+    parts:
+    let
+      lo = u32 (0 - parts.lo);
+      borrow = if parts.lo == 0 then 0 else 1;
+      hi = u32 (0 - parts.hi - borrow);
+    in
+    { inherit lo hi; };
+
+  i64AbsParts =
+    value:
+    let
+      parts = i64Parts value;
+    in
+    if i64IsNegativeParts parts then i64NegParts parts else parts;
+
+  i64UnsignedGteParts =
+    lhs: rhs:
+    lhs.hi > rhs.hi || (lhs.hi == rhs.hi && lhs.lo >= rhs.lo);
+
+  i64ShlParts =
+    parts: amount:
+    let
+      n = floorMod amount 64;
+    in
+    if n == 0 then
+      parts
+    else if n < 32 then
+      let
+        loShifted = parts.lo * pow2 n;
+        lo = u32 loShifted;
+        hi = u32 (parts.hi * pow2 n + parts.lo / pow2 (32 - n));
+      in
+      { inherit lo hi; }
+    else
+      {
+        lo = 0;
+        hi = u32 (parts.lo * pow2 (n - 32));
+      };
+
+  i64ShrUParts =
+    parts: amount:
+    let
+      n = floorMod amount 64;
+    in
+    if n == 0 then
+      parts
+    else if n < 32 then
+      let
+        lo = parts.lo / pow2 n + floorMod parts.hi (pow2 n) * pow2 (32 - n);
+        hi = parts.hi / pow2 n;
+      in
+      { inherit lo hi; }
+    else
+      {
+        lo = parts.hi / pow2 (n - 32);
+        hi = 0;
+      };
+
+  i64ShrSParts =
+    parts: amount:
+    builtins.foldl' (
+      acc: _:
+      let
+        sign = i64IsNegativeParts acc;
+        lo = acc.lo / 2 + (if floorMod acc.hi 2 == 1 then i32Sign else 0);
+        hi = acc.hi / 2 + (if sign then i32Sign else 0);
+      in
+      { inherit lo hi; }
+    ) parts (range (floorMod amount 64));
+
+  i64MulParts =
+    lhs: rhs:
+    let
+      base = 65536;
+      a0 = floorMod lhs.lo base;
+      a1 = lhs.lo / base;
+      a2 = floorMod lhs.hi base;
+      a3 = lhs.hi / base;
+      b0 = floorMod rhs.lo base;
+      b1 = rhs.lo / base;
+      b2 = floorMod rhs.hi base;
+      b3 = rhs.hi / base;
+
+      c0 = a0 * b0;
+      r0 = floorMod c0 base;
+      carry0 = c0 / base;
+
+      c1 = a0 * b1 + a1 * b0 + carry0;
+      r1 = floorMod c1 base;
+      carry1 = c1 / base;
+
+      c2 = a0 * b2 + a1 * b1 + a2 * b0 + carry1;
+      r2 = floorMod c2 base;
+      carry2 = c2 / base;
+
+      c3 = a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0 + carry2;
+      r3 = floorMod c3 base;
+
+      lo = r0 + r1 * base;
+      hi = r2 + r3 * base;
+    in
+    { inherit lo hi; };
+
+  i64UnsignedDivRemParts =
+    lhs: rhs:
+    if i64IsZeroParts rhs then
+      throw "wasm trap: integer divide by zero"
+    else
+      builtins.foldl' (
+        acc: i:
+        let
+          bit = 63 - i;
+          shifted = i64ShlParts acc.rem 1;
+          remWithBit = if i64BitSetParts lhs bit then i64SetBitParts shifted 0 else shifted;
+        in
+        if i64UnsignedGteParts remWithBit rhs then
+          {
+            quot = i64SetBitParts acc.quot bit;
+            rem = i64SubParts remWithBit rhs;
+          }
+        else
+          acc // { rem = remWithBit; }
+      ) { quot = { lo = 0; hi = 0; }; rem = { lo = 0; hi = 0; }; } (range 64);
+
+  i64SignedDiv =
+    lhs: rhs:
+    let
+      a = checkI64 lhs;
+      b = checkI64 rhs;
+      aNeg = a < 0;
+      bNeg = b < 0;
+    in
+    if b == 0 then
+      throw "wasm trap: integer divide by zero"
+    else if a == i64Min && b == -1 then
+      throw "wasm trap: integer overflow"
+    else
+      let
+        quot = (i64UnsignedDivRemParts (i64AbsParts a) (i64AbsParts b)).quot;
+        signed = if aNeg != bNeg then i64NegParts quot else quot;
+      in
+      i64FromParts signed;
+
+  i64SignedRem =
+    lhs: rhs:
+    let
+      a = checkI64 lhs;
+      b = checkI64 rhs;
+    in
+    if b == 0 then
+      throw "wasm trap: integer divide by zero"
+    else
+      let
+        rem = (i64UnsignedDivRemParts (i64AbsParts a) (i64AbsParts b)).rem;
+        signed = if a < 0 then i64NegParts rem else rem;
+      in
+      i64FromParts signed;
 
   i64Bin =
-    {
-      add = limitedI64 "add" (lhs: rhs: lhs + rhs);
-      sub = limitedI64 "sub" (lhs: rhs: lhs - rhs);
-      mul = limitedI64 "mul" (lhs: rhs: lhs * rhs);
+    rec {
+      add = lhs: rhs: i64FromParts (i64AddParts (i64Parts lhs) (i64Parts rhs));
+      sub = lhs: rhs: i64FromParts (i64SubParts (i64Parts lhs) (i64Parts rhs));
+      mul = lhs: rhs: i64FromParts (i64MulParts (i64Parts lhs) (i64Parts rhs));
       udiv =
         lhs: rhs:
-        if rhs == 0 then throw "wasm trap: integer divide by zero" else checkI64 (lhs / rhs);
+        i64FromParts (i64UnsignedDivRemParts (i64Parts lhs) (i64Parts rhs)).quot;
       sdiv =
         lhs: rhs:
-        if rhs == 0 then throw "wasm trap: integer divide by zero" else checkI64 (lhs / rhs);
+        i64SignedDiv lhs rhs;
       urem =
         lhs: rhs:
-        if rhs == 0 then throw "wasm trap: integer divide by zero" else checkI64 (mod lhs rhs);
-      srem = lhs: rhs: checkI64 (signedRem lhs rhs);
-      band = lhs: rhs: checkI64 (builtins.bitAnd lhs rhs);
-      bor = lhs: rhs: checkI64 (builtins.bitOr lhs rhs);
-      bxor = lhs: rhs: checkI64 (builtins.bitXor lhs rhs);
-      bnot = value: checkI64 (0 - value - 1);
-      shl = lhs: rhs: checkI64 (lhs * pow2 (floorMod rhs 63));
-      shr_u = lhs: rhs: checkI64 (lhs / pow2 (floorMod rhs 63));
-      shr_s = lhs: rhs: checkI64 (lhs / pow2 (floorMod rhs 63));
-      rotl = lhs: _rhs: checkI64 lhs;
-      rotr = lhs: _rhs: checkI64 lhs;
+        i64FromParts (i64UnsignedDivRemParts (i64Parts lhs) (i64Parts rhs)).rem;
+      srem = i64SignedRem;
+      band =
+        lhs: rhs:
+        let
+          a = i64Parts lhs;
+          b = i64Parts rhs;
+        in
+        i64FromParts {
+          lo = builtins.bitAnd a.lo b.lo;
+          hi = builtins.bitAnd a.hi b.hi;
+        };
+      bor =
+        lhs: rhs:
+        let
+          a = i64Parts lhs;
+          b = i64Parts rhs;
+        in
+        i64FromParts {
+          lo = builtins.bitOr a.lo b.lo;
+          hi = builtins.bitOr a.hi b.hi;
+        };
+      bxor =
+        lhs: rhs:
+        let
+          a = i64Parts lhs;
+          b = i64Parts rhs;
+        in
+        i64FromParts {
+          lo = builtins.bitXor a.lo b.lo;
+          hi = builtins.bitXor a.hi b.hi;
+        };
+      bnot = value: i64FromParts (i64NegParts (i64AddParts (i64Parts value) { lo = 1; hi = 0; }));
+      shl = lhs: rhs: i64FromParts (i64ShlParts (i64Parts lhs) rhs);
+      shr_u = lhs: rhs: i64FromParts (i64ShrUParts (i64Parts lhs) rhs);
+      shr_s = lhs: rhs: i64FromParts (i64ShrSParts (i64Parts lhs) rhs);
+      rotl =
+        lhs: rhs:
+        let
+          n = floorMod rhs 64;
+        in
+        if n == 0 then lhs else bor (shl lhs n) (shr_u lhs (64 - n));
+      rotr =
+        lhs: rhs:
+        let
+          n = floorMod rhs 64;
+        in
+        if n == 0 then lhs else bor (shr_u lhs n) (shl lhs (64 - n));
       clz = value: checkI64 (clzBy 64 bitSetI64 value);
       ctz = value: checkI64 (ctzBy 64 bitSetI64 value);
       popcnt = value: checkI64 (popcntBy 64 bitSetI64 value);
@@ -286,6 +548,33 @@ let
       le_s = lhs: rhs: toI32 lhs <= toI32 rhs;
       gt_s = lhs: rhs: toI32 lhs > toI32 rhs;
       ge_s = lhs: rhs: toI32 lhs >= toI32 rhs;
+    };
+
+  cmp_i64 =
+    let
+      eqParts =
+        lhs: rhs:
+        let
+          a = i64Parts lhs;
+          b = i64Parts rhs;
+        in
+        a.lo == b.lo && a.hi == b.hi;
+    in
+    {
+      eq = eqParts;
+      ne = lhs: rhs: !(eqParts lhs rhs);
+      lt_u = lhs: rhs: !(i64UnsignedGteParts (i64Parts lhs) (i64Parts rhs));
+      le_u =
+        lhs: rhs:
+        i64UnsignedGteParts (i64Parts rhs) (i64Parts lhs);
+      gt_u =
+        lhs: rhs:
+        i64UnsignedGteParts (i64Parts lhs) (i64Parts rhs) && !(eqParts lhs rhs);
+      ge_u = lhs: rhs: i64UnsignedGteParts (i64Parts lhs) (i64Parts rhs);
+      lt_s = lhs: rhs: checkI64 lhs < checkI64 rhs;
+      le_s = lhs: rhs: checkI64 lhs <= checkI64 rhs;
+      gt_s = lhs: rhs: checkI64 lhs > checkI64 rhs;
+      ge_s = lhs: rhs: checkI64 lhs >= checkI64 rhs;
     };
 
   conv =
@@ -396,10 +685,7 @@ let
       lo = bytesToU32 (builtins.genList (i: elemAt bytes i) 4);
       hi = bytesToU32 (builtins.genList (i: elemAt bytes (i + 4)) 4);
     in
-    if hi >= i32Sign then
-      throw "wasm2nix runtime: u64 load is outside the host Nix integer range"
-    else
-      lo + hi * u32Mod;
+    i64FromParts { inherit lo hi; };
 
   u32ToBytes =
     value:
@@ -416,11 +702,9 @@ let
   limitedU64ToBytes =
     value:
     let
-      v = checkI64 value;
-      lo = floorMod v u32Mod;
-      hi = v / u32Mod;
+      parts = i64Parts value;
     in
-    u32ToBytes lo ++ u32ToBytes hi;
+    u32ToBytes parts.lo ++ u32ToBytes parts.hi;
 
   storeBytes =
     op: bytes: addr: st:
@@ -554,5 +838,5 @@ rec {
     abs = unsupportedUnaryFloat "f64" "abs";
   };
 
-  inherit cmp conv mem global table;
+  inherit cmp cmp_i64 conv mem global table;
 }

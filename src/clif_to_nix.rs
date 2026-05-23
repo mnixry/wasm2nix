@@ -699,7 +699,12 @@ fn lower_inst(
             let out = results[0];
             let a = value_expr(args[0], st_name, vmctx);
             let b = value_expr(args[1], st_name, vmctx);
-            let e = Expr::app(rt_fn(&["cmp", intcc_name(*cond)]), vec![a, b]);
+            let cmp_ns = if func.dfg.value_type(args[0]) == I64 {
+                "cmp_i64"
+            } else {
+                "cmp"
+            };
+            let e = Expr::app(rt_fn(&[cmp_ns, intcc_name(*cond)]), vec![a, b]);
             let binds = vec![(value_name(out), e)];
             (seq_on_result(binds), None)
         }
@@ -714,7 +719,8 @@ fn lower_inst(
             } else {
                 Expr::int(imm64)
             };
-            let e = Expr::app(rt_fn(&["cmp", intcc_name(*cond)]), vec![a, imm_expr]);
+            let cmp_ns = if ty == I64 { "cmp_i64" } else { "cmp" };
+            let e = Expr::app(rt_fn(&[cmp_ns, intcc_name(*cond)]), vec![a, imm_expr]);
             let binds = vec![(value_name(out), e)];
             (seq_on_result(binds), None)
         }
