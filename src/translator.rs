@@ -7,11 +7,11 @@ use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_entity::{EntityRef, PrimaryMap, SecondaryMap};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_wasm::{
-    ConstExpr, DataIndex, DefinedFuncIndex, ElemIndex, FuncEnvironment, FuncIndex,
-    FuncTranslator, Global, GlobalIndex, GlobalVariable, Heap, HeapData, HeapStyle, Memory,
-    MemoryIndex, ModuleEnvironment, Table, TableIndex, TargetEnvironment, TypeConvert, TypeIndex,
-    WASM32_MAX_SIZE, WasmError,
-    WasmFuncType, WasmHeapType, WasmResult, WasmValType, translate_module,
+    ConstExpr, DataIndex, DefinedFuncIndex, ElemIndex, FuncEnvironment, FuncIndex, FuncTranslator,
+    Global, GlobalIndex, GlobalVariable, Heap, HeapData, HeapStyle, Memory, MemoryIndex,
+    ModuleEnvironment, Table, TableIndex, TargetEnvironment, TypeConvert, TypeIndex,
+    WASM32_MAX_SIZE, WasmError, WasmFuncType, WasmHeapType, WasmResult, WasmValType,
+    translate_module,
 };
 
 const FUNC_NAMESPACE: u32 = 0;

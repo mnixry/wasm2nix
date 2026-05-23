@@ -214,7 +214,11 @@ fn lower_initial_globals(module: &NixModule) -> Expr {
             .globals
             .iter()
             .filter_map(|(idx, global)| {
-                let init = module.info.global_inits.get(idx).and_then(|expr| expr.as_ref())?;
+                let init = module
+                    .info
+                    .global_inits
+                    .get(idx)
+                    .and_then(|expr| expr.as_ref())?;
                 Some((
                     AttrKey::string(idx.as_u32().to_string()),
                     lower_const_expr(init, global.entity.wasm_ty),
@@ -283,7 +287,9 @@ fn lower_const_expr(expr: &cranelift_wasm::ConstExpr, ty: WasmValType) -> Expr {
     if ops.len() != 1 {
         return Expr::app(
             builtin_throw(),
-            vec![Expr::string("wasm2nix: unsupported compound const expression")],
+            vec![Expr::string(
+                "wasm2nix: unsupported compound const expression",
+            )],
         );
     }
 
@@ -334,10 +340,7 @@ fn lower_global_export(global_index: u32, ty: WasmValType) -> Expr {
 
     Expr::attrset(
         false,
-        vec![
-            (AttrKey::ident("get"), get),
-            (AttrKey::ident("set"), set),
-        ],
+        vec![(AttrKey::ident("get"), get), (AttrKey::ident("set"), set)],
     )
 }
 
@@ -945,48 +948,30 @@ fn lower_terminator(func: &ir::Function, inst: Inst, st_name: &str, vmctx: ir::V
         }
 
         (Opcode::Jump, InstructionData::Jump { destination, .. }) => {
-            let target = destination.block(&func.dfg.value_lists);
-            let args = destination
-                .args_slice(&func.dfg.value_lists)
-                .iter()
-                .copied()
-                .map(|v| value_expr(v, st_name, vmctx))
-                .collect::<Vec<_>>();
-            let mut call_args = args;
-            call_args.push(Expr::ident(st_name));
-            Expr::app(Expr::ident(block_name(target)), call_args)
+            lower_block_call(func, *destination, st_name, vmctx)
         }
 
         (Opcode::Brif, InstructionData::Brif { blocks, arg, .. }) => {
             let cond = value_expr(*arg, st_name, vmctx);
 
-            let then_call = {
-                let bc = blocks[0];
-                let target = bc.block(&func.dfg.value_lists);
-                let mut a = bc
-                    .args_slice(&func.dfg.value_lists)
-                    .iter()
-                    .copied()
-                    .map(|v| value_expr(v, st_name, vmctx))
-                    .collect::<Vec<_>>();
-                a.push(Expr::ident(st_name));
-                Expr::app(Expr::ident(block_name(target)), a)
-            };
-
-            let else_call = {
-                let bc = blocks[1];
-                let target = bc.block(&func.dfg.value_lists);
-                let mut a = bc
-                    .args_slice(&func.dfg.value_lists)
-                    .iter()
-                    .copied()
-                    .map(|v| value_expr(v, st_name, vmctx))
-                    .collect::<Vec<_>>();
-                a.push(Expr::ident(st_name));
-                Expr::app(Expr::ident(block_name(target)), a)
-            };
+            let then_call = lower_block_call(func, blocks[0], st_name, vmctx);
+            let else_call = lower_block_call(func, blocks[1], st_name, vmctx);
 
             Expr::if_then_else(cond, then_call, else_call)
+        }
+
+        (Opcode::BrTable, InstructionData::BranchTable { arg, table, .. }) => {
+            let index = value_expr(*arg, st_name, vmctx);
+            let table_data = &func.dfg.jump_tables[*table];
+            let mut expr = lower_block_call(func, table_data.default_block(), st_name, vmctx);
+            for (i, branch) in table_data.as_slice().iter().copied().enumerate().rev() {
+                expr = Expr::if_then_else(
+                    Expr::bin(BinOp::Eq, index.clone(), Expr::int(i as i64)),
+                    lower_block_call(func, branch, st_name, vmctx),
+                    expr,
+                );
+            }
+            expr
         }
 
         (Opcode::Trap, _) => Expr::app(
@@ -1047,15 +1032,29 @@ fn lower_terminator(func: &ir::Function, inst: Inst, st_name: &str, vmctx: ir::V
     }
 }
 
+fn lower_block_call(
+    func: &ir::Function,
+    call: ir::BlockCall,
+    st_name: &str,
+    vmctx: ir::Value,
+) -> Expr {
+    let target = call.block(&func.dfg.value_lists);
+    let mut args = call
+        .args_slice(&func.dfg.value_lists)
+        .iter()
+        .copied()
+        .map(|v| value_expr(v, st_name, vmctx))
+        .collect::<Vec<_>>();
+    args.push(Expr::ident(st_name));
+    Expr::app(Expr::ident(block_name(target)), args)
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CallKind {
     Pure,
     StatefulRecord,
     StatefulState,
-    Indirect {
-        table_index: u32,
-        type_index: u32,
-    },
+    Indirect { table_index: u32, type_index: u32 },
 }
 
 fn resolve_callee(func: &ir::Function, name: ir::ExternalName) -> (Expr, CallKind) {
@@ -1253,10 +1252,9 @@ mod tests {
     #[test]
     fn generated_module_keeps_compat_exports_and_instantiate() {
         let wasm = [
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x60, 0x02,
-            0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x61,
-            0x64, 0x64, 0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01,
-            0x6a, 0x0b,
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x60, 0x02, 0x7f,
+            0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64,
+            0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,
         ];
         let nix = lower_wasm(&wasm);
 
@@ -1269,12 +1267,11 @@ mod tests {
     #[test]
     fn generated_module_embeds_active_data_segments() {
         let wasm = [
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00,
-            0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x11,
-            0x02, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x04, 0x6c, 0x6f,
-            0x61, 0x64, 0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x41, 0x04, 0x28, 0x02,
-            0x00, 0x0b, 0x0b, 0x0a, 0x01, 0x00, 0x41, 0x04, 0x0b, 0x04, 0x01, 0x02, 0x03,
-            0x04,
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7f, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x11, 0x02, 0x06,
+            0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x04, 0x6c, 0x6f, 0x61, 0x64, 0x00,
+            0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x41, 0x04, 0x28, 0x02, 0x00, 0x0b, 0x0b, 0x0a,
+            0x01, 0x00, 0x41, 0x04, 0x0b, 0x04, 0x01, 0x02, 0x03, 0x04,
         ];
         let nix = lower_wasm(&wasm);
 
@@ -1286,10 +1283,10 @@ mod tests {
     #[test]
     fn generated_module_runs_start_before_exposing_instance_state() {
         let wasm = [
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
-            0x00, 0x03, 0x02, 0x01, 0x00, 0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x00, 0x0b,
-            0x07, 0x05, 0x01, 0x01, 0x67, 0x03, 0x00, 0x08, 0x01, 0x00, 0x0a, 0x08, 0x01,
-            0x06, 0x00, 0x41, 0x2a, 0x24, 0x00, 0x0b,
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x00, 0x0b, 0x07, 0x05,
+            0x01, 0x01, 0x67, 0x03, 0x00, 0x08, 0x01, 0x00, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x41,
+            0x2a, 0x24, 0x00, 0x0b,
         ];
         let nix = lower_wasm(&wasm);
 
@@ -1302,12 +1299,11 @@ mod tests {
     #[test]
     fn generated_module_lowers_call_indirect_through_table_runtime() {
         let wasm = [
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01,
-            0x7f, 0x01, 0x7f, 0x03, 0x03, 0x02, 0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00,
-            0x01, 0x07, 0x08, 0x01, 0x04, 0x63, 0x61, 0x6c, 0x6c, 0x00, 0x01, 0x09, 0x07,
-            0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00, 0x0a, 0x13, 0x02, 0x07, 0x00, 0x20,
-            0x00, 0x41, 0x01, 0x6a, 0x0b, 0x09, 0x00, 0x20, 0x00, 0x41, 0x00, 0x11, 0x00,
-            0x00, 0x0b,
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f,
+            0x01, 0x7f, 0x03, 0x03, 0x02, 0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x07,
+            0x08, 0x01, 0x04, 0x63, 0x61, 0x6c, 0x6c, 0x00, 0x01, 0x09, 0x07, 0x01, 0x00, 0x41,
+            0x00, 0x0b, 0x01, 0x00, 0x0a, 0x13, 0x02, 0x07, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a,
+            0x0b, 0x09, 0x00, 0x20, 0x00, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b,
         ];
         let nix = lower_wasm(&wasm);
 

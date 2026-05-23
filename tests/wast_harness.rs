@@ -50,7 +50,9 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                     .as_ref()
                     .ok_or_else(|| "assert_return before module".to_string())?;
                 let WastExecute::Invoke(invoke) = exec else {
-                    return Err("only assert_return invoke is supported by this harness slice".into());
+                    return Err(
+                        "only assert_return invoke is supported by this harness slice".into(),
+                    );
                 };
                 let actual = eval_invoke(module, invoke.name, &invoke.args)?;
                 let expected = expected_results_json(&results)?;
