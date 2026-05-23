@@ -531,6 +531,7 @@ struct Intrinsics {
     elem_drop: Option<ir::FuncRef>,
     table_get: Option<ir::FuncRef>,
     table_set: Option<ir::FuncRef>,
+    table_fill: Option<ir::FuncRef>,
 
     global_get_i32: Option<ir::FuncRef>,
     global_get_i64: Option<ir::FuncRef>,
@@ -761,6 +762,23 @@ impl<'m> NixFuncEnvironment<'m> {
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
         let fref = self.import_intrinsic(func, intr::TABLE_SET, sig);
         self.intrinsics.table_set = Some(fref);
+        fref
+    }
+
+    fn intrinsic_table_fill(&mut self, func: &mut ir::Function) -> ir::FuncRef {
+        if let Some(f) = self.intrinsics.table_fill {
+            return f;
+        }
+        let ptr = self.pointer_type();
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params
+            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
+        let fref = self.import_intrinsic(func, intr::TABLE_FILL, sig);
+        self.intrinsics.table_fill = Some(fref);
         fref
     }
 
@@ -1315,13 +1333,20 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
 
     fn translate_table_fill(
         &mut self,
-        _pos: FuncCursor,
-        _table_index: TableIndex,
-        _dst: ir::Value,
-        _val: ir::Value,
-        _len: ir::Value,
+        mut pos: FuncCursor,
+        table_index: TableIndex,
+        dst: ir::Value,
+        val: ir::Value,
+        len: ir::Value,
     ) -> WasmResult<()> {
-        Err(WasmError::Unsupported("tables".into()))
+        let vmctx = pos
+            .func
+            .special_param(ir::ArgumentPurpose::VMContext)
+            .expect("Missing vmctx parameter");
+        let table = pos.ins().iconst(I32, i64::from(table_index.as_u32()));
+        let fref = self.intrinsic_table_fill(pos.func);
+        pos.ins().call(fref, &[table, dst, val, len, vmctx]);
+        Ok(())
     }
 
     fn translate_table_init(

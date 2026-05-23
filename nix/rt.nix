@@ -2437,6 +2437,21 @@ let
         in
         builtins.deepSeq newTable (setTable tableIndex newTable st);
       size = tableIndex: st: (getTable tableIndex st).size or 0;
+      fill =
+        tableIndex: dst: value: len: st:
+        let
+          tableValue = getTable tableIndex st;
+          checked = checkTableAccess "table.fill" tableValue dst len;
+          entry = if value == 0 then null else value;
+          newTable =
+            builtins.seq checked (
+              builtins.foldl' (
+                acc: i:
+                setEntry acc (dst + i) entry
+              ) tableValue (range len)
+            );
+        in
+        builtins.deepSeq newTable (setTable tableIndex newTable st);
       init =
         tableIndex: segIndex: dst: src: len: st:
         let

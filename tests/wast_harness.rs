@@ -943,7 +943,7 @@ fn wast_arg_to_nix(arg: &WastArg<'_>) -> Result<String, String> {
         WastArg::Core(WastArgCore::I64(value)) => Ok(nix_int_literal(*value)),
         WastArg::Core(WastArgCore::F32(value)) => Ok(value.bits.to_string()),
         WastArg::Core(WastArgCore::F64(value)) => Ok(nix_int_literal(value.bits as i64)),
-        WastArg::Core(WastArgCore::RefExtern(value)) => Ok(value.to_string()),
+        WastArg::Core(WastArgCore::RefExtern(value)) => Ok(format!("{{ extern = {value}; }}")),
         WastArg::Core(WastArgCore::RefNull(_)) => Ok("0".to_string()),
         _ => Err("unsupported invoke argument for this harness slice".into()),
     }
@@ -1013,7 +1013,7 @@ fn expected_result_to_json(ret: &WastRet<'_>) -> Result<String, String> {
         | WastRet::Core(WastRetCore::F64(NanPattern::CanonicalNan)) => Ok("nan:canonical".into()),
         WastRet::Core(WastRetCore::F32(NanPattern::ArithmeticNan))
         | WastRet::Core(WastRetCore::F64(NanPattern::ArithmeticNan)) => Ok("nan:arithmetic".into()),
-        WastRet::Core(WastRetCore::RefExtern(Some(value))) => Ok(value.to_string()),
+        WastRet::Core(WastRetCore::RefExtern(Some(value))) => Ok(format!("{{\"extern\":{value}}}")),
         WastRet::Core(WastRetCore::RefNull(_)) => Ok("0".to_string()),
         _ => Err("unsupported assert_return result for this harness slice".into()),
     }

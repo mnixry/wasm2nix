@@ -2018,6 +2018,7 @@ fn resolve_callee(
                     intr::ELEM_DROP => (rt_fn(&["table", "elem_drop"]), CallKind::StatefulState),
                     intr::TABLE_GET => (rt_fn(&["table", "get"]), CallKind::Pure),
                     intr::TABLE_SET => (rt_fn(&["table", "set"]), CallKind::StatefulState),
+                    intr::TABLE_FILL => (rt_fn(&["table", "fill"]), CallKind::StatefulState),
 
                     intr::GLOBAL_GET_I32 => (rt_fn(&["global", "get_i32"]), CallKind::Pure),
                     intr::GLOBAL_GET_I64 => (rt_fn(&["global", "get_i64"]), CallKind::Pure),
