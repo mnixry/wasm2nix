@@ -898,7 +898,13 @@ fn lower_inst(
                     )];
                     (seq_on_result(binds), None)
                 }
-                Opcode::Fneg | Opcode::Fabs | Opcode::Sqrt => {
+                Opcode::Fneg
+                | Opcode::Fabs
+                | Opcode::Sqrt
+                | Opcode::Ceil
+                | Opcode::Floor
+                | Opcode::Trunc
+                | Opcode::Nearest => {
                     let out = results[0];
                     let a = value_expr(func, *arg, st_name, vmctx);
                     let out_ty = func.dfg.value_type(out);
@@ -907,6 +913,10 @@ fn lower_inst(
                         Opcode::Fneg => "neg",
                         Opcode::Fabs => "abs",
                         Opcode::Sqrt => "sqrt",
+                        Opcode::Ceil => "ceil",
+                        Opcode::Floor => "floor",
+                        Opcode::Trunc => "trunc",
+                        Opcode::Nearest => "nearest",
                         _ => unreachable!(),
                     };
                     let binds = vec![(

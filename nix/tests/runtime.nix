@@ -124,13 +124,57 @@
     expr = rt.f32.add 1065353216 1073741824;
     expected = 1077936128;
   };
+  test_f32_add_negative_zeros_preserves_sign = {
+    expr = rt.f32.add 2147483648 2147483648;
+    expected = 2147483648;
+  };
+  test_f32_add_mixed_zeros_is_positive = {
+    expr = rt.f32.add 2147483648 0;
+    expected = 0;
+  };
+  test_f32_add_negative_zero_preserves_negative_subnormal = {
+    expr = rt.f32.add 2147483648 2147483649;
+    expected = 2147483649;
+  };
+  test_f32_add_negative_subnormals = {
+    expr = rt.f32.add 2147483649 2147483649;
+    expected = 2147483650;
+  };
+  test_f32_add_negative_min_subnormal_and_min_normal = {
+    expr = rt.f32.add 2147483649 2155872256;
+    expected = 2155872257;
+  };
+  test_f32_add_opposite_subnormals_cancels_positive = {
+    expr = rt.f32.add 1 2147483649;
+    expected = 0;
+  };
+  test_f32_add_quiets_nan = {
+    expr = rt.f32.add 2139095041 1065353216;
+    expected = 2143289345;
+  };
   test_f32_exact_sub = {
     expr = rt.f32.sub 1084227584 1065353216;
     expected = 1082130432;
   };
+  test_f32_sub_negative_zero_minus_positive_zero = {
+    expr = rt.f32.sub 2147483648 0;
+    expected = 2147483648;
+  };
+  test_f32_sub_negative_zero_minus_negative_zero = {
+    expr = rt.f32.sub 2147483648 2147483648;
+    expected = 0;
+  };
+  test_f32_sub_positive_zero_flips_negative_subnormal = {
+    expr = rt.f32.sub 0 2147483649;
+    expected = 1;
+  };
   test_f32_exact_mul = {
     expr = rt.f32.mul 1073741824 1077936128;
     expected = 1086324736;
+  };
+  test_f32_mul_quiets_rhs_nan = {
+    expr = rt.f32.mul 1065353216 2139095041;
+    expected = 2143289345;
   };
   test_f32_min_signed_zero = {
     expr = rt.f32.min 0 2147483648;
@@ -148,9 +192,53 @@
     expr = rt.f64.add 4607182418800017408 4611686018427387904;
     expected = 4613937818241073152;
   };
+  test_f64_add_negative_zeros_preserves_sign = {
+    expr = rt.f64.add (0 - 9223372036854775807 - 1) (0 - 9223372036854775807 - 1);
+    expected = 0 - 9223372036854775807 - 1;
+  };
+  test_f64_add_mixed_zeros_is_positive = {
+    expr = rt.f64.add (0 - 9223372036854775807 - 1) 0;
+    expected = 0;
+  };
+  test_f64_add_negative_zero_preserves_negative_subnormal = {
+    expr = rt.f64.add (0 - 9223372036854775807 - 1) (-9223372036854775807);
+    expected = -9223372036854775807;
+  };
+  test_f64_add_negative_subnormals = {
+    expr = rt.f64.add (-9223372036854775807) (-9223372036854775807);
+    expected = -9223372036854775806;
+  };
+  test_f64_add_negative_subnormal_adjacent = {
+    expr = rt.f64.add (-9223372036854775807) (-9221120237041090560);
+    expected = -9221120237041090559;
+  };
+  test_f64_add_opposite_subnormals_cancels_positive = {
+    expr = rt.f64.add 1 (-9223372036854775807);
+    expected = 0;
+  };
+  test_f64_add_quiets_nan = {
+    expr = rt.f64.add 9218868437227405313 4607182418800017408;
+    expected = 9221120237041090561;
+  };
+  test_f64_sub_negative_zero_minus_positive_zero = {
+    expr = rt.f64.sub (0 - 9223372036854775807 - 1) 0;
+    expected = 0 - 9223372036854775807 - 1;
+  };
+  test_f64_sub_negative_zero_minus_negative_zero = {
+    expr = rt.f64.sub (0 - 9223372036854775807 - 1) (0 - 9223372036854775807 - 1);
+    expected = 0;
+  };
+  test_f64_sub_positive_zero_flips_negative_subnormal = {
+    expr = rt.f64.sub 0 (-9223372036854775807);
+    expected = 1;
+  };
   test_f64_exact_mul = {
     expr = rt.f64.mul 4611686018427387904 4613937818241073152;
     expected = 4618441417868443648;
+  };
+  test_f64_mul_quiets_rhs_nan = {
+    expr = rt.f64.mul 4607182418800017408 9218868437227405313;
+    expected = 9221120237041090561;
   };
   test_f64_min_signed_zero = {
     expr = rt.f64.min 0 (0 - 9223372036854775807 - 1);
