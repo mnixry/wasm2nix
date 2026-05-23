@@ -9,6 +9,8 @@ cranelift-wasm = "0.112.3"
 cranelift-codegen = "*"
 cranelift-frontend = "*"
 cranelift-entity = "*"
+exn = "0.3.1"
+fastrace = { version = "0.7.17", features = ["enable"] }
 slog = "2.8.2"
 snafu = "0.8.9"
 

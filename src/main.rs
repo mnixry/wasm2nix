@@ -28,6 +28,14 @@ fn main() -> error::Result<()> {
         _ => log::LogLevel::Trace,
     };
     let logger = log::init_logger(level);
+    let trace_enabled = args.verbose >= 2;
+    if trace_enabled {
+        fastrace::set_reporter(
+            fastrace::collector::ConsoleReporter,
+            fastrace::collector::Config::default(),
+        );
+    }
+    let _trace_flush = TraceFlush(trace_enabled);
 
     let wasm = std::fs::read(&args.input).map_err(|source| error::Error::ReadWasm {
         path: args.input.clone(),
@@ -56,4 +64,14 @@ fn main() -> error::Result<()> {
     })?;
     slog::info!(logger, "Wrote nix output"; "path" => out_path.display().to_string());
     Ok(())
+}
+
+struct TraceFlush(bool);
+
+impl Drop for TraceFlush {
+    fn drop(&mut self) {
+        if self.0 {
+            fastrace::flush();
+        }
+    }
 }

@@ -1,3 +1,4 @@
+use crate::intrinsics as intr;
 use cranelift_codegen::cursor::FuncCursor;
 use cranelift_codegen::ir;
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -14,32 +15,6 @@ use cranelift_wasm::{
     WASM32_MAX_SIZE, WasmError, WasmFuncType, WasmHeapType, WasmResult, WasmValType,
     translate_module,
 };
-
-const FUNC_NAMESPACE: u32 = 0;
-const INTRINSIC_NAMESPACE: u32 = 1;
-
-// Intrinsic indices within `INTRINSIC_NAMESPACE`.
-const INTR_MEM_GROW: u32 = 0;
-const INTR_MEM_SIZE: u32 = 1;
-const INTR_MEM_COPY: u32 = 2;
-const INTR_MEM_FILL: u32 = 3;
-const INTR_MEM_INIT: u32 = 4;
-const INTR_DATA_DROP: u32 = 5;
-const INTR_GLOBAL_GET_I32: u32 = 10;
-const INTR_GLOBAL_GET_I64: u32 = 11;
-const INTR_GLOBAL_GET_F32: u32 = 12;
-const INTR_GLOBAL_GET_F64: u32 = 13;
-const INTR_GLOBAL_SET_I32: u32 = 20;
-const INTR_GLOBAL_SET_I64: u32 = 21;
-const INTR_GLOBAL_SET_F32: u32 = 22;
-const INTR_GLOBAL_SET_F64: u32 = 23;
-const INTR_TABLE_COPY: u32 = 30;
-const INTR_TABLE_INIT: u32 = 31;
-const INTR_ELEM_DROP: u32 = 32;
-const INTR_TABLE_GET: u32 = 33;
-const INTR_TABLE_SET: u32 = 34;
-const INTR_CALL_INDIRECT_BASE: u32 = 1000;
-const INTR_CALL_INDIRECT_STRIDE: u32 = 10000;
 
 #[derive(Debug, Clone)]
 pub struct Exportable<T> {
@@ -450,7 +425,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         let sig = func_environ.vmctx_sig(sigidx);
 
         let mut func = ir::Function::with_name_signature(
-            UserFuncName::user(FUNC_NAMESPACE, func_index.as_u32()),
+            UserFuncName::user(intr::FUNC_NAMESPACE, func_index.as_u32()),
             sig,
         );
         self.trans
@@ -598,7 +573,7 @@ impl<'m> NixFuncEnvironment<'m> {
         let signature = func.import_signature(sig);
         let name =
             ir::ExternalName::User(func.declare_imported_user_function(ir::UserExternalName {
-                namespace: INTRINSIC_NAMESPACE,
+                namespace: intr::INTRINSIC_NAMESPACE,
                 index: intrinsic_index,
             }));
         func.import_function(ir::ExtFuncData {
@@ -620,7 +595,7 @@ impl<'m> NixFuncEnvironment<'m> {
         ));
         sig.returns.push(ir::AbiParam::new(I32));
 
-        let fref = self.import_intrinsic(func, INTR_MEM_GROW, sig);
+        let fref = self.import_intrinsic(func, intr::MEM_GROW, sig);
         self.intrinsics.mem_grow = Some(fref);
         fref
     }
@@ -636,7 +611,7 @@ impl<'m> NixFuncEnvironment<'m> {
         ));
         sig.returns.push(ir::AbiParam::new(I32));
 
-        let fref = self.import_intrinsic(func, INTR_MEM_SIZE, sig);
+        let fref = self.import_intrinsic(func, intr::MEM_SIZE, sig);
         self.intrinsics.mem_size = Some(fref);
         fref
     }
@@ -652,7 +627,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, INTR_MEM_COPY, sig);
+        let fref = self.import_intrinsic(func, intr::MEM_COPY, sig);
         self.intrinsics.mem_copy = Some(fref);
         fref
     }
@@ -668,7 +643,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, INTR_MEM_FILL, sig);
+        let fref = self.import_intrinsic(func, intr::MEM_FILL, sig);
         self.intrinsics.mem_fill = Some(fref);
         fref
     }
@@ -685,7 +660,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, INTR_MEM_INIT, sig);
+        let fref = self.import_intrinsic(func, intr::MEM_INIT, sig);
         self.intrinsics.mem_init = Some(fref);
         fref
     }
@@ -699,7 +674,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, INTR_DATA_DROP, sig);
+        let fref = self.import_intrinsic(func, intr::DATA_DROP, sig);
         self.intrinsics.data_drop = Some(fref);
         fref
     }
@@ -717,7 +692,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, INTR_TABLE_COPY, sig);
+        let fref = self.import_intrinsic(func, intr::TABLE_COPY, sig);
         self.intrinsics.table_copy = Some(fref);
         fref
     }
@@ -735,7 +710,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, INTR_TABLE_INIT, sig);
+        let fref = self.import_intrinsic(func, intr::TABLE_INIT, sig);
         self.intrinsics.table_init = Some(fref);
         fref
     }
@@ -749,7 +724,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, INTR_ELEM_DROP, sig);
+        let fref = self.import_intrinsic(func, intr::ELEM_DROP, sig);
         self.intrinsics.elem_drop = Some(fref);
         fref
     }
@@ -765,7 +740,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
         sig.returns.push(ir::AbiParam::new(I32));
-        let fref = self.import_intrinsic(func, INTR_TABLE_GET, sig);
+        let fref = self.import_intrinsic(func, intr::TABLE_GET, sig);
         self.intrinsics.table_get = Some(fref);
         fref
     }
@@ -781,7 +756,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, INTR_TABLE_SET, sig);
+        let fref = self.import_intrinsic(func, intr::TABLE_SET, sig);
         self.intrinsics.table_set = Some(fref);
         fref
     }
@@ -798,7 +773,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
                 sig.returns.push(ir::AbiParam::new(I32));
-                let fref = self.import_intrinsic(func, INTR_GLOBAL_GET_I32, sig);
+                let fref = self.import_intrinsic(func, intr::GLOBAL_GET_I32, sig);
                 self.intrinsics.global_get_i32 = Some(fref);
                 fref
             }
@@ -812,7 +787,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
                 sig.returns.push(ir::AbiParam::new(I64));
-                let fref = self.import_intrinsic(func, INTR_GLOBAL_GET_I64, sig);
+                let fref = self.import_intrinsic(func, intr::GLOBAL_GET_I64, sig);
                 self.intrinsics.global_get_i64 = Some(fref);
                 fref
             }
@@ -826,7 +801,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
                 sig.returns.push(ir::AbiParam::new(F32));
-                let fref = self.import_intrinsic(func, INTR_GLOBAL_GET_F32, sig);
+                let fref = self.import_intrinsic(func, intr::GLOBAL_GET_F32, sig);
                 self.intrinsics.global_get_f32 = Some(fref);
                 fref
             }
@@ -840,7 +815,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
                 sig.returns.push(ir::AbiParam::new(F64));
-                let fref = self.import_intrinsic(func, INTR_GLOBAL_GET_F64, sig);
+                let fref = self.import_intrinsic(func, intr::GLOBAL_GET_F64, sig);
                 self.intrinsics.global_get_f64 = Some(fref);
                 fref
             }
@@ -860,7 +835,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params.push(ir::AbiParam::new(I32));
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                let fref = self.import_intrinsic(func, INTR_GLOBAL_SET_I32, sig);
+                let fref = self.import_intrinsic(func, intr::GLOBAL_SET_I32, sig);
                 self.intrinsics.global_set_i32 = Some(fref);
                 fref
             }
@@ -874,7 +849,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params.push(ir::AbiParam::new(I64));
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                let fref = self.import_intrinsic(func, INTR_GLOBAL_SET_I64, sig);
+                let fref = self.import_intrinsic(func, intr::GLOBAL_SET_I64, sig);
                 self.intrinsics.global_set_i64 = Some(fref);
                 fref
             }
@@ -888,7 +863,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params.push(ir::AbiParam::new(F32));
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                let fref = self.import_intrinsic(func, INTR_GLOBAL_SET_F32, sig);
+                let fref = self.import_intrinsic(func, intr::GLOBAL_SET_F32, sig);
                 self.intrinsics.global_set_f32 = Some(fref);
                 fref
             }
@@ -902,7 +877,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params.push(ir::AbiParam::new(F64));
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                let fref = self.import_intrinsic(func, INTR_GLOBAL_SET_F64, sig);
+                let fref = self.import_intrinsic(func, intr::GLOBAL_SET_F64, sig);
                 self.intrinsics.global_set_f64 = Some(fref);
                 fref
             }
@@ -919,8 +894,8 @@ impl<'m> NixFuncEnvironment<'m> {
         let mut sig = self.vmctx_sig(sig_index);
         sig.params.insert(0, ir::AbiParam::new(I32));
         let canonical_sig_index = self.mod_info.canonical_type_index(sig_index);
-        let intrinsic_index = INTR_CALL_INDIRECT_BASE
-            + table_index.as_u32() * INTR_CALL_INDIRECT_STRIDE
+        let intrinsic_index = intr::CALL_INDIRECT_BASE
+            + table_index.as_u32() * intr::CALL_INDIRECT_STRIDE
             + canonical_sig_index.as_u32();
         self.import_intrinsic(func, intrinsic_index, sig)
     }
@@ -1015,7 +990,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         // Make the base address symbolic so `heap_addr` results are stable and can be treated as
         // linear offsets during CLIF→Nix lowering (we'll interpret the base as 0).
         let base_name = func.declare_imported_user_function(ir::UserExternalName {
-            namespace: INTRINSIC_NAMESPACE,
+            namespace: intr::INTRINSIC_NAMESPACE,
             index: 1000 + index.as_u32(),
         });
         let base = func.create_global_value(ir::GlobalValueData::Symbol {
@@ -1057,7 +1032,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         let signature = func.import_signature(self.vmctx_sig(sigidx));
         let name =
             ir::ExternalName::User(func.declare_imported_user_function(ir::UserExternalName {
-                namespace: FUNC_NAMESPACE,
+                namespace: intr::FUNC_NAMESPACE,
                 index: index.as_u32(),
             }));
         Ok(func.import_function(ir::ExtFuncData {

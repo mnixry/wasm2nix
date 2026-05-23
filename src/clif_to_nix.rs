@@ -1,3 +1,4 @@
+use crate::intrinsics as intr;
 use crate::nix::{AttrKey, BinOp, Expr, UnOp};
 use crate::translator::NixModule;
 use cranelift_codegen::ir;
@@ -7,32 +8,6 @@ use cranelift_codegen::ir::{ArgumentPurpose, Block, Inst, InstructionData, Opcod
 use cranelift_entity::EntityRef;
 use cranelift_wasm::{ConstOp, WasmValType};
 use std::collections::BTreeMap;
-
-const FUNC_NAMESPACE: u32 = 0;
-const INTRINSIC_NAMESPACE: u32 = 1;
-
-// Must match `translator.rs`
-const INTR_MEM_GROW: u32 = 0;
-const INTR_MEM_SIZE: u32 = 1;
-const INTR_MEM_COPY: u32 = 2;
-const INTR_MEM_FILL: u32 = 3;
-const INTR_MEM_INIT: u32 = 4;
-const INTR_DATA_DROP: u32 = 5;
-const INTR_GLOBAL_GET_I32: u32 = 10;
-const INTR_GLOBAL_GET_I64: u32 = 11;
-const INTR_GLOBAL_GET_F32: u32 = 12;
-const INTR_GLOBAL_GET_F64: u32 = 13;
-const INTR_GLOBAL_SET_I32: u32 = 20;
-const INTR_GLOBAL_SET_I64: u32 = 21;
-const INTR_GLOBAL_SET_F32: u32 = 22;
-const INTR_GLOBAL_SET_F64: u32 = 23;
-const INTR_TABLE_COPY: u32 = 30;
-const INTR_TABLE_INIT: u32 = 31;
-const INTR_ELEM_DROP: u32 = 32;
-const INTR_TABLE_GET: u32 = 33;
-const INTR_TABLE_SET: u32 = 34;
-const INTR_CALL_INDIRECT_BASE: u32 = 1000;
-const INTR_CALL_INDIRECT_STRIDE: u32 = 10000;
 
 pub fn lower_module(module: &NixModule) -> Expr {
     // Top-level:
@@ -1496,40 +1471,48 @@ fn resolve_callee(func: &ir::Function, name: ir::ExternalName) -> (Expr, CallKin
         ir::ExternalName::User(user_ref) => {
             let user = &func.params.user_named_funcs()[user_ref];
             match user.namespace {
-                FUNC_NAMESPACE => {
+                intr::FUNC_NAMESPACE => {
                     // wasm function: f{index}
                     (
                         Expr::ident(format!("f{}", user.index)),
                         CallKind::StatefulRecord,
                     )
                 }
-                INTRINSIC_NAMESPACE => match user.index {
-                    INTR_MEM_GROW => (rt_fn(&["mem", "grow"]), CallKind::StatefulRecord),
-                    INTR_MEM_SIZE => (rt_fn(&["mem", "size"]), CallKind::Pure),
-                    INTR_MEM_COPY => (rt_fn(&["mem", "copy"]), CallKind::StatefulState),
-                    INTR_MEM_FILL => (rt_fn(&["mem", "fill"]), CallKind::StatefulState),
-                    INTR_MEM_INIT => (rt_fn(&["mem", "init"]), CallKind::StatefulState),
-                    INTR_DATA_DROP => (rt_fn(&["mem", "data_drop"]), CallKind::StatefulState),
-                    INTR_TABLE_COPY => (rt_fn(&["table", "copy"]), CallKind::StatefulState),
-                    INTR_TABLE_INIT => (rt_fn(&["table", "init"]), CallKind::StatefulState),
-                    INTR_ELEM_DROP => (rt_fn(&["table", "elem_drop"]), CallKind::StatefulState),
-                    INTR_TABLE_GET => (rt_fn(&["table", "get"]), CallKind::Pure),
-                    INTR_TABLE_SET => (rt_fn(&["table", "set"]), CallKind::StatefulState),
+                intr::INTRINSIC_NAMESPACE => match user.index {
+                    intr::MEM_GROW => (rt_fn(&["mem", "grow"]), CallKind::StatefulRecord),
+                    intr::MEM_SIZE => (rt_fn(&["mem", "size"]), CallKind::Pure),
+                    intr::MEM_COPY => (rt_fn(&["mem", "copy"]), CallKind::StatefulState),
+                    intr::MEM_FILL => (rt_fn(&["mem", "fill"]), CallKind::StatefulState),
+                    intr::MEM_INIT => (rt_fn(&["mem", "init"]), CallKind::StatefulState),
+                    intr::DATA_DROP => (rt_fn(&["mem", "data_drop"]), CallKind::StatefulState),
+                    intr::TABLE_COPY => (rt_fn(&["table", "copy"]), CallKind::StatefulState),
+                    intr::TABLE_INIT => (rt_fn(&["table", "init"]), CallKind::StatefulState),
+                    intr::ELEM_DROP => (rt_fn(&["table", "elem_drop"]), CallKind::StatefulState),
+                    intr::TABLE_GET => (rt_fn(&["table", "get"]), CallKind::Pure),
+                    intr::TABLE_SET => (rt_fn(&["table", "set"]), CallKind::StatefulState),
 
-                    INTR_GLOBAL_GET_I32 => (rt_fn(&["global", "get_i32"]), CallKind::Pure),
-                    INTR_GLOBAL_GET_I64 => (rt_fn(&["global", "get_i64"]), CallKind::Pure),
-                    INTR_GLOBAL_GET_F32 => (rt_fn(&["global", "get_f32"]), CallKind::Pure),
-                    INTR_GLOBAL_GET_F64 => (rt_fn(&["global", "get_f64"]), CallKind::Pure),
+                    intr::GLOBAL_GET_I32 => (rt_fn(&["global", "get_i32"]), CallKind::Pure),
+                    intr::GLOBAL_GET_I64 => (rt_fn(&["global", "get_i64"]), CallKind::Pure),
+                    intr::GLOBAL_GET_F32 => (rt_fn(&["global", "get_f32"]), CallKind::Pure),
+                    intr::GLOBAL_GET_F64 => (rt_fn(&["global", "get_f64"]), CallKind::Pure),
 
-                    INTR_GLOBAL_SET_I32 => (rt_fn(&["global", "set_i32"]), CallKind::StatefulState),
-                    INTR_GLOBAL_SET_I64 => (rt_fn(&["global", "set_i64"]), CallKind::StatefulState),
-                    INTR_GLOBAL_SET_F32 => (rt_fn(&["global", "set_f32"]), CallKind::StatefulState),
-                    INTR_GLOBAL_SET_F64 => (rt_fn(&["global", "set_f64"]), CallKind::StatefulState),
+                    intr::GLOBAL_SET_I32 => {
+                        (rt_fn(&["global", "set_i32"]), CallKind::StatefulState)
+                    }
+                    intr::GLOBAL_SET_I64 => {
+                        (rt_fn(&["global", "set_i64"]), CallKind::StatefulState)
+                    }
+                    intr::GLOBAL_SET_F32 => {
+                        (rt_fn(&["global", "set_f32"]), CallKind::StatefulState)
+                    }
+                    intr::GLOBAL_SET_F64 => {
+                        (rt_fn(&["global", "set_f64"]), CallKind::StatefulState)
+                    }
 
-                    other if other >= INTR_CALL_INDIRECT_BASE => {
-                        let encoded = other - INTR_CALL_INDIRECT_BASE;
-                        let table_index = encoded / INTR_CALL_INDIRECT_STRIDE;
-                        let type_index = encoded % INTR_CALL_INDIRECT_STRIDE;
+                    other if other >= intr::CALL_INDIRECT_BASE => {
+                        let encoded = other - intr::CALL_INDIRECT_BASE;
+                        let table_index = encoded / intr::CALL_INDIRECT_STRIDE;
+                        let type_index = encoded % intr::CALL_INDIRECT_STRIDE;
                         (
                             rt_fn(&["table", "call"]),
                             CallKind::Indirect {
