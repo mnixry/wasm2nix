@@ -487,6 +487,14 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
                             ),
                         ),
                         (
+                            AttrKey::ident("maxSize"),
+                            lower_attr_or(
+                                Expr::ident("importedTable"),
+                                "maxSize",
+                                Expr::int(i64::from(table_decl.entity.maximum.unwrap_or(u32::MAX))),
+                            ),
+                        ),
+                        (
                             AttrKey::ident("elems"),
                             Expr::bin(
                                 BinOp::Update,
@@ -508,6 +516,10 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
                     (
                         AttrKey::ident("size"),
                         Expr::int(i64::from(table_decl.entity.minimum)),
+                    ),
+                    (
+                        AttrKey::ident("maxSize"),
+                        Expr::int(i64::from(table_decl.entity.maximum.unwrap_or(u32::MAX))),
                     ),
                     (AttrKey::ident("elems"), elems_expr),
                 ],
@@ -2019,6 +2031,8 @@ fn resolve_callee(
                     intr::TABLE_GET => (rt_fn(&["table", "get"]), CallKind::Pure),
                     intr::TABLE_SET => (rt_fn(&["table", "set"]), CallKind::StatefulState),
                     intr::TABLE_FILL => (rt_fn(&["table", "fill"]), CallKind::StatefulState),
+                    intr::TABLE_SIZE => (rt_fn(&["table", "size"]), CallKind::Pure),
+                    intr::TABLE_GROW => (rt_fn(&["table", "grow"]), CallKind::StatefulRecord),
 
                     intr::GLOBAL_GET_I32 => (rt_fn(&["global", "get_i32"]), CallKind::Pure),
                     intr::GLOBAL_GET_I64 => (rt_fn(&["global", "get_i64"]), CallKind::Pure),

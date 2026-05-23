@@ -23,6 +23,8 @@ pub const ELEM_DROP: u32 = 32;
 pub const TABLE_GET: u32 = 33;
 pub const TABLE_SET: u32 = 34;
 pub const TABLE_FILL: u32 = 35;
+pub const TABLE_SIZE: u32 = 36;
+pub const TABLE_GROW: u32 = 37;
 
 pub const CALL_INDIRECT_BASE: u32 = 1000;
 pub const CALL_INDIRECT_STRIDE: u32 = 10000;

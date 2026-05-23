@@ -2437,6 +2437,32 @@ let
         in
         builtins.deepSeq newTable (setTable tableIndex newTable st);
       size = tableIndex: st: (getTable tableIndex st).size or 0;
+      grow =
+        tableIndex: initValue: delta: st:
+        let
+          tableValue = getTable tableIndex st;
+          old = tableValue.size or 0;
+          new = old + delta;
+          tableMaxSize = tableValue.maxSize or u32Max;
+          entry = if initValue == 0 then null else initValue;
+        in
+        if delta < 0 || new > tableMaxSize || new > u32Max then
+          {
+            inherit st;
+            results = [ u32Max ];
+          }
+        else
+          let
+            newTable =
+              builtins.foldl' (
+                acc: i:
+                setEntry acc (old + i) entry
+              ) (tableValue // { size = new; }) (range delta);
+          in
+          {
+            st = builtins.deepSeq newTable (setTable tableIndex newTable st);
+            results = [ old ];
+          };
       fill =
         tableIndex: dst: value: len: st:
         let

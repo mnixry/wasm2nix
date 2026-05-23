@@ -189,7 +189,7 @@ impl TargetEnvironment for NixModule {
     }
 
     fn reference_type(&self, _ty: WasmHeapType) -> (ir::Type, bool) {
-        (self.pointer_type(), false)
+        (I32, false)
     }
 }
 
@@ -532,6 +532,8 @@ struct Intrinsics {
     table_get: Option<ir::FuncRef>,
     table_set: Option<ir::FuncRef>,
     table_fill: Option<ir::FuncRef>,
+    table_size: Option<ir::FuncRef>,
+    table_grow: Option<ir::FuncRef>,
 
     global_get_i32: Option<ir::FuncRef>,
     global_get_i64: Option<ir::FuncRef>,
@@ -782,6 +784,38 @@ impl<'m> NixFuncEnvironment<'m> {
         fref
     }
 
+    fn intrinsic_table_size(&mut self, func: &mut ir::Function) -> ir::FuncRef {
+        if let Some(f) = self.intrinsics.table_size {
+            return f;
+        }
+        let ptr = self.pointer_type();
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params
+            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
+        sig.returns.push(ir::AbiParam::new(I32));
+        let fref = self.import_intrinsic(func, intr::TABLE_SIZE, sig);
+        self.intrinsics.table_size = Some(fref);
+        fref
+    }
+
+    fn intrinsic_table_grow(&mut self, func: &mut ir::Function) -> ir::FuncRef {
+        if let Some(f) = self.intrinsics.table_grow {
+            return f;
+        }
+        let ptr = self.pointer_type();
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params
+            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
+        sig.returns.push(ir::AbiParam::new(I32));
+        let fref = self.import_intrinsic(func, intr::TABLE_GROW, sig);
+        self.intrinsics.table_grow = Some(fref);
+        fref
+    }
+
     fn intrinsic_ref_func(
         &mut self,
         func: &mut ir::Function,
@@ -970,7 +1004,7 @@ impl<'m> TargetEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn reference_type(&self, _ty: WasmHeapType) -> (ir::Type, bool) {
-        (self.pointer_type(), false)
+        (I32, false)
     }
 }
 
@@ -1261,20 +1295,34 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
 
     fn translate_table_size(
         &mut self,
-        _pos: FuncCursor,
-        _index: TableIndex,
+        mut pos: FuncCursor,
+        index: TableIndex,
     ) -> WasmResult<ir::Value> {
-        Err(WasmError::Unsupported("tables".into()))
+        let vmctx = pos
+            .func
+            .special_param(ir::ArgumentPurpose::VMContext)
+            .expect("Missing vmctx parameter");
+        let table = pos.ins().iconst(I32, i64::from(index.as_u32()));
+        let fref = self.intrinsic_table_size(pos.func);
+        let inst = pos.ins().call(fref, &[table, vmctx]);
+        Ok(pos.func.dfg.inst_results(inst)[0])
     }
 
     fn translate_table_grow(
         &mut self,
-        _pos: FuncCursor,
-        _table_index: TableIndex,
-        _delta: ir::Value,
-        _init_value: ir::Value,
+        mut pos: FuncCursor,
+        table_index: TableIndex,
+        delta: ir::Value,
+        init_value: ir::Value,
     ) -> WasmResult<ir::Value> {
-        Err(WasmError::Unsupported("tables".into()))
+        let vmctx = pos
+            .func
+            .special_param(ir::ArgumentPurpose::VMContext)
+            .expect("Missing vmctx parameter");
+        let table = pos.ins().iconst(I32, i64::from(table_index.as_u32()));
+        let fref = self.intrinsic_table_grow(pos.func);
+        let inst = pos.ins().call(fref, &[table, init_value, delta, vmctx]);
+        Ok(pos.func.dfg.inst_results(inst)[0])
     }
 
     fn translate_table_get(
