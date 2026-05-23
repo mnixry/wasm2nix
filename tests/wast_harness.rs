@@ -1,10 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value as JsonValue;
+use wasm2nix::translator::NixModule;
 use wast::core::{NanPattern, WastArgCore, WastRetCore};
 use wast::parser::{self, ParseBuffer};
 use wast::{Wast, WastArg, WastDirective, WastExecute, WastRet};
@@ -62,14 +64,27 @@ fn run_wast_script(script: &str) -> Result<(), String> {
             WastDirective::Module(mut module) => {
                 let module_name = module.name().map(|id| id.name().to_string());
                 let wasm = module.encode().map_err(|e| e.to_string())?;
-                let nix = wasm2nix::lower_wasm_to_nix(&wasm)?;
+                let translated = NixModule::translate(&wasm).map_err(|e| e.to_string())?;
+                let imported_tables = translated.info.imported_tables.clone();
+                let table_exports = table_exports(&translated);
+                let nix = wasm2nix::clif_to_nix::lower_module(&translated).render();
                 let path = write_generated_module(&nix)?;
                 let key = module_name.unwrap_or_else(|| {
                     let key = format!("__anon{next_anon_module}");
                     next_anon_module += 1;
                     key
                 });
-                modules.insert(key.clone(), HarnessModule { path, state: None });
+                let state = eval_instantiate(&path, &key)?;
+                modules.insert(
+                    key.clone(),
+                    HarnessModule {
+                        path,
+                        state: Some(state),
+                        imported_tables,
+                        table_exports,
+                    },
+                );
+                merge_imported_table_initializers(&key, &mut modules, &aliases)?;
                 current_module = Some(key);
             }
             WastDirective::Register { name, module, .. } => {
@@ -81,24 +96,33 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                     WastExecute::Invoke(invoke) => {
                         let key =
                             select_module_key(invoke.module, current_module.as_deref(), &aliases)?;
-                        let module = modules
-                            .get_mut(&key)
-                            .ok_or_else(|| format!("unknown module {key}"))?;
+                        let state = modules
+                            .get(&key)
+                            .ok_or_else(|| format!("unknown module {key}"))?
+                            .state
+                            .clone();
                         let actual = eval_invoke(
-                            &module.path,
+                            &key,
+                            &modules,
+                            &aliases,
                             invoke.name,
                             &invoke.args,
-                            module.state.as_deref(),
+                            state.as_deref(),
                         )?;
-                        module.state = Some(actual.state.clone());
+                        modules
+                            .get_mut(&key)
+                            .ok_or_else(|| format!("unknown module {key}"))?
+                            .state = Some(actual.state.clone());
                         actual
                     }
                     WastExecute::Get { module, global, .. } => {
                         let key = select_module_key(module, current_module.as_deref(), &aliases)?;
-                        let module = modules
-                            .get_mut(&key)
-                            .ok_or_else(|| format!("unknown module {key}"))?;
-                        eval_get(&module.path, global, module.state.as_deref())?
+                        let state = modules
+                            .get(&key)
+                            .ok_or_else(|| format!("unknown module {key}"))?
+                            .state
+                            .clone();
+                        eval_get(&key, &modules, &aliases, global, state.as_deref())?
                     }
                     WastExecute::Wat(_) => {
                         return Err(
@@ -115,18 +139,56 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                     ));
                 }
             }
+            WastDirective::AssertTrap { exec, .. } => match exec {
+                WastExecute::Invoke(invoke) => {
+                    let key =
+                        select_module_key(invoke.module, current_module.as_deref(), &aliases)?;
+                    let module = modules
+                        .get(&key)
+                        .ok_or_else(|| format!("unknown module {key}"))?;
+                    if eval_invoke(
+                        &key,
+                        &modules,
+                        &aliases,
+                        invoke.name,
+                        &invoke.args,
+                        module.state.as_deref(),
+                    )
+                    .is_ok()
+                    {
+                        return Err(format!("assert_trap invoke {} did not trap", invoke.name));
+                    }
+                }
+                WastExecute::Get { module, global, .. } => {
+                    let key = select_module_key(module, current_module.as_deref(), &aliases)?;
+                    let module = modules
+                        .get(&key)
+                        .ok_or_else(|| format!("unknown module {key}"))?;
+                    if eval_get(&key, &modules, &aliases, global, module.state.as_deref()).is_ok() {
+                        return Err(format!("assert_trap get {global} did not trap"));
+                    }
+                }
+                WastExecute::Wat(_) => {}
+            },
             WastDirective::Invoke(invoke) => {
                 let key = select_module_key(invoke.module, current_module.as_deref(), &aliases)?;
-                let module = modules
-                    .get_mut(&key)
-                    .ok_or_else(|| format!("unknown module {key}"))?;
+                let state = modules
+                    .get(&key)
+                    .ok_or_else(|| format!("unknown module {key}"))?
+                    .state
+                    .clone();
                 let actual = eval_invoke(
-                    &module.path,
+                    &key,
+                    &modules,
+                    &aliases,
                     invoke.name,
                     &invoke.args,
-                    module.state.as_deref(),
+                    state.as_deref(),
                 )?;
-                module.state = Some(actual.state);
+                modules
+                    .get_mut(&key)
+                    .ok_or_else(|| format!("unknown module {key}"))?
+                    .state = Some(actual.state);
             }
             _ => {}
         }
@@ -138,6 +200,8 @@ fn run_wast_script(script: &str) -> Result<(), String> {
 struct HarnessModule {
     path: PathBuf,
     state: Option<String>,
+    imported_tables: Vec<(String, String)>,
+    table_exports: HashMap<String, u32>,
 }
 
 fn select_module_key(
@@ -161,9 +225,28 @@ fn select_module_key(
 fn write_generated_module(nix: &str) -> Result<PathBuf, String> {
     let id = NEXT_FILE.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
-    let path = std::env::temp_dir().join(format!("wasm2nix-wast-{pid}-{id}.nix"));
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("wasm2nix-wast-{pid}-{nanos}-{id}.nix"));
     fs::write(&path, nix).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+fn table_exports(module: &NixModule) -> HashMap<String, u32> {
+    module
+        .info
+        .tables
+        .iter()
+        .flat_map(|(idx, table)| {
+            table
+                .export_names
+                .iter()
+                .cloned()
+                .map(move |name| (name, idx.as_u32()))
+        })
+        .collect()
 }
 
 struct InvokeResult {
@@ -171,8 +254,27 @@ struct InvokeResult {
     state: String,
 }
 
+fn eval_instantiate(module: &PathBuf, module_key: &str) -> Result<String, String> {
+    let expr = format!(
+        "let rt = import ./nix/rt.nix {{}}; m = import {} rt {{ \"__moduleId\" = {}; \"__funcRegistry\" = {{}}; }}; i = m.instantiate {{}}; in i.st",
+        module.display(),
+        nix_string(module_key),
+    );
+    let output = Command::new("nix")
+        .args(["eval", "--json", "--impure", "--expr", &expr])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let value: JsonValue = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    json_to_nix(&value)
+}
+
 fn eval_invoke(
-    module: &PathBuf,
+    module_key: &str,
+    modules: &HashMap<String, HarnessModule>,
+    aliases: &HashMap<String, String>,
     name: &str,
     args: &[WastArg<'_>],
     state: Option<&str>,
@@ -188,9 +290,14 @@ fn eval_invoke(
         format!("i.exports.\"{name}\" {args} st_in")
     };
     let state_expr = state.unwrap_or("i.st");
+    let world = EvalWorld::new(modules, aliases);
+    let module_var = world
+        .module_vars
+        .get(module_key)
+        .ok_or_else(|| format!("unknown module {module_key}"))?;
     let expr = format!(
-        "let rt = import ./nix/rt.nix {{}}; m = import {} rt {{}}; i = m.instantiate {{}}; st_in = {state_expr}; call = {invoke}; in {{ results = call.results; st = call.st; }}",
-        module.display()
+        "let rt = import ./nix/rt.nix {{}}; {} i = {module_var}.instantiate {{}}; st_in = {state_expr}; call = {invoke}; in {{ results = call.results; st = call.st; }}",
+        world.binds
     );
     let output = Command::new("nix")
         .args(["eval", "--json", "--impure", "--expr", &expr])
@@ -206,11 +313,22 @@ fn eval_invoke(
     Ok(InvokeResult { results, state })
 }
 
-fn eval_get(module: &PathBuf, name: &str, state: Option<&str>) -> Result<InvokeResult, String> {
+fn eval_get(
+    module_key: &str,
+    modules: &HashMap<String, HarnessModule>,
+    aliases: &HashMap<String, String>,
+    name: &str,
+    state: Option<&str>,
+) -> Result<InvokeResult, String> {
     let state_expr = state.unwrap_or("i.st");
+    let world = EvalWorld::new(modules, aliases);
+    let module_var = world
+        .module_vars
+        .get(module_key)
+        .ok_or_else(|| format!("unknown module {module_key}"))?;
     let expr = format!(
-        "let rt = import ./nix/rt.nix {{}}; m = import {} rt {{}}; i = m.instantiate {{}}; st_in = {state_expr}; value = i.exports.\"{name}\".get st_in; in {{ results = [ value ]; st = st_in; }}",
-        module.display()
+        "let rt = import ./nix/rt.nix {{}}; {} i = {module_var}.instantiate {{}}; st_in = {state_expr}; value = i.exports.\"{name}\".get st_in; in {{ results = [ value ]; st = st_in; }}",
+        world.binds
     );
     let output = Command::new("nix")
         .args(["eval", "--json", "--impure", "--expr", &expr])
@@ -224,6 +342,142 @@ fn eval_get(module: &PathBuf, name: &str, state: Option<&str>) -> Result<InvokeR
         serde_json::to_string(&value["results"]).map_err(|e| format!("invalid results: {e}"))?;
     let state = json_to_nix(&value["st"])?;
     Ok(InvokeResult { results, state })
+}
+
+struct EvalWorld {
+    binds: String,
+    module_vars: HashMap<String, String>,
+}
+
+impl EvalWorld {
+    fn new(modules: &HashMap<String, HarnessModule>, aliases: &HashMap<String, String>) -> Self {
+        let mut keys = modules.keys().cloned().collect::<Vec<_>>();
+        keys.sort();
+
+        let module_vars = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (key.clone(), format!("m{i}")))
+            .collect::<HashMap<_, _>>();
+
+        let mut binds = String::new();
+        for key in &keys {
+            let module = &modules[key];
+            let var = &module_vars[key];
+            let imports = imports_expr(key, aliases, &module_vars);
+            binds.push_str(&format!(
+                "{var} = import {} rt {imports}; ",
+                module.path.display()
+            ));
+        }
+
+        binds.push_str("funcRegistry = { ");
+        for key in &keys {
+            let var = &module_vars[key];
+            binds.push_str(&format!(
+                "{} = {var}.\"__wasm2nix\".funcs; ",
+                nix_string(key)
+            ));
+        }
+        binds.push_str("}; ");
+
+        Self { binds, module_vars }
+    }
+}
+
+fn imports_expr(
+    module_key: &str,
+    aliases: &HashMap<String, String>,
+    module_vars: &HashMap<String, String>,
+) -> String {
+    let mut fields = BTreeMap::new();
+    fields.insert("__moduleId".to_string(), nix_string(module_key));
+    fields.insert("__funcRegistry".to_string(), "funcRegistry".to_string());
+
+    for (key, var) in module_vars {
+        fields.insert(key.clone(), var.clone());
+    }
+    for (alias, key) in aliases {
+        if let Some(var) = module_vars.get(key) {
+            fields.insert(alias.clone(), var.clone());
+        }
+    }
+
+    let body = fields
+        .into_iter()
+        .map(|(name, value)| format!("{} = {value};", nix_string(&name)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{{ {body} }}")
+}
+
+fn merge_imported_table_initializers(
+    module_key: &str,
+    modules: &mut HashMap<String, HarnessModule>,
+    aliases: &HashMap<String, String>,
+) -> Result<(), String> {
+    let imported_tables = modules
+        .get(module_key)
+        .ok_or_else(|| format!("unknown module {module_key}"))?
+        .imported_tables
+        .clone();
+
+    for (source_table_index, (import_module, import_field)) in imported_tables.iter().enumerate() {
+        let target_key = aliases
+            .get(import_module)
+            .cloned()
+            .unwrap_or_else(|| import_module.clone());
+        if !modules.contains_key(&target_key) {
+            continue;
+        }
+
+        let target_table_index = modules[&target_key]
+            .table_exports
+            .get(import_field)
+            .copied()
+            .ok_or_else(|| {
+                format!("imported table {import_module}.{import_field} has no table export")
+            })?;
+        let target_state = modules[&target_key]
+            .state
+            .clone()
+            .ok_or_else(|| format!("target module {target_key} has no instantiated state"))?;
+        let source_state = modules[module_key]
+            .state
+            .clone()
+            .ok_or_else(|| format!("source module {module_key} has no instantiated state"))?;
+
+        let merged = merge_table_state_expr(
+            &target_state,
+            target_table_index,
+            &source_state,
+            source_table_index as u32,
+        );
+        modules
+            .get_mut(&target_key)
+            .ok_or_else(|| format!("unknown module {target_key}"))?
+            .state = Some(merged);
+    }
+
+    Ok(())
+}
+
+fn merge_table_state_expr(
+    target_state: &str,
+    target_table_index: u32,
+    source_state: &str,
+    source_table_index: u32,
+) -> String {
+    format!(
+        "(let dstSt = {target_state}; srcSt = {source_state}; dstTables = dstSt.tables or {{}}; srcTables = srcSt.tables or {{}}; dstTable = dstTables.{} or {{ size = 0; elems = {{}}; }}; srcTable = srcTables.{} or {{ elems = {{}}; }}; mergedTable = dstTable // {{ elems = (dstTable.elems or {{}}) // (srcTable.elems or {{}}); }}; in dstSt // {{ tables = dstTables // {{ {} = mergedTable; }}; }})",
+        nix_string(&target_table_index.to_string()),
+        nix_string(&source_table_index.to_string()),
+        nix_string(&target_table_index.to_string())
+    )
+}
+
+fn nix_string(value: &str) -> String {
+    format!("{value:?}")
 }
 
 fn wast_arg_to_nix(arg: &WastArg<'_>) -> Result<String, String> {

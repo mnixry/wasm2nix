@@ -484,7 +484,7 @@ lib.debug.runTests {
           };
         };
       in
-      run1 (rt.table.call 0 0 funcs 0 [ 41 ] st1);
+      run1 (rt.table.call 0 0 "local" funcs { } 0 [ 41 ] st1);
     expected = 42;
   };
   test_table_call_type_mismatch_traps = {
@@ -512,8 +512,39 @@ lib.debug.runTests {
           };
         };
       in
-      tryOk (rt.table.call 0 0 funcs 0 [ ] st1);
+      tryOk (rt.table.call 0 0 "local" funcs { } 0 [ ] st1);
     expected = false;
+  };
+  test_table_get_null_ref_is_zero = {
+    expr =
+      let
+        st1 = st0 // {
+          tables = {
+            "0" = {
+              size = 1;
+              elems = { };
+            };
+          };
+        };
+      in
+      rt.table.get 0 0 st1;
+    expected = 0;
+  };
+  test_table_set_get_externref = {
+    expr =
+      let
+        st1 = st0 // {
+          tables = {
+            "0" = {
+              size = 1;
+              elems = { };
+            };
+          };
+        };
+        st2 = rt.table.set 0 0 42 st1;
+      in
+      rt.table.get 0 0 st2;
+    expected = 42;
   };
   test_table_init_copies_element_segment = {
     expr =
@@ -544,7 +575,7 @@ lib.debug.runTests {
         };
         st2 = rt.table.init 0 0 0 0 1 st1;
       in
-      run1 (rt.table.call 0 0 funcs 0 [ ] st2);
+      run1 (rt.table.call 0 0 "local" funcs { } 0 [ ] st2);
     expected = 42;
   };
   test_elem_drop_makes_segment_empty = {

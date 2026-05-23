@@ -29,14 +29,16 @@ const INTR_GLOBAL_SET_F64: u32 = 23;
 const INTR_TABLE_COPY: u32 = 30;
 const INTR_TABLE_INIT: u32 = 31;
 const INTR_ELEM_DROP: u32 = 32;
+const INTR_TABLE_GET: u32 = 33;
+const INTR_TABLE_SET: u32 = 34;
 const INTR_CALL_INDIRECT_BASE: u32 = 1000;
 const INTR_CALL_INDIRECT_STRIDE: u32 = 10000;
 
 pub fn lower_module(module: &NixModule) -> Expr {
     // Top-level:
     // rt: imports:
-    // let funcs = rec { ... }; st0 = { ... }; st = <after start>; exports = { ... };
-    // in exports // { instantiate = _args: { st = st; exports = exports; }; }
+    // let moduleId = ...; funcs = rec { ... }; funcRegistry = ...; st0 = ...; st = ...; exports = ...;
+    // in exports // { instantiate = _args: { st = st; exports = exports; }; __wasm2nix = { funcs = funcs; }; }
     let funcs_expr = lower_funcs_rec_attrset(module);
     let exports_expr = lower_exports_attrset(module);
     let st0_expr = lower_initial_state(module);
@@ -55,7 +57,19 @@ pub fn lower_module(module: &NixModule) -> Expr {
         Expr::ident("exports"),
         Expr::attrset(
             false,
-            vec![(AttrKey::ident("instantiate"), instantiate_expr)],
+            vec![
+                (AttrKey::ident("instantiate"), instantiate_expr),
+                (
+                    AttrKey::ident("__wasm2nix"),
+                    Expr::attrset(
+                        false,
+                        vec![
+                            (AttrKey::ident("funcs"), Expr::ident("funcs")),
+                            (AttrKey::ident("moduleId"), Expr::ident("moduleId")),
+                        ],
+                    ),
+                ),
+            ],
         ),
     );
 
@@ -65,13 +79,50 @@ pub fn lower_module(module: &NixModule) -> Expr {
             "imports",
             Expr::let_in(
                 vec![
+                    ("moduleId".into(), lower_module_id()),
                     ("funcs".into(), funcs_expr),
+                    ("funcRegistry".into(), lower_func_registry()),
                     ("st0".into(), st0_expr),
                     ("st".into(), lower_start_state(module)),
                     ("exports".into(), exports_expr),
                 ],
                 body,
             ),
+        ),
+    )
+}
+
+fn lower_module_id() -> Expr {
+    Expr::if_then_else(
+        Expr::app(
+            Expr::select(Expr::ident("builtins"), AttrKey::ident("hasAttr")),
+            vec![Expr::string("__moduleId"), Expr::ident("imports")],
+        ),
+        Expr::select(Expr::ident("imports"), AttrKey::string("__moduleId")),
+        Expr::string("__self"),
+    )
+}
+
+fn lower_func_registry() -> Expr {
+    Expr::bin(
+        BinOp::Update,
+        Expr::if_then_else(
+            Expr::app(
+                Expr::select(Expr::ident("builtins"), AttrKey::ident("hasAttr")),
+                vec![Expr::string("__funcRegistry"), Expr::ident("imports")],
+            ),
+            Expr::select(Expr::ident("imports"), AttrKey::string("__funcRegistry")),
+            Expr::attrset(false, vec![]),
+        ),
+        Expr::app(
+            Expr::select(Expr::ident("builtins"), AttrKey::ident("listToAttrs")),
+            vec![Expr::list(vec![Expr::attrset(
+                false,
+                vec![
+                    (AttrKey::ident("name"), Expr::ident("moduleId")),
+                    (AttrKey::ident("value"), Expr::ident("funcs")),
+                ],
+            )])],
         ),
     )
 }
@@ -334,6 +385,7 @@ fn lower_table_entry(module: &NixModule, func_index: cranelift_wasm::FuncIndex) 
     Expr::attrset(
         false,
         vec![
+            (AttrKey::ident("module"), Expr::ident("moduleId")),
             (
                 AttrKey::ident("func"),
                 Expr::int(i64::from(func_index.as_u32())),
@@ -1178,7 +1230,9 @@ fn lower_inst(
                         vec![
                             Expr::int(i64::from(table_index)),
                             Expr::int(i64::from(type_index)),
+                            Expr::ident("moduleId"),
                             Expr::ident("funcs"),
+                            Expr::ident("funcRegistry"),
                             callee,
                             Expr::list(wasm_args),
                             Expr::ident(st_name),
@@ -1459,6 +1513,8 @@ fn resolve_callee(func: &ir::Function, name: ir::ExternalName) -> (Expr, CallKin
                     INTR_TABLE_COPY => (rt_fn(&["table", "copy"]), CallKind::StatefulState),
                     INTR_TABLE_INIT => (rt_fn(&["table", "init"]), CallKind::StatefulState),
                     INTR_ELEM_DROP => (rt_fn(&["table", "elem_drop"]), CallKind::StatefulState),
+                    INTR_TABLE_GET => (rt_fn(&["table", "get"]), CallKind::Pure),
+                    INTR_TABLE_SET => (rt_fn(&["table", "set"]), CallKind::StatefulState),
 
                     INTR_GLOBAL_GET_I32 => (rt_fn(&["global", "get_i32"]), CallKind::Pure),
                     INTR_GLOBAL_GET_I64 => (rt_fn(&["global", "get_i64"]), CallKind::Pure),
@@ -1681,6 +1737,7 @@ mod tests {
         assert!(nix.contains("instantiate = _args:"));
         assert!(nix.contains("st = st;"));
         assert!(nix.contains("exports = exports;"));
+        assert!(nix.contains("__wasm2nix ="));
     }
 
     #[test]
@@ -1726,8 +1783,9 @@ mod tests {
         ];
         let nix = lower_wasm(&wasm);
 
-        assert!(nix.contains("rt.table.call 0 0 funcs"));
+        assert!(nix.contains("rt.table.call 0 0 moduleId funcs funcRegistry"));
         assert!(nix.contains("tables = {"));
+        assert!(nix.contains("module = moduleId;"));
         assert!(nix.contains("func = 0;"));
         assert!(nix.contains("type = 0;"));
     }

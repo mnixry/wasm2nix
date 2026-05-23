@@ -1652,7 +1652,7 @@ let
     in
     {
       call =
-        tableIndex: typeIndex: funcs: elemIndex: args: st:
+        tableIndex: typeIndex: moduleId: funcs: funcRegistry: elemIndex: args: st:
         let
           entry = getEntry (getTable tableIndex st) elemIndex;
         in
@@ -1662,9 +1662,33 @@ let
           throw "wasm trap: indirect call type mismatch"
         else
           let
-            fn = builtins.getAttr ("f" + toString entry.func) funcs;
+            targetFuncs =
+              if entry ? module && entry.module != moduleId then
+                builtins.getAttr entry.module funcRegistry
+              else
+                funcs;
+            fn = builtins.getAttr ("f" + toString entry.func) targetFuncs;
           in
           (applyArgs fn args) st;
+      get =
+        tableIndex: elemIndex: st:
+        builtins.seq (checkTableAccess "table.get" (getTable tableIndex st) elemIndex 1) (
+          let
+            entry = getEntry (getTable tableIndex st) elemIndex;
+          in
+          if entry == null then 0 else entry
+        );
+      set =
+        tableIndex: elemIndex: value: st:
+        let
+          tableValue = getTable tableIndex st;
+          checked = checkTableAccess "table.set" tableValue elemIndex 1;
+          newTable =
+            builtins.seq checked (
+              setEntry tableValue elemIndex (if value == 0 then null else value)
+            );
+        in
+        builtins.deepSeq newTable (setTable tableIndex newTable st);
       size = tableIndex: st: (getTable tableIndex st).size or 0;
       init =
         tableIndex: segIndex: dst: src: len: st:

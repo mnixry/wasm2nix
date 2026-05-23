@@ -1,5 +1,6 @@
 use cranelift_codegen::cursor::FuncCursor;
 use cranelift_codegen::ir;
+use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::immediates::Imm64;
 use cranelift_codegen::ir::types::{F32, F64, I32, I64};
 use cranelift_codegen::ir::{InstBuilder, UserFuncName};
@@ -35,6 +36,8 @@ const INTR_GLOBAL_SET_F64: u32 = 23;
 const INTR_TABLE_COPY: u32 = 30;
 const INTR_TABLE_INIT: u32 = 31;
 const INTR_ELEM_DROP: u32 = 32;
+const INTR_TABLE_GET: u32 = 33;
+const INTR_TABLE_SET: u32 = 34;
 const INTR_CALL_INDIRECT_BASE: u32 = 1000;
 const INTR_CALL_INDIRECT_STRIDE: u32 = 10000;
 
@@ -394,7 +397,9 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         let elem_index = ElemIndex::new(self.info.elem_segment_count);
         self.info.elem_segment_count += 1;
         let elements = elements.into_vec();
-        self.info.element_segments[elem_index] = elements.clone();
+        // Active element segments are consumed during instantiation. Keep their index present
+        // but empty so a later table.init with that index traps on segment bounds.
+        self.info.element_segments[elem_index] = Vec::new();
         self.info.table_initializers.push(TableInitializer {
             elem_index,
             table_index,
@@ -414,6 +419,13 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         self.info.passive_elements[index] = elements.clone();
         self.info.element_segments[index] = elements;
         self.info.elem_segment_count = self.info.elem_segment_count.max(index.index() + 1);
+        Ok(())
+    }
+
+    fn declare_elements(&mut self, _elements: Box<[FuncIndex]>) -> WasmResult<()> {
+        let elem_index = ElemIndex::new(self.info.elem_segment_count);
+        self.info.elem_segment_count += 1;
+        self.info.element_segments[elem_index] = Vec::new();
         Ok(())
     }
 
@@ -539,6 +551,8 @@ struct Intrinsics {
     table_copy: Option<ir::FuncRef>,
     table_init: Option<ir::FuncRef>,
     elem_drop: Option<ir::FuncRef>,
+    table_get: Option<ir::FuncRef>,
+    table_set: Option<ir::FuncRef>,
 
     global_get_i32: Option<ir::FuncRef>,
     global_get_i64: Option<ir::FuncRef>,
@@ -737,6 +751,38 @@ impl<'m> NixFuncEnvironment<'m> {
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
         let fref = self.import_intrinsic(func, INTR_ELEM_DROP, sig);
         self.intrinsics.elem_drop = Some(fref);
+        fref
+    }
+
+    fn intrinsic_table_get(&mut self, func: &mut ir::Function) -> ir::FuncRef {
+        if let Some(f) = self.intrinsics.table_get {
+            return f;
+        }
+        let ptr = self.pointer_type();
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params
+            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
+        sig.returns.push(ir::AbiParam::new(I32));
+        let fref = self.import_intrinsic(func, INTR_TABLE_GET, sig);
+        self.intrinsics.table_get = Some(fref);
+        fref
+    }
+
+    fn intrinsic_table_set(&mut self, func: &mut ir::Function) -> ir::FuncRef {
+        if let Some(f) = self.intrinsics.table_set {
+            return f;
+        }
+        let ptr = self.pointer_type();
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params.push(ir::AbiParam::new(I32));
+        sig.params
+            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
+        let fref = self.import_intrinsic(func, INTR_TABLE_SET, sig);
+        self.intrinsics.table_set = Some(fref);
         fref
     }
 
@@ -1227,21 +1273,35 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
 
     fn translate_table_get(
         &mut self,
-        _builder: &mut FunctionBuilder,
-        _table_index: TableIndex,
-        _index: ir::Value,
+        builder: &mut FunctionBuilder,
+        table_index: TableIndex,
+        index: ir::Value,
     ) -> WasmResult<ir::Value> {
-        Err(WasmError::Unsupported("tables".into()))
+        let vmctx = builder
+            .func
+            .special_param(ir::ArgumentPurpose::VMContext)
+            .expect("Missing vmctx parameter");
+        let table = builder.ins().iconst(I32, i64::from(table_index.as_u32()));
+        let fref = self.intrinsic_table_get(builder.func);
+        let call = builder.ins().call(fref, &[table, index, vmctx]);
+        Ok(builder.inst_results(call)[0])
     }
 
     fn translate_table_set(
         &mut self,
-        _builder: &mut FunctionBuilder,
-        _table_index: TableIndex,
-        _value: ir::Value,
-        _index: ir::Value,
+        builder: &mut FunctionBuilder,
+        table_index: TableIndex,
+        value: ir::Value,
+        index: ir::Value,
     ) -> WasmResult<()> {
-        Err(WasmError::Unsupported("tables".into()))
+        let vmctx = builder
+            .func
+            .special_param(ir::ArgumentPurpose::VMContext)
+            .expect("Missing vmctx parameter");
+        let table = builder.ins().iconst(I32, i64::from(table_index.as_u32()));
+        let fref = self.intrinsic_table_set(builder.func);
+        builder.ins().call(fref, &[table, index, value, vmctx]);
+        Ok(())
     }
 
     fn translate_table_copy(
@@ -1307,16 +1367,21 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         Ok(())
     }
 
-    fn translate_ref_null(&mut self, _pos: FuncCursor, _ty: WasmHeapType) -> WasmResult<ir::Value> {
-        Err(WasmError::Unsupported("ref.null".into()))
+    fn translate_ref_null(
+        &mut self,
+        mut pos: FuncCursor,
+        _ty: WasmHeapType,
+    ) -> WasmResult<ir::Value> {
+        Ok(pos.ins().iconst(I32, 0))
     }
 
     fn translate_ref_is_null(
         &mut self,
-        _pos: FuncCursor,
-        _value: ir::Value,
+        mut pos: FuncCursor,
+        value: ir::Value,
     ) -> WasmResult<ir::Value> {
-        Err(WasmError::Unsupported("ref.is_null".into()))
+        let is_null = pos.ins().icmp_imm(IntCC::Equal, value, 0);
+        Ok(pos.ins().uextend(I32, is_null))
     }
 
     fn translate_ref_func(
