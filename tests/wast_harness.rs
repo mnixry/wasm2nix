@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -51,51 +52,110 @@ fn run_with_large_stack(f: impl FnOnce() + Send + 'static) {
 fn run_wast_script(script: &str) -> Result<(), String> {
     let buf = ParseBuffer::new(script).map_err(|e| e.to_string())?;
     let wast = parser::parse::<Wast<'_>>(&buf).map_err(|e| e.to_string())?;
-    let mut current_module: Option<PathBuf> = None;
-    let mut current_state: Option<String> = None;
+    let mut modules: HashMap<String, HarnessModule> = HashMap::new();
+    let mut aliases: HashMap<String, String> = HashMap::new();
+    let mut current_module: Option<String> = None;
+    let mut next_anon_module = 0usize;
 
     for directive in wast.directives {
         match directive {
             WastDirective::Module(mut module) => {
+                let module_name = module.name().map(|id| id.name().to_string());
                 let wasm = module.encode().map_err(|e| e.to_string())?;
                 let nix = wasm2nix::lower_wasm_to_nix(&wasm)?;
                 let path = write_generated_module(&nix)?;
-                current_module = Some(path);
-                current_state = None;
+                let key = module_name.unwrap_or_else(|| {
+                    let key = format!("__anon{next_anon_module}");
+                    next_anon_module += 1;
+                    key
+                });
+                modules.insert(key.clone(), HarnessModule { path, state: None });
+                current_module = Some(key);
+            }
+            WastDirective::Register { name, module, .. } => {
+                let key = select_module_key(module, current_module.as_deref(), &aliases)?;
+                aliases.insert(name.to_string(), key);
             }
             WastDirective::AssertReturn { exec, results, .. } => {
-                let module = current_module
-                    .as_ref()
-                    .ok_or_else(|| "assert_return before module".to_string())?;
-                let WastExecute::Invoke(invoke) = exec else {
-                    return Err(
-                        "only assert_return invoke is supported by this harness slice".into(),
-                    );
+                let actual = match exec {
+                    WastExecute::Invoke(invoke) => {
+                        let key =
+                            select_module_key(invoke.module, current_module.as_deref(), &aliases)?;
+                        let module = modules
+                            .get_mut(&key)
+                            .ok_or_else(|| format!("unknown module {key}"))?;
+                        let actual = eval_invoke(
+                            &module.path,
+                            invoke.name,
+                            &invoke.args,
+                            module.state.as_deref(),
+                        )?;
+                        module.state = Some(actual.state.clone());
+                        actual
+                    }
+                    WastExecute::Get { module, global, .. } => {
+                        let key = select_module_key(module, current_module.as_deref(), &aliases)?;
+                        let module = modules
+                            .get_mut(&key)
+                            .ok_or_else(|| format!("unknown module {key}"))?;
+                        eval_get(&module.path, global, module.state.as_deref())?
+                    }
+                    WastExecute::Wat(_) => {
+                        return Err(
+                            "assert_return module execution is not supported by this harness slice"
+                                .into(),
+                        );
+                    }
                 };
-                let actual =
-                    eval_invoke(module, invoke.name, &invoke.args, current_state.as_deref())?;
-                current_state = Some(actual.state);
                 let expected = expected_results_json(&results)?;
                 if !results_match(&results, &actual.results)? {
                     return Err(format!(
-                        "assert_return mismatch for {}: expected {expected}, got {}",
-                        invoke.name, actual.results
+                        "assert_return mismatch: expected {expected}, got {}",
+                        actual.results
                     ));
                 }
             }
             WastDirective::Invoke(invoke) => {
-                let module = current_module
-                    .as_ref()
-                    .ok_or_else(|| "invoke before module".to_string())?;
-                let actual =
-                    eval_invoke(module, invoke.name, &invoke.args, current_state.as_deref())?;
-                current_state = Some(actual.state);
+                let key = select_module_key(invoke.module, current_module.as_deref(), &aliases)?;
+                let module = modules
+                    .get_mut(&key)
+                    .ok_or_else(|| format!("unknown module {key}"))?;
+                let actual = eval_invoke(
+                    &module.path,
+                    invoke.name,
+                    &invoke.args,
+                    module.state.as_deref(),
+                )?;
+                module.state = Some(actual.state);
             }
             _ => {}
         }
     }
 
     Ok(())
+}
+
+struct HarnessModule {
+    path: PathBuf,
+    state: Option<String>,
+}
+
+fn select_module_key(
+    module: Option<wast::token::Id<'_>>,
+    current: Option<&str>,
+    aliases: &HashMap<String, String>,
+) -> Result<String, String> {
+    if let Some(module) = module {
+        let name = module.name();
+        Ok(aliases
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string()))
+    } else {
+        current
+            .map(str::to_string)
+            .ok_or_else(|| "module access before module".to_string())
+    }
 }
 
 fn write_generated_module(nix: &str) -> Result<PathBuf, String> {
@@ -130,6 +190,26 @@ fn eval_invoke(
     let state_expr = state.unwrap_or("i.st");
     let expr = format!(
         "let rt = import ./nix/rt.nix {{}}; m = import {} rt {{}}; i = m.instantiate {{}}; st_in = {state_expr}; call = {invoke}; in {{ results = call.results; st = call.st; }}",
+        module.display()
+    );
+    let output = Command::new("nix")
+        .args(["eval", "--json", "--impure", "--expr", &expr])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let value: JsonValue = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    let results =
+        serde_json::to_string(&value["results"]).map_err(|e| format!("invalid results: {e}"))?;
+    let state = json_to_nix(&value["st"])?;
+    Ok(InvokeResult { results, state })
+}
+
+fn eval_get(module: &PathBuf, name: &str, state: Option<&str>) -> Result<InvokeResult, String> {
+    let state_expr = state.unwrap_or("i.st");
+    let expr = format!(
+        "let rt = import ./nix/rt.nix {{}}; m = import {} rt {{}}; i = m.instantiate {{}}; st_in = {state_expr}; value = i.exports.\"{name}\".get st_in; in {{ results = [ value ]; st = st_in; }}",
         module.display()
     );
     let output = Command::new("nix")

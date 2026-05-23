@@ -148,6 +148,18 @@ lib.debug.runTests {
     expr = rt.f32.mul 1073741824 1077936128;
     expected = 1086324736;
   };
+  test_f32_min_signed_zero = {
+    expr = rt.f32.min 0 2147483648;
+    expected = 2147483648;
+  };
+  test_f32_max_signed_zero = {
+    expr = rt.f32.max 0 2147483648;
+    expected = 0;
+  };
+  test_f32_copysign = {
+    expr = rt.f32.copysign 1065353216 2147483648;
+    expected = 3212836864;
+  };
   test_f64_exact_add = {
     expr = rt.f64.add 4607182418800017408 4611686018427387904;
     expected = 4613937818241073152;
@@ -155,6 +167,18 @@ lib.debug.runTests {
   test_f64_exact_mul = {
     expr = rt.f64.mul 4611686018427387904 4613937818241073152;
     expected = 4618441417868443648;
+  };
+  test_f64_min_signed_zero = {
+    expr = rt.f64.min 0 (0 - 9223372036854775807 - 1);
+    expected = 0 - 9223372036854775807 - 1;
+  };
+  test_f64_max_signed_zero = {
+    expr = rt.f64.max 0 (0 - 9223372036854775807 - 1);
+    expected = 0;
+  };
+  test_f64_copysign = {
+    expr = rt.f64.copysign 4607182418800017408 (0 - 9223372036854775807 - 1);
+    expected = -4616189618054758400;
   };
   test_int_bnot_compat = {
     expr = rt.int.bnot 0;
@@ -290,6 +314,38 @@ lib.debug.runTests {
       in
       rt.mem.load_u8 3 st1;
     expected = 1;
+  };
+  test_mem_i64_load_s8_sign_extends_to_i64 = {
+    expr =
+      let
+        st1 = rt.mem.store_u8 255 0 st0;
+      in
+      rt.mem.load_s8_i64 0 st1;
+    expected = -1;
+  };
+  test_mem_i64_load_s16_sign_extends_to_i64 = {
+    expr =
+      let
+        st1 = rt.mem.store_u16 65535 0 st0;
+      in
+      rt.mem.load_s16_i64 0 st1;
+    expected = -1;
+  };
+  test_mem_i64_load_s32_sign_extends_to_i64 = {
+    expr =
+      let
+        st1 = rt.mem.store_i32 4294967295 0 st0;
+      in
+      rt.mem.load_s32_i64 0 st1;
+    expected = -1;
+  };
+  test_mem_store_u16_uses_low_16_bits_of_negative_i64 = {
+    expr =
+      let
+        st1 = rt.mem.store_u16 (-1) 0 st0;
+      in
+      rt.mem.load_u16 0 st1;
+    expected = 65535;
   };
 
   # Unaligned i32 load within a page should work (wasm spec allows unaligned accesses).

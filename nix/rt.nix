@@ -683,6 +683,67 @@ let
       f64 = floatCmpFns f64IsNaN f64IsZero (lhs: rhs: cmp_i64.eq lhs rhs) f64KeyLt;
     };
 
+  f32Min =
+    lhs: rhs:
+    if f32IsNaN lhs || f32IsNaN rhs then
+      2143289344
+    else if f32IsZero lhs && f32IsZero rhs then
+      if u32 lhs >= i32Sign || u32 rhs >= i32Sign then i32Sign else 0
+    else if fcmp.f32.le lhs rhs then
+      u32 lhs
+    else
+      u32 rhs;
+
+  f32Max =
+    lhs: rhs:
+    if f32IsNaN lhs || f32IsNaN rhs then
+      2143289344
+    else if f32IsZero lhs && f32IsZero rhs then
+      if u32 lhs < i32Sign || u32 rhs < i32Sign then 0 else i32Sign
+    else if fcmp.f32.ge lhs rhs then
+      u32 lhs
+    else
+      u32 rhs;
+
+  f32Copysign =
+    lhs: rhs:
+    u32 (f32Abs lhs + (if u32 rhs >= i32Sign then i32Sign else 0));
+
+  f64CanonicalNan = i64FromParts { lo = 0; hi = 2146959360; };
+
+  f64Min =
+    lhs: rhs:
+    if f64IsNaN lhs || f64IsNaN rhs then
+      f64CanonicalNan
+    else if f64IsZero lhs && f64IsZero rhs then
+      if i64IsNegativeParts (i64Parts lhs) || i64IsNegativeParts (i64Parts rhs) then i64Min else 0
+    else if fcmp.f64.le lhs rhs then
+      lhs
+    else
+      rhs;
+
+  f64Max =
+    lhs: rhs:
+    if f64IsNaN lhs || f64IsNaN rhs then
+      f64CanonicalNan
+    else if f64IsZero lhs && f64IsZero rhs then
+      if !(i64IsNegativeParts (i64Parts lhs)) || !(i64IsNegativeParts (i64Parts rhs)) then 0 else i64Min
+    else if fcmp.f64.ge lhs rhs then
+      lhs
+    else
+      rhs;
+
+  f64Copysign =
+    lhs: rhs:
+    let
+      a = i64Parts lhs;
+      b = i64Parts rhs;
+    in
+    i64FromParts {
+      lo = a.lo;
+      hi = builtins.bitOr (builtins.bitAnd a.hi 2147483647) (builtins.bitAnd b.hi i32Sign);
+    };
+
   f64MapParts =
     f: value:
     i64FromParts (f (i64Parts value));
@@ -1448,10 +1509,13 @@ let
     rec {
       load_u8 = addr: st: elemAt (loadBytes "load_u8" 1 addr st) 0;
       load_s8 = addr: st: u32 (signExtend 8 (load_u8 addr st));
+      load_s8_i64 = addr: st: checkI64 (signExtend 8 (load_u8 addr st));
       load_u16 = addr: st: bytesToU16 (loadBytes "load_u16" 2 addr st);
       load_s16 = addr: st: u32 (signExtend 16 (load_u16 addr st));
+      load_s16_i64 = addr: st: checkI64 (signExtend 16 (load_u16 addr st));
       load_u32 = addr: st: bytesToU32 (loadBytes "load_u32" 4 addr st);
       load_s32 = addr: st: u32 (signExtend 32 (load_u32 addr st));
+      load_s32_i64 = addr: st: checkI64 (signExtend 32 (load_u32 addr st));
       load_i32 = load_u32;
       load_f32 = load_u32;
       load_i64 = addr: st: bytesToLimitedU64 (loadBytes "load_i64" 8 addr st);
@@ -1460,7 +1524,10 @@ let
       store_u8 = value: addr: st: storeBytes "store_u8" [ (floorMod value 256) ] addr st;
       store_u16 =
         value: addr: st:
-        storeBytes "store_u16" [ (floorMod value 256) (floorMod (value / 256) 256) ] addr st;
+        let
+          v = u32 value;
+        in
+        storeBytes "store_u16" [ (floorMod v 256) (floorMod (v / 256) 256) ] addr st;
       store_i32 = value: addr: st: storeBytes "store_i32" (u32ToBytes value) addr st;
       store_u32 = store_i32;
       store_f32 = store_i32;
@@ -1654,6 +1721,9 @@ rec {
     sub = f32ExactBin "sub" (lhs: rhs: lhs - rhs);
     mul = f32ExactBin "mul" (lhs: rhs: lhs * rhs);
     div = f32ExactDiv;
+    min = f32Min;
+    max = f32Max;
+    copysign = f32Copysign;
     neg = value: u32 (builtins.bitXor (u32 value) i32Sign);
     abs = f32Abs;
     sqrt = value: if f32IsZero value then u32 value else unsupportedUnaryFloat "f32" "sqrt" value;
@@ -1665,6 +1735,9 @@ rec {
     sub = f64ExactBin "sub" (lhs: rhs: lhs - rhs);
     mul = f64ExactBin "mul" (lhs: rhs: lhs * rhs);
     div = f64ExactDiv;
+    min = f64Min;
+    max = f64Max;
+    copysign = f64Copysign;
     neg =
       f64MapParts (parts: parts // { hi = builtins.bitXor parts.hi i32Sign; });
     abs =

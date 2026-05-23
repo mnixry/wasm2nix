@@ -940,6 +940,9 @@ fn lower_inst(
                 Opcode::Fsub => "sub",
                 Opcode::Fmul => "mul",
                 Opcode::Fdiv => "div",
+                Opcode::Fmin => "min",
+                Opcode::Fmax => "max",
+                Opcode::Fcopysign => "copysign",
                 _ => unimplemented!("wasm2nix: unimplemented binary op {op:?}"),
             };
 
@@ -1520,10 +1523,13 @@ fn load_fn_name(op: Opcode, ty: ir::Type) -> &'static str {
             _ => "load_unknown",
         },
         Opcode::Uload8 => "load_u8",
+        Opcode::Sload8 if ty == I64 => "load_s8_i64",
         Opcode::Sload8 => "load_s8",
         Opcode::Uload16 => "load_u16",
+        Opcode::Sload16 if ty == I64 => "load_s16_i64",
         Opcode::Sload16 => "load_s16",
         Opcode::Uload32 => "load_u32",
+        Opcode::Sload32 if ty == I64 => "load_s32_i64",
         Opcode::Sload32 => "load_s32",
         _ => "load_unknown",
     }
