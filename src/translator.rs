@@ -110,6 +110,19 @@ impl NixModuleInfo {
             start_func: None,
         }
     }
+
+    pub fn canonical_type_index(&self, index: TypeIndex) -> TypeIndex {
+        let target = &self.signatures[index];
+        for (candidate_index, candidate) in self.signatures.iter() {
+            if candidate_index == index {
+                break;
+            }
+            if candidate.params == target.params && candidate.returns == target.returns {
+                return candidate_index;
+            }
+        }
+        index
+    }
 }
 
 pub struct NixModule {
@@ -690,9 +703,10 @@ impl<'m> NixFuncEnvironment<'m> {
     ) -> ir::FuncRef {
         let mut sig = self.vmctx_sig(sig_index);
         sig.params.insert(0, ir::AbiParam::new(I32));
+        let canonical_sig_index = self.mod_info.canonical_type_index(sig_index);
         let intrinsic_index = INTR_CALL_INDIRECT_BASE
             + table_index.as_u32() * INTR_CALL_INDIRECT_STRIDE
-            + sig_index.as_u32();
+            + canonical_sig_index.as_u32();
         self.import_intrinsic(func, intrinsic_index, sig)
     }
 

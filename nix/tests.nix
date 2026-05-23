@@ -136,6 +136,26 @@ lib.debug.runTests {
     expr = rt.f64.abs (0 - 9223372036854775807 - 1);
     expected = 0;
   };
+  test_f32_exact_add = {
+    expr = rt.f32.add 1065353216 1073741824;
+    expected = 1077936128;
+  };
+  test_f32_exact_sub = {
+    expr = rt.f32.sub 1084227584 1065353216;
+    expected = 1082130432;
+  };
+  test_f32_exact_mul = {
+    expr = rt.f32.mul 1073741824 1077936128;
+    expected = 1086324736;
+  };
+  test_f64_exact_add = {
+    expr = rt.f64.add 4607182418800017408 4611686018427387904;
+    expected = 4613937818241073152;
+  };
+  test_f64_exact_mul = {
+    expr = rt.f64.mul 4611686018427387904 4613937818241073152;
+    expected = 4618441417868443648;
+  };
   test_int_bnot_compat = {
     expr = rt.int.bnot 0;
     expected = u32Max;

@@ -683,6 +683,187 @@ let
     f: value:
     i64FromParts (f (i64Parts value));
 
+  intBitLength =
+    value:
+    let
+      v = if value < 0 then 0 - value else value;
+    in
+    if v == 0 then
+      0
+    else
+      builtins.foldl' (
+        acc: bit:
+        if v >= pow2 bit then bit + 1 else acc
+      ) 0 (range 63);
+
+  exactIntFloatError =
+    ty: op: reason:
+    throw "wasm2nix runtime: ${ty}.${op} only supports exact finite integer-valued soft-float operands for now (${reason})";
+
+  f32Parts =
+    value:
+    let
+      bits = u32 value;
+      rawExp = floorMod (bits / 8388608) 256;
+      frac = floorMod bits 8388608;
+    in
+    {
+      sign = bits >= i32Sign;
+      inherit rawExp frac;
+    };
+
+  f32ToExactInt =
+    op: value:
+    let
+      parts = f32Parts value;
+      exp = parts.rawExp - 127;
+      sig = 8388608 + parts.frac;
+      unsigned =
+        if parts.rawExp == 255 then
+          exactIntFloatError "f32" op "NaN or infinity"
+        else if parts.rawExp == 0 then
+          if parts.frac == 0 then 0 else exactIntFloatError "f32" op "subnormal"
+        else if exp < 0 then
+          exactIntFloatError "f32" op "fractional value"
+        else if exp > 52 then
+          exactIntFloatError "f32" op "outside host integer range"
+        else if exp >= 23 then
+          sig * pow2 (exp - 23)
+        else
+          let
+            divisor = pow2 (23 - exp);
+          in
+          if floorMod sig divisor == 0 then sig / divisor else exactIntFloatError "f32" op "fractional value";
+    in
+    if parts.sign then 0 - unsigned else unsigned;
+
+  f32FromExactInt =
+    op: value:
+    let
+      negative = value < 0;
+      magnitude = if negative then 0 - value else value;
+      bitLength = intBitLength magnitude;
+      exp = bitLength - 1;
+      frac =
+        if magnitude == 0 then
+          0
+        else if exp > 127 then
+          exactIntFloatError "f32" op "overflow"
+        else if exp <= 23 then
+          magnitude * pow2 (23 - exp) - 8388608
+        else
+          let
+            divisor = pow2 (exp - 23);
+          in
+          if floorMod magnitude divisor == 0 then magnitude / divisor - 8388608 else exactIntFloatError "f32" op "rounded result";
+      sign = if negative then i32Sign else 0;
+    in
+    if magnitude == 0 then sign else u32 (sign + (exp + 127) * 8388608 + frac);
+
+  f32ExactBin =
+    op: fn: lhs: rhs:
+    f32FromExactInt op (fn (f32ToExactInt op lhs) (f32ToExactInt op rhs));
+
+  f32ExactDiv =
+    lhs: rhs:
+    let
+      a = f32ToExactInt "div" lhs;
+      b = f32ToExactInt "div" rhs;
+    in
+    if b == 0 then
+      exactIntFloatError "f32" "div" "division by zero"
+    else
+      let
+        q = a / b;
+      in
+      if q * b == a then f32FromExactInt "div" q else exactIntFloatError "f32" "div" "rounded result";
+
+  f64Parts =
+    value:
+    let
+      parts = i64Parts value;
+      rawExp = floorMod (parts.hi / 1048576) 2048;
+      fracHi = floorMod parts.hi 1048576;
+    in
+    {
+      sign = parts.hi >= i32Sign;
+      inherit rawExp fracHi;
+      fracLo = parts.lo;
+    };
+
+  f64ToExactInt =
+    op: value:
+    let
+      parts = f64Parts value;
+      exp = parts.rawExp - 1023;
+      frac = parts.fracHi * u32Mod + parts.fracLo;
+      sig = 4503599627370496 + frac;
+      unsigned =
+        if parts.rawExp == 2047 then
+          exactIntFloatError "f64" op "NaN or infinity"
+        else if parts.rawExp == 0 then
+          if frac == 0 then 0 else exactIntFloatError "f64" op "subnormal"
+        else if exp < 0 then
+          exactIntFloatError "f64" op "fractional value"
+        else if exp > 52 then
+          exactIntFloatError "f64" op "outside host integer range"
+        else
+          let
+            divisor = pow2 (52 - exp);
+          in
+          if floorMod sig divisor == 0 then sig / divisor else exactIntFloatError "f64" op "fractional value";
+    in
+    if parts.sign then 0 - unsigned else unsigned;
+
+  f64FromExactInt =
+    op: value:
+    let
+      negative = value < 0;
+      magnitude = if negative then 0 - value else value;
+      bitLength = intBitLength magnitude;
+      exp = bitLength - 1;
+      frac =
+        if magnitude == 0 then
+          0
+        else if exp > 1023 then
+          exactIntFloatError "f64" op "overflow"
+        else if exp <= 52 then
+          magnitude * pow2 (52 - exp) - 4503599627370496
+        else
+          exactIntFloatError "f64" op "outside host integer range";
+      sign = if negative then i32Sign else 0;
+      fracHi = frac / u32Mod;
+      fracLo = floorMod frac u32Mod;
+    in
+    if magnitude == 0 then
+      i64FromParts {
+        lo = 0;
+        hi = sign;
+      }
+    else
+      i64FromParts {
+        lo = fracLo;
+        hi = u32 (sign + (exp + 1023) * 1048576 + fracHi);
+      };
+
+  f64ExactBin =
+    op: fn: lhs: rhs:
+    f64FromExactInt op (fn (f64ToExactInt op lhs) (f64ToExactInt op rhs));
+
+  f64ExactDiv =
+    lhs: rhs:
+    let
+      a = f64ToExactInt "div" lhs;
+      b = f64ToExactInt "div" rhs;
+    in
+    if b == 0 then
+      exactIntFloatError "f64" "div" "division by zero"
+    else
+      let
+        q = a / b;
+      in
+      if q * b == a then f64FromExactInt "div" q else exactIntFloatError "f64" "div" "rounded result";
+
   conv =
     {
       uextend = value: _ty: value;
@@ -927,20 +1108,20 @@ rec {
   };
 
   f32 = {
-    add = unsupportedFloat "f32" "add";
-    sub = unsupportedFloat "f32" "sub";
-    mul = unsupportedFloat "f32" "mul";
-    div = unsupportedFloat "f32" "div";
+    add = f32ExactBin "add" (lhs: rhs: lhs + rhs);
+    sub = f32ExactBin "sub" (lhs: rhs: lhs - rhs);
+    mul = f32ExactBin "mul" (lhs: rhs: lhs * rhs);
+    div = f32ExactDiv;
     neg = value: u32 (builtins.bitXor (u32 value) i32Sign);
     abs = f32Abs;
     sqrt = value: if f32IsZero value then u32 value else unsupportedUnaryFloat "f32" "sqrt" value;
   };
 
   f64 = {
-    add = unsupportedFloat "f64" "add";
-    sub = unsupportedFloat "f64" "sub";
-    mul = unsupportedFloat "f64" "mul";
-    div = unsupportedFloat "f64" "div";
+    add = f64ExactBin "add" (lhs: rhs: lhs + rhs);
+    sub = f64ExactBin "sub" (lhs: rhs: lhs - rhs);
+    mul = f64ExactBin "mul" (lhs: rhs: lhs * rhs);
+    div = f64ExactDiv;
     neg =
       f64MapParts (parts: parts // { hi = builtins.bitXor parts.hi i32Sign; });
     abs =

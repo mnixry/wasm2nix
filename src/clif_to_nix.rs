@@ -240,7 +240,10 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
 
             for (i, func_index) in init.elements.iter().copied().enumerate() {
                 let slot = init.offset + i as u32;
-                let sig_index = module.info.functions[func_index].entity.as_u32();
+                let sig_index = module
+                    .info
+                    .canonical_type_index(module.info.functions[func_index].entity)
+                    .as_u32();
                 elems.insert(
                     slot,
                     Expr::attrset(
@@ -788,6 +791,10 @@ fn lower_inst(
                 Opcode::Sshr => "shr_s",
                 Opcode::Rotl => "rotl",
                 Opcode::Rotr => "rotr",
+                Opcode::Fadd => "add",
+                Opcode::Fsub => "sub",
+                Opcode::Fmul => "mul",
+                Opcode::Fdiv => "div",
                 _ => unimplemented!("wasm2nix: unimplemented binary op {op:?}"),
             };
 
