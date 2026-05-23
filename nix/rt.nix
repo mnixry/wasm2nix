@@ -637,7 +637,7 @@ let
         quotient = value / divisor;
         remainder = floorMod value divisor;
       in
-      quotient + (if remainder == 0 then 0 else 1);
+      if remainder == 0 then quotient else builtins.bitOr quotient 1;
 
   isqrt =
     value:
@@ -996,7 +996,7 @@ let
   f64Min =
     lhs: rhs:
     if f64IsNaN lhs || f64IsNaN rhs then
-      f64CanonicalNan
+      f64BinaryNaN lhs rhs
     else if f64IsZero lhs && f64IsZero rhs then
       if i64IsNegativeParts (i64Parts lhs) || i64IsNegativeParts (i64Parts rhs) then i64Min else 0
     else if fcmp.f64.le lhs rhs then
@@ -1007,7 +1007,7 @@ let
   f64Max =
     lhs: rhs:
     if f64IsNaN lhs || f64IsNaN rhs then
-      f64CanonicalNan
+      f64BinaryNaN lhs rhs
     else if f64IsZero lhs && f64IsZero rhs then
       if !(i64IsNegativeParts (i64Parts lhs)) || !(i64IsNegativeParts (i64Parts rhs)) then 0 else i64Min
     else if fcmp.f64.ge lhs rhs then
@@ -1042,108 +1042,453 @@ let
     f64MapParts (parts: parts // { hi = builtins.bitXor parts.hi i32Sign; });
   f64Abs =
     f64MapParts (parts: parts // { hi = builtins.bitAnd parts.hi 2147483647; });
-  f64SubnormalMagnitude =
+  f64PositiveInfParts = {
+    lo = 0;
+    hi = 2146435072;
+  };
+  f64IsInf =
     value:
     let
-      parts = f64Parts value;
+      parts = i64Parts value;
     in
-    parts.fracHi * u32Mod + parts.fracLo;
-  f64LowMagnitude =
-    value:
-    let
-      parts = f64Parts value;
-    in
-    if parts.rawExp == 0 then f64SubnormalMagnitude value else 4503599627370496 + f64SubnormalMagnitude value;
-  f64BothLow =
+    builtins.bitAnd parts.hi 2147483647 == f64PositiveInfParts.hi && parts.lo == 0;
+  f64BinaryNaN =
     lhs: rhs:
-    (f64Parts lhs).rawExp <= 1 && (f64Parts rhs).rawExp <= 1;
-  f64FromLowMagnitude =
-    sign: magnitude:
+    if f64IsNaN lhs then f64QuietNaN lhs else if f64IsNaN rhs then f64QuietNaN rhs else f64CanonicalNan;
+  f64Inf =
+    sign:
+    i64FromParts {
+      lo = 0;
+      hi = (if sign then i32Sign else 0) + f64PositiveInfParts.hi;
+    };
+  f64SignedZero = sign: if sign then i64Min else 0;
+  f64FiniteInfo =
+    value:
     let
-      parts = u64PartsFromNonNegative magnitude;
+      parts = f64Parts value;
+      frac = parts.fracHi * u32Mod + parts.fracLo;
     in
-    if magnitude >= 9007199254740992 then
-      exactIntFloatError "f64" "add" "low-end result normalization"
+    if parts.rawExp == 0 then
+      {
+        inherit (parts) sign;
+        exp = -1022;
+        sig = frac;
+      }
     else
-    if magnitude == 0 then
+      {
+        inherit (parts) sign;
+        exp = parts.rawExp - 1023;
+        sig = 4503599627370496 + frac;
+      };
+  big26Base = 67108864;
+  big26Limb =
+    limbs: idx:
+    if idx == 0 then
+      limbs.l0
+    else if idx == 1 then
+      limbs.l1
+    else if idx == 2 then
+      limbs.l2
+    else if idx == 3 then
+      limbs.l3
+    else
+      limbs.l4;
+  big26HighToSmall =
+    limbs: start:
+    let
+      go =
+        idx: acc:
+        if idx < start || idx < 0 then acc else go (idx - 1) (acc * big26Base + big26Limb limbs idx);
+    in
+    go 4 0;
+  big26AnyBelow =
+    limbs: count:
+    if count <= 0 then
+      false
+    else
+      builtins.any (idx: big26Limb limbs idx != 0) (range count);
+  big26BitLength =
+    limbs:
+    if limbs.l4 != 0 then
+      104 + intBitLength limbs.l4
+    else if limbs.l3 != 0 then
+      78 + intBitLength limbs.l3
+    else if limbs.l2 != 0 then
+      52 + intBitLength limbs.l2
+    else if limbs.l1 != 0 then
+      26 + intBitLength limbs.l1
+    else
+      intBitLength limbs.l0;
+  big26ShiftRightJamToSmall =
+    limbs: amount:
+    let
+      k = (amount + 25) / 26;
+      excess = 26 * k - amount;
+      high = big26HighToSmall limbs k;
+      top = big26Limb limbs (k - 1);
+      topShift = 26 - excess;
+      lowContribution = if excess == 0 then 0 else top / pow2 topShift;
+      topRemainder = if excess == 0 then top else floorMod top (pow2 topShift);
+      sticky = topRemainder != 0 || big26AnyBelow limbs (k - 1);
+      quotient = high * pow2 excess + lowContribution;
+    in
+    if sticky then builtins.bitOr quotient 1 else quotient;
+  big26ToSmall = limbs: big26HighToSmall limbs 0;
+  f64MulSigLimbs =
+    lhs: rhs:
+    let
+      a0 = floorMod lhs big26Base;
+      a1 = floorMod (lhs / big26Base) big26Base;
+      a2 = lhs / (big26Base * big26Base);
+      b0 = floorMod rhs big26Base;
+      b1 = floorMod (rhs / big26Base) big26Base;
+      b2 = rhs / (big26Base * big26Base);
+
+      t0 = a0 * b0;
+      l0 = floorMod t0 big26Base;
+      carry0 = t0 / big26Base;
+
+      t1 = a0 * b1 + a1 * b0 + carry0;
+      l1 = floorMod t1 big26Base;
+      carry1 = t1 / big26Base;
+
+      t2 = a0 * b2 + a1 * b1 + a2 * b0 + carry1;
+      l2 = floorMod t2 big26Base;
+      carry2 = t2 / big26Base;
+
+      t3 = a1 * b2 + a2 * b1 + carry2;
+      l3 = floorMod t3 big26Base;
+      carry3 = t3 / big26Base;
+
+      t4 = a2 * b2 + carry3;
+      l4 = floorMod t4 big26Base;
+    in
+    {
+      inherit
+        l0
+        l1
+        l2
+        l3
+        l4
+        ;
+    };
+  big26Le =
+    lhs: rhs:
+    if lhs.l4 != rhs.l4 then
+      lhs.l4 < rhs.l4
+    else if lhs.l3 != rhs.l3 then
+      lhs.l3 < rhs.l3
+    else if lhs.l2 != rhs.l2 then
+      lhs.l2 < rhs.l2
+    else if lhs.l1 != rhs.l1 then
+      lhs.l1 < rhs.l1
+    else
+      lhs.l0 <= rhs.l0;
+  big26Eq =
+    lhs: rhs:
+    lhs.l0 == rhs.l0 && lhs.l1 == rhs.l1 && lhs.l2 == rhs.l2 && lhs.l3 == rhs.l3 && lhs.l4 == rhs.l4;
+  big26ShiftSmallForSqrt =
+    value: shift:
+    let
+      bitShift = floorMod shift 26;
+      a0 = floorMod value big26Base;
+      a1 = floorMod (value / big26Base) big26Base;
+      a2 = value / (big26Base * big26Base);
+
+      t2 = a0 * pow2 bitShift;
+      l2 = floorMod t2 big26Base;
+      carry2 = t2 / big26Base;
+
+      t3 = a1 * pow2 bitShift + carry2;
+      l3 = floorMod t3 big26Base;
+      carry3 = t3 / big26Base;
+
+      t4 = a2 * pow2 bitShift + carry3;
+      l4 = floorMod t4 big26Base;
+    in
+    {
+      l0 = 0;
+      l1 = 0;
+      inherit
+        l2
+        l3
+        l4
+        ;
+    };
+  f64SqrtRoot =
+    radicand:
+    let
+      search =
+        lo: hi:
+        if lo + 1 >= hi then
+          lo
+        else
+          let
+            mid = (lo + hi) / 2;
+            square = f64MulSigLimbs mid mid;
+          in
+          if big26Le square radicand then search mid hi else search lo mid;
+    in
+    search (pow2 55) (pow2 56);
+  f64RoundFromBig =
+    sign: limbs: scale:
+    let
+      bitLength = big26BitLength limbs;
+      exp = bitLength - 1 + scale;
+      shift = bitLength - 56;
+      sigExt =
+        if shift <= 0 then
+          big26ToSmall limbs * pow2 (0 - shift)
+        else
+          big26ShiftRightJamToSmall limbs shift;
+    in
+    if bitLength == 0 then f64SignedZero sign else f64PackExt sign exp sigExt;
+  f64RoundFromSmall =
+    sign: sig: scale:
+    let
+      bitLength = intBitLength sig;
+      exp = bitLength - 1 + scale;
+      shift = bitLength - 56;
+      sigExt = shiftRightJam sig shift;
+    in
+    if sig == 0 then f64SignedZero sign else f64PackExt sign exp sigExt;
+  f64DivQuotientJam =
+    numerator: denominator: shift:
+    let
+      result = builtins.foldl' (
+        acc: _:
+        let
+          rem2 = acc.rem * 2;
+        in
+        if rem2 >= denominator then
+          {
+            rem = rem2 - denominator;
+            quot = acc.quot * 2 + 1;
+          }
+        else
+          {
+            rem = rem2;
+            quot = acc.quot * 2;
+          }
+      ) { rem = floorMod numerator denominator; quot = numerator / denominator; } (range shift);
+    in
+    if result.rem == 0 then result.quot else builtins.bitOr result.quot 1;
+  f64PackExt =
+    sign: exp: sigExt:
+    let
+      shifted =
+        if exp < -1022 then
+          {
+            exp = -1022;
+            sigExt = shiftRightJam sigExt (-1022 - exp);
+          }
+        else
+          { inherit exp sigExt; };
+      quotient = shifted.sigExt / 8;
+      remainder = floorMod shifted.sigExt 8;
+      roundUp = remainder > 4 || (remainder == 4 && floorMod quotient 2 == 1);
+      rounded0 = quotient + (if roundUp then 1 else 0);
+      carried = rounded0 >= 9007199254740992;
+      rounded = if carried then rounded0 / 2 else rounded0;
+      exp2 = shifted.exp + (if carried then 1 else 0);
+      signBit = if sign then i32Sign else 0;
+      frac = rounded - 4503599627370496;
+    in
+    if rounded == 0 then
+      f64SignedZero sign
+    else if exp2 >= 1024 then
+      f64Inf sign
+    else if exp2 == -1022 && rounded < 4503599627370496 then
+      let
+        fracParts = u64PartsFromNonNegative rounded;
+      in
+      i64FromParts {
+        lo = fracParts.lo;
+        hi = signBit + fracParts.hi;
+      }
+    else
+      let
+        fracParts = u64PartsFromNonNegative frac;
+      in
+      i64FromParts {
+        lo = fracParts.lo;
+        hi = signBit + (exp2 + 1023) * 1048576 + fracParts.hi;
+      };
+  f64NormalizeAdd =
+    exp: sigExt:
+    if sigExt == 0 || sigExt >= 36028797018963968 || exp <= -1022 then
+      { inherit exp sigExt; }
+    else
+      f64NormalizeAdd (exp - 1) (sigExt * 2);
+  f64AddFinite =
+    lhs: rhs:
+    let
+      a = f64FiniteInfo lhs;
+      b = f64FiniteInfo rhs;
+      useAExp = a.exp >= b.exp;
+      exp = if useAExp then a.exp else b.exp;
+      aExt = if useAExp then a.sig * 8 else shiftRightJam (a.sig * 8) (b.exp - a.exp);
+      bExt = if useAExp then shiftRightJam (b.sig * 8) (a.exp - b.exp) else b.sig * 8;
+      sameSign = a.sign == b.sign;
+    in
+    if sameSign then
+      let
+        sum = aExt + bExt;
+        normalized =
+          if sum >= 72057594037927936 then
+            {
+              exp = exp + 1;
+              sigExt = shiftRightJam sum 1;
+            }
+          else
+            {
+              inherit exp;
+              sigExt = sum;
+            };
+      in
+      f64PackExt a.sign normalized.exp normalized.sigExt
+    else if a.exp == b.exp && a.sig == b.sig then
       0
     else
-      i64FromParts {
-        lo = parts.lo;
-        hi = parts.hi + (if sign then i32Sign else 0);
-      };
-  f64AddLow =
-    lhs: rhs:
-    let
-      a = f64Parts lhs;
-      b = f64Parts rhs;
-      aMag = f64LowMagnitude lhs;
-      bMag = f64LowMagnitude rhs;
-      sameSign = a.sign == b.sign;
-      magnitude =
-        if sameSign then
-          aMag + bMag
-        else if aMag >= bMag then
-          aMag - bMag
-        else
-          bMag - aMag;
-      sign =
-        if magnitude == 0 then
-          false
-        else if sameSign || aMag >= bMag then
-          a.sign
-        else
-          b.sign;
-    in
-    f64FromLowMagnitude sign magnitude;
+      let
+        aGreater = a.exp > b.exp || (a.exp == b.exp && a.sig > b.sig);
+        diff = if aGreater then aExt - bExt else bExt - aExt;
+        sign = if aGreater then a.sign else b.sign;
+        normalized = f64NormalizeAdd exp diff;
+      in
+      f64PackExt sign normalized.exp normalized.sigExt;
   f64Add =
     lhs: rhs:
-    if f64IsNaN lhs then
-      f64QuietNaN lhs
-    else if f64IsNaN rhs then
-      f64QuietNaN rhs
+    if f64IsNaN lhs || f64IsNaN rhs then
+      f64BinaryNaN lhs rhs
+    else if f64IsInf lhs || f64IsInf rhs then
+      if f64IsInf lhs && f64IsInf rhs && f64SignBit lhs != f64SignBit rhs then f64CanonicalNan else if f64IsInf lhs then lhs else rhs
     else if f64IsZero lhs && f64IsZero rhs then
       if f64SignBit lhs == i32Sign && f64SignBit rhs == i32Sign then i64Min else 0
     else if f64IsZero lhs then
       rhs
     else if f64IsZero rhs then
       lhs
-    else if f64BothLow lhs rhs then
-      f64AddLow lhs rhs
     else
-      f64ExactBin "add" (a: b: a + b) lhs rhs;
+      f64AddFinite lhs rhs;
   f64Sub =
-    lhs: rhs:
-    if f64IsNaN lhs then
-      f64QuietNaN lhs
-    else if f64IsNaN rhs then
-      f64QuietNaN rhs
-    else if f64IsZero lhs && f64IsZero rhs then
-      if f64SignBit lhs == i32Sign && f64SignBit rhs == 0 then i64Min else 0
-    else if f64IsZero rhs then
-      lhs
-    else if f64IsZero lhs then
-      f64Neg rhs
-    else if f64BothLow lhs rhs then
-      f64AddLow lhs (f64Neg rhs)
-    else
-      f64ExactBin "sub" (a: b: a - b) lhs rhs;
+    lhs: rhs: f64Add lhs (f64Neg rhs);
   f64Mul =
     lhs: rhs:
-    if f64IsNaN lhs then
-      f64QuietNaN lhs
-    else if f64IsNaN rhs then
-      f64QuietNaN rhs
+    let
+      sign = f64SignBit lhs != f64SignBit rhs;
+    in
+    if f64IsNaN lhs || f64IsNaN rhs then
+      f64BinaryNaN lhs rhs
+    else if (f64IsInf lhs && f64IsZero rhs) || (f64IsZero lhs && f64IsInf rhs) then
+      f64CanonicalNan
+    else if f64IsInf lhs || f64IsInf rhs then
+      f64Inf sign
+    else if f64IsZero lhs || f64IsZero rhs then
+      f64SignedZero sign
     else
-      f64ExactBin "mul" (a: b: a * b) lhs rhs;
+      let
+        a = f64FiniteInfo lhs;
+        b = f64FiniteInfo rhs;
+      in
+      f64RoundFromBig sign (f64MulSigLimbs a.sig b.sig) (a.exp + b.exp - 104);
   f64Div =
     lhs: rhs:
-    if f64IsNaN lhs then
-      f64QuietNaN lhs
-    else if f64IsNaN rhs then
-      f64QuietNaN rhs
+    let
+      sign = f64SignBit lhs != f64SignBit rhs;
+    in
+    if f64IsNaN lhs || f64IsNaN rhs then
+      f64BinaryNaN lhs rhs
+    else if (f64IsInf lhs && f64IsInf rhs) || (f64IsZero lhs && f64IsZero rhs) then
+      f64CanonicalNan
+    else if f64IsInf lhs || f64IsZero rhs then
+      f64Inf sign
+    else if f64IsZero lhs || f64IsInf rhs then
+      f64SignedZero sign
     else
-      f64ExactDiv lhs rhs;
+      let
+        a = f64FiniteInfo lhs;
+        b = f64FiniteInfo rhs;
+        shift = 56 + intBitLength b.sig - intBitLength a.sig;
+        sig = f64DivQuotientJam a.sig b.sig shift;
+      in
+      f64RoundFromSmall sign sig (a.exp - b.exp - shift);
+  f64NormalizeFinite =
+    sig: exp:
+    if sig >= 4503599627370496 then
+      { inherit sig exp; }
+    else
+      f64NormalizeFinite (sig * 2) (exp - 1);
+  f64Sqrt =
+    value:
+    if f64IsNaN value then
+      f64QuietNaN value
+    else if f64IsInf value then
+      if f64SignBit value == i32Sign then f64CanonicalNan else value
+    else if f64IsZero value then
+      value
+    else if f64SignBit value == i32Sign then
+      f64CanonicalNan
+    else
+      let
+        info0 = f64FiniteInfo value;
+        info = if info0.sig < 4503599627370496 then f64NormalizeFinite info0.sig info0.exp else info0;
+        oddExp = floorMod info.exp 2 != 0;
+        resultExp = if oddExp then (info.exp - 1) / 2 else info.exp / 2;
+        radicand = big26ShiftSmallForSqrt info.sig (if oddExp then 59 else 58);
+        root = f64SqrtRoot radicand;
+        square = f64MulSigLimbs root root;
+        sigExt = if big26Eq square radicand then root else builtins.bitOr root 1;
+      in
+      f64PackExt false resultExp sigExt;
+  f64RoundIntegral =
+    mode: value:
+    let
+      parts = f64Parts value;
+      sign = parts.sign;
+      signedZero = f64SignedZero sign;
+      fracFull = parts.fracHi * u32Mod + parts.fracLo;
+    in
+    if f64IsNaN value then
+      f64QuietNaN value
+    else if f64IsInf value || f64IsZero value then
+      value
+    else if parts.rawExp < 1023 then
+      if mode == "floor" then
+        if sign then f64FromExactInt "floor" (-1) else 0
+      else if mode == "ceil" then
+        if sign then signedZero else f64FromExactInt "ceil" 1
+      else if mode == "nearest" then
+        if parts.rawExp < 1022 || (parts.rawExp == 1022 && fracFull == 0) then
+          signedZero
+        else
+          f64FromExactInt "nearest" (if sign then -1 else 1)
+      else
+        signedZero
+    else
+      let
+        exp = parts.rawExp - 1023;
+        sig = 4503599627370496 + fracFull;
+      in
+      if exp >= 52 then
+        value
+      else
+        let
+          divisor = pow2 (52 - exp);
+          int = sig / divisor;
+          frac = floorMod sig divisor;
+          half = divisor / 2;
+          roundedInt =
+            if mode == "floor" then
+              int + (if sign && frac != 0 then 1 else 0)
+            else if mode == "ceil" then
+              int + (if !sign && frac != 0 then 1 else 0)
+            else if mode == "nearest" then
+              int + (if frac > half || (frac == half && floorMod int 2 == 1) then 1 else 0)
+            else
+              int;
+        in
+        if frac == 0 then value else f64FromExactInt mode (if sign then 0 - roundedInt else roundedInt);
 
   f64MapParts =
     f: value:
@@ -2169,7 +2514,11 @@ rec {
     copysign = f64Copysign;
     neg = f64Neg;
     abs = f64Abs;
-    sqrt = value: if f64IsZero value then value else unsupportedUnaryFloat "f64" "sqrt" value;
+    sqrt = f64Sqrt;
+    ceil = f64RoundIntegral "ceil";
+    floor = f64RoundIntegral "floor";
+    trunc = f64RoundIntegral "trunc";
+    nearest = f64RoundIntegral "nearest";
     promote_f32 = f64PromoteF32;
   };
 
