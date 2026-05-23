@@ -223,13 +223,17 @@ fn select_module_key(
 }
 
 fn write_generated_module(nix: &str) -> Result<PathBuf, String> {
+    write_temp_nix_file("wast", nix)
+}
+
+fn write_temp_nix_file(kind: &str, nix: &str) -> Result<PathBuf, String> {
     let id = NEXT_FILE.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("wasm2nix-wast-{pid}-{nanos}-{id}.nix"));
+    let path = std::env::temp_dir().join(format!("wasm2nix-{kind}-{pid}-{nanos}-{id}.nix"));
     fs::write(&path, nix).map_err(|e| e.to_string())?;
     Ok(path)
 }
@@ -256,18 +260,12 @@ struct InvokeResult {
 
 fn eval_instantiate(module: &PathBuf, module_key: &str) -> Result<String, String> {
     let expr = format!(
-        "let rt = import ./nix/rt.nix {{}}; m = import {} rt {{ \"__moduleId\" = {}; \"__funcRegistry\" = {{}}; }}; i = m.instantiate {{}}; in i.st",
+        "let rt = {}; m = import {} rt {{ \"__moduleId\" = {}; \"__funcRegistry\" = {{}}; }}; i = m.instantiate {{}}; in i.st",
+        rt_import_expr()?,
         module.display(),
         nix_string(module_key),
     );
-    let output = Command::new("nix")
-        .args(["eval", "--json", "--impure", "--expr", &expr])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
-    }
-    let value: JsonValue = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    let value = eval_nix_json(&expr)?;
     json_to_nix(&value)
 }
 
@@ -296,17 +294,11 @@ fn eval_invoke(
         .get(module_key)
         .ok_or_else(|| format!("unknown module {module_key}"))?;
     let expr = format!(
-        "let rt = import ./nix/rt.nix {{}}; {} i = {module_var}.instantiate {{}}; st_in = {state_expr}; call = {invoke}; in {{ results = call.results; st = call.st; }}",
+        "let rt = {}; {} i = {module_var}.instantiate {{}}; st_in = {state_expr}; call = {invoke}; in {{ results = call.results; st = call.st; }}",
+        rt_import_expr()?,
         world.binds
     );
-    let output = Command::new("nix")
-        .args(["eval", "--json", "--impure", "--expr", &expr])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
-    }
-    let value: JsonValue = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    let value = eval_nix_json(&expr)?;
     let results =
         serde_json::to_string(&value["results"]).map_err(|e| format!("invalid results: {e}"))?;
     let state = json_to_nix(&value["st"])?;
@@ -327,21 +319,35 @@ fn eval_get(
         .get(module_key)
         .ok_or_else(|| format!("unknown module {module_key}"))?;
     let expr = format!(
-        "let rt = import ./nix/rt.nix {{}}; {} i = {module_var}.instantiate {{}}; st_in = {state_expr}; value = i.exports.\"{name}\".get st_in; in {{ results = [ value ]; st = st_in; }}",
+        "let rt = {}; {} i = {module_var}.instantiate {{}}; st_in = {state_expr}; value = i.exports.\"{name}\".get st_in; in {{ results = [ value ]; st = st_in; }}",
+        rt_import_expr()?,
         world.binds
     );
+    let value = eval_nix_json(&expr)?;
+    let results =
+        serde_json::to_string(&value["results"]).map_err(|e| format!("invalid results: {e}"))?;
+    let state = json_to_nix(&value["st"])?;
+    Ok(InvokeResult { results, state })
+}
+
+fn eval_nix_json(expr: &str) -> Result<JsonValue, String> {
+    let path = write_temp_nix_file("eval", expr)?;
     let output = Command::new("nix")
-        .args(["eval", "--json", "--impure", "--expr", &expr])
+        .args(["eval", "--json", "--impure", "-f"])
+        .arg(&path)
         .output()
         .map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
-    let value: JsonValue = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
-    let results =
-        serde_json::to_string(&value["results"]).map_err(|e| format!("invalid results: {e}"))?;
-    let state = json_to_nix(&value["st"])?;
-    Ok(InvokeResult { results, state })
+    serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())
+}
+
+fn rt_import_expr() -> Result<String, String> {
+    let path = std::env::current_dir()
+        .map_err(|e| e.to_string())?
+        .join("nix/rt.nix");
+    Ok(format!("import {} {{}}", path.display()))
 }
 
 struct EvalWorld {
