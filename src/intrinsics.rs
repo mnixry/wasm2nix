@@ -25,3 +25,4 @@ pub const TABLE_SET: u32 = 34;
 
 pub const CALL_INDIRECT_BASE: u32 = 1000;
 pub const CALL_INDIRECT_STRIDE: u32 = 10000;
+pub const REF_FUNC_BASE: u32 = 1_000_000_000;

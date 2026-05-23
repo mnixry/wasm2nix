@@ -2347,7 +2347,7 @@ let
       get_i64 = get;
       get_f32 = get;
       get_f64 = get;
-      set_i32 = idx: value: st: set idx (u32 value) st;
+      set_i32 = idx: value: st: set idx (if builtins.isAttrs value then value else u32 value) st;
       set_i64 = idx: value: st: set idx (checkI64 value) st;
       set_f32 = idx: value: st: set idx (u32 value) st;
       set_f64 = set;

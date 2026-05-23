@@ -2037,6 +2037,12 @@ fn resolve_callee(
                         (rt_fn(&["global", "set_f64"]), CallKind::StatefulState)
                     }
 
+                    other if other >= intr::REF_FUNC_BASE => {
+                        let func_index =
+                            cranelift_wasm::FuncIndex::from_u32(other - intr::REF_FUNC_BASE);
+                        (lower_table_entry(module, func_index), CallKind::Pure)
+                    }
+
                     other if other >= intr::CALL_INDIRECT_BASE => {
                         let encoded = other - intr::CALL_INDIRECT_BASE;
                         let table_index = encoded / intr::CALL_INDIRECT_STRIDE;

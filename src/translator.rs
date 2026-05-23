@@ -764,6 +764,16 @@ impl<'m> NixFuncEnvironment<'m> {
         fref
     }
 
+    fn intrinsic_ref_func(
+        &mut self,
+        func: &mut ir::Function,
+        func_index: FuncIndex,
+    ) -> ir::FuncRef {
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        sig.returns.push(ir::AbiParam::new(I32));
+        self.import_intrinsic(func, intr::REF_FUNC_BASE + func_index.as_u32(), sig)
+    }
+
     fn intrinsic_global_get(&mut self, func: &mut ir::Function, ty: ir::Type) -> ir::FuncRef {
         match ty {
             I32 => {
@@ -1364,10 +1374,12 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
 
     fn translate_ref_func(
         &mut self,
-        _pos: FuncCursor,
-        _func_index: FuncIndex,
+        mut pos: FuncCursor,
+        func_index: FuncIndex,
     ) -> WasmResult<ir::Value> {
-        Err(WasmError::Unsupported("ref.func".into()))
+        let fref = self.intrinsic_ref_func(pos.func, func_index);
+        let call = pos.ins().call(fref, &[]);
+        Ok(pos.func.dfg.inst_results(call)[0])
     }
 
     fn translate_custom_global_get(
