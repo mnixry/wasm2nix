@@ -9,6 +9,7 @@ use cranelift_entity::EntityRef;
 use serde_json::Value as JsonValue;
 use wasm2nix::translator::NixModule;
 use wast::core::{NanPattern, WastArgCore, WastRetCore};
+use wast::lexer::Lexer;
 use wast::parser::{self, ParseBuffer};
 use wast::{Wast, WastArg, WastDirective, WastExecute, WastRet};
 
@@ -53,7 +54,9 @@ fn run_with_large_stack(f: impl FnOnce() + Send + 'static) {
 }
 
 fn run_wast_script(script: &str) -> Result<(), String> {
-    let buf = ParseBuffer::new(script).map_err(|e| e.to_string())?;
+    let mut lexer = Lexer::new(script);
+    lexer.allow_confusing_unicode(true);
+    let buf = ParseBuffer::new_with_lexer(lexer).map_err(|e| e.to_string())?;
     let wast = parser::parse::<Wast<'_>>(&buf).map_err(|e| e.to_string())?;
     let mut modules: HashMap<String, HarnessModule> = HashMap::new();
     let mut aliases: HashMap<String, String> = HashMap::new();
@@ -373,17 +376,21 @@ fn eval_invoke(
         .map(wast_arg_to_nix)
         .collect::<Result<Vec<_>, _>>()?
         .join(" ");
-    let invoke = if args.is_empty() {
-        format!("i.exports.\"{name}\" st_in")
-    } else {
-        format!("i.exports.\"{name}\" {args} st_in")
-    };
     let state_expr = state.unwrap_or("i.st");
     let world = EvalWorld::new(modules, aliases);
     let module_var = world
         .module_vars
         .get(module_key)
         .ok_or_else(|| format!("unknown module {module_key}"))?;
+    let export = format!(
+        "{module_var}.\"__wasm2nix\".exportsByName.{}",
+        nix_string(&encoded_export_key(name))
+    );
+    let invoke = if args.is_empty() {
+        format!("{export} st_in")
+    } else {
+        format!("{export} {args} st_in")
+    };
     let expr = format!(
         "let rt = {}; {} i = {module_var}.instantiate {{}}; st_in = {state_expr}; call = {invoke}; in {{ results = call.results; st = call.st; }}",
         rt_import_expr()?,
@@ -409,8 +416,12 @@ fn eval_get(
         .module_vars
         .get(module_key)
         .ok_or_else(|| format!("unknown module {module_key}"))?;
+    let export = format!(
+        "{module_var}.\"__wasm2nix\".exportsByName.{}",
+        nix_string(&encoded_export_key(name))
+    );
     let expr = format!(
-        "let rt = {}; {} i = {module_var}.instantiate {{}}; st_in = {state_expr}; value = i.exports.\"{name}\".get st_in; in {{ results = [ value ]; st = st_in; }}",
+        "let rt = {}; {} i = {module_var}.instantiate {{}}; st_in = {state_expr}; value = {export}.get st_in; in {{ results = [ value ]; st = st_in; }}",
         rt_import_expr()?,
         world.binds
     );
@@ -915,6 +926,15 @@ fn merge_table_state_expr(
 
 fn nix_string(value: &str) -> String {
     format!("{value:?}")
+}
+
+fn encoded_export_key(name: &str) -> String {
+    let mut encoded = String::from("__wasm2nix_export_");
+    for byte in name.as_bytes() {
+        use std::fmt::Write;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
 }
 
 fn wast_arg_to_nix(arg: &WastArg<'_>) -> Result<String, String> {

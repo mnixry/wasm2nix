@@ -15,7 +15,8 @@ pub fn lower_module(module: &NixModule) -> Expr {
     // let moduleId = ...; funcs = rec { ... }; funcRegistry = ...; st0 = ...; st = ...; exports = ...;
     // in exports // { instantiate = _args: { st = st; exports = exports; }; __wasm2nix = { funcs = funcs; }; }
     let funcs_expr = lower_funcs_rec_attrset(module);
-    let exports_expr = lower_exports_attrset(module);
+    let exports_expr = lower_exports_attrset(module, ExportKeyMode::Public);
+    let exports_by_name_expr = lower_exports_attrset(module, ExportKeyMode::Encoded);
     let st0_expr = lower_initial_state(module);
     let instantiate_expr = Expr::lambda(
         "_args",
@@ -42,6 +43,10 @@ pub fn lower_module(module: &NixModule) -> Expr {
                             (AttrKey::ident("funcs"), Expr::ident("funcs")),
                             (AttrKey::ident("moduleId"), Expr::ident("moduleId")),
                             (AttrKey::ident("st0"), Expr::ident("st0")),
+                            (
+                                AttrKey::ident("exportsByName"),
+                                Expr::ident("exportsByName"),
+                            ),
                         ],
                     ),
                 ),
@@ -61,6 +66,7 @@ pub fn lower_module(module: &NixModule) -> Expr {
                     ("st0".into(), st0_expr),
                     ("st".into(), lower_start_state(module)),
                     ("exports".into(), exports_expr),
+                    ("exportsByName".into(), exports_by_name_expr),
                 ],
                 body,
             ),
@@ -174,7 +180,13 @@ fn lower_imported_func(module_name: &str, field_name: &str, sig: &ir::Signature)
     lambda_chain(&params, body)
 }
 
-fn lower_exports_attrset(module: &NixModule) -> Expr {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportKeyMode {
+    Public,
+    Encoded,
+}
+
+fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> Expr {
     let mut binds: Vec<(AttrKey, Expr)> = Vec::new();
 
     for (func_index, func_decl) in module.info.functions.iter() {
@@ -184,15 +196,21 @@ fn lower_exports_attrset(module: &NixModule) -> Expr {
         let f_name = format!("f{}", func_index.as_u32());
         let f_expr = Expr::select(Expr::ident("funcs"), AttrKey::ident(f_name));
         for export_name in &func_decl.export_names {
+            let Some(key) = export_attr_key(export_name, mode) else {
+                continue;
+            };
             // Use string keys for safety (names can contain characters invalid in identifiers).
-            binds.push((AttrKey::string(export_name.clone()), f_expr.clone()));
+            binds.push((AttrKey::string(key), f_expr.clone()));
         }
     }
 
     for (memory_index, memory_decl) in module.info.memories.iter() {
         for export_name in &memory_decl.export_names {
+            let Some(key) = export_attr_key(export_name, mode) else {
+                continue;
+            };
             binds.push((
-                AttrKey::string(export_name.clone()),
+                AttrKey::string(key),
                 lower_memory_export(memory_index.as_u32()),
             ));
         }
@@ -200,8 +218,11 @@ fn lower_exports_attrset(module: &NixModule) -> Expr {
 
     for (table_index, table_decl) in module.info.tables.iter() {
         for export_name in &table_decl.export_names {
+            let Some(key) = export_attr_key(export_name, mode) else {
+                continue;
+            };
             binds.push((
-                AttrKey::string(export_name.clone()),
+                AttrKey::string(key),
                 lower_table_export(table_index.as_u32()),
             ));
         }
@@ -209,14 +230,37 @@ fn lower_exports_attrset(module: &NixModule) -> Expr {
 
     for (global_index, global_decl) in module.info.globals.iter() {
         for export_name in &global_decl.export_names {
+            let Some(key) = export_attr_key(export_name, mode) else {
+                continue;
+            };
             binds.push((
-                AttrKey::string(export_name.clone()),
+                AttrKey::string(key),
                 lower_global_export(global_index.as_u32(), global_decl.entity.wasm_ty),
             ));
         }
     }
 
     Expr::attrset(false, binds)
+}
+
+fn export_attr_key(export_name: &str, mode: ExportKeyMode) -> Option<String> {
+    match mode {
+        ExportKeyMode::Public => nix_source_string_safe(export_name).then(|| export_name.into()),
+        ExportKeyMode::Encoded => Some(encoded_export_key(export_name)),
+    }
+}
+
+fn nix_source_string_safe(s: &str) -> bool {
+    !s.contains('\0')
+}
+
+fn encoded_export_key(name: &str) -> String {
+    let mut encoded = String::from("__wasm2nix_export_");
+    for byte in name.as_bytes() {
+        use std::fmt::Write;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
 }
 
 fn lower_initial_state(module: &NixModule) -> Expr {
