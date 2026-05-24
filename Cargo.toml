@@ -9,10 +9,8 @@ cranelift-codegen  = "*"
 cranelift-entity   = "*"
 cranelift-frontend = "*"
 cranelift-wasm     = "0.112.3"
-exn                = "0.3.1"
-fastrace           = { version = "0.7.17", features = ["enable"] }
-slog               = "2.8.2"
 snafu              = "0.8.9"
+tracing            = "0.1.44"
 
 [dependencies.wasmparser]
 features = ["features"]

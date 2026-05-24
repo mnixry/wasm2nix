@@ -1,7 +1,6 @@
 pub mod clif_to_nix;
 pub mod error;
 pub mod intrinsics;
-pub mod log;
 pub mod nix;
 pub mod translator;
 
@@ -27,17 +26,9 @@ impl std::fmt::Display for TranslateMessage {
 
 impl std::error::Error for TranslateMessage {}
 
-#[fastrace::trace]
-pub fn lower_wasm_to_nix_exn(wasm: &[u8]) -> exn::Result<String, TranslateStage> {
-    use exn::ResultExt;
-
+pub fn lower_wasm_to_nix(wasm: &[u8]) -> Result<String, TranslateStage> {
     let module = translator::NixModule::translate(wasm)
         .map_err(|err| TranslateMessage(err.to_string()))
-        .or_raise(|| TranslateStage("translate WebAssembly to Cranelift IR"))?;
+        .map_err(|_| TranslateStage("translate WebAssembly to Cranelift IR"))?;
     Ok(clif_to_nix::lower_module(&module).render())
-}
-
-#[fastrace::trace]
-pub fn lower_wasm_to_nix(wasm: &[u8]) -> Result<String, String> {
-    lower_wasm_to_nix_exn(wasm).map_err(|err| format!("{err:?}"))
 }
