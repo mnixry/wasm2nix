@@ -1,27 +1,27 @@
 use std::{
-    env, fs,
+    env,
+    error::Error,
+    fs,
     path::{Path, PathBuf},
 };
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     let spec_dir = Path::new("tests/spec/test/core");
     println!("cargo:rerun-if-changed={}", spec_dir.display());
 
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set"));
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR must be set")?);
     if !spec_dir.is_dir() {
         fs::write(
             out_dir.join("wast_generated_tests.rs"),
             "#[test]\n#[ignore = \"tests/spec submodule is absent\"]\nfn core_spec_submodule_absent() {}\n",
-        )
-        .expect("failed to write generated WAST tests");
-        return;
+        )?;
+        return Ok(());
     }
 
-    let mut wast_files = fs::read_dir(spec_dir)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", spec_dir.display()))
-        .map(|entry| entry.expect("failed to read spec directory entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "wast"))
-        .collect::<Vec<_>>();
+    let mut wast_files = fs::read_dir(spec_dir)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    wast_files.retain(|path| path.extension().is_some_and(|ext| ext == "wast"));
     wast_files.sort();
 
     let mut generated = String::new();
@@ -32,7 +32,7 @@ fn main() {
         let stem = path
             .file_stem()
             .and_then(|stem| stem.to_str())
-            .expect("WAST file name must be UTF-8");
+            .ok_or_else(|| format!("WAST file name must be UTF-8: {}", path.display()))?;
         let test_name = format!("core_{}", sanitize_ident(stem));
         generated.push_str("#[test]\n");
         generated.push_str(&format!("fn {test_name}() {{\n"));
@@ -43,8 +43,8 @@ fn main() {
         generated.push_str("}\n\n");
     }
 
-    fs::write(out_dir.join("wast_generated_tests.rs"), generated)
-        .expect("failed to write generated WAST tests");
+    fs::write(out_dir.join("wast_generated_tests.rs"), generated)?;
+    Ok(())
 }
 
 fn sanitize_ident(input: &str) -> String {

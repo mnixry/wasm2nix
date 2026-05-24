@@ -8,8 +8,9 @@ use std::{
 use cranelift_codegen::ir;
 use cranelift_entity::EntityRef;
 use serde_json::Value as JsonValue;
-use tempfile::TempDir;
+use tempfile::{Builder as TempFileBuilder, TempDir};
 use wasm2nix::{
+    instantiation::ActiveInitializerResolver,
     nix::{AttrKey, BinOp, Expr},
     translator::NixModule,
 };
@@ -31,48 +32,58 @@ fn wast_harness_i32_assert_return_smoke() {
             (assert_return (invoke "add" (i32.const 40) (i32.const 2)) (i32.const 42))
         "#;
 
-    run_wast_script(script).expect("wast smoke should pass");
+    if let Err(err) = run_wast_script(script) {
+        panic!("wast smoke should pass: {err}");
+    }
 }
 
 fn run_wast_file_path(path: &str) {
     let path = PathBuf::from(path);
     run_with_large_stack(move || {
-        let script = fs::read_to_string(&path).expect("failed to read WAST file");
+        let script = match fs::read_to_string(&path) {
+            Ok(script) => script,
+            Err(err) => panic!("failed to read WAST file: {err}"),
+        };
         let label = path.display().to_string();
         run_wast_script(&script).unwrap_or_else(|err| panic!("{label}: {err}"));
     });
 }
 
 fn run_with_large_stack(f: impl FnOnce() + Send + 'static) {
-    std::thread::Builder::new()
+    let handle = match std::thread::Builder::new()
         .name("wast-large-stack".into())
         .stack_size(256 * 1024 * 1024)
         .spawn(f)
-        .expect("failed to spawn WAST harness thread")
-        .join()
-        .expect("WAST harness thread panicked");
+    {
+        Ok(handle) => handle,
+        Err(err) => panic!("failed to spawn WAST harness thread: {err}"),
+    };
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
 }
 
 struct HarnessContext {
     temp_dir: TempDir,
-    next_file: usize,
 }
 
 impl HarnessContext {
     fn new() -> Result<Self, String> {
         Ok(Self {
             temp_dir: TempDir::new().map_err(|e| e.to_string())?,
-            next_file: 0,
         })
     }
 
     fn write_temp_nix_file(&mut self, kind: &str, nix: &str) -> Result<PathBuf, String> {
-        let path = self
-            .temp_dir
-            .path()
-            .join(format!("{kind}-{}.nix", self.next_file));
-        self.next_file += 1;
-        fs::write(&path, nix).map_err(|e| e.to_string())?;
+        use std::io::Write;
+
+        let mut file = TempFileBuilder::new()
+            .prefix(&format!("{kind}-"))
+            .suffix(".nix")
+            .tempfile_in(self.temp_dir.path())
+            .map_err(|e| e.to_string())?;
+        file.write_all(nix.as_bytes()).map_err(|e| e.to_string())?;
+        let (_file, path) = file.keep().map_err(|e| e.error.to_string())?;
         Ok(path)
     }
 }
@@ -111,7 +122,9 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                         "directive {directive_index}: module instantiation trapped during active segment initialization"
                     ));
                 }
-                let nix = wasm2nix::clif_to_nix::lower_module(&translated).render();
+                let nix = wasm2nix::clif_to_nix::lower_module(&translated)
+                    .map_err(|e| format!("directive {directive_index}: {e}"))?
+                    .render();
                 let path = write_generated_module(&mut ctx, &nix)?;
                 let key = module_name.unwrap_or_else(|| {
                     let key = format!("__anon{next_anon_module}");
@@ -293,7 +306,9 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                 {
                     continue;
                 }
-                let nix = wasm2nix::clif_to_nix::lower_module(&translated).render();
+                let nix = wasm2nix::clif_to_nix::lower_module(&translated)
+                    .map_err(|e| format!("directive {directive_index}: {e}"))?
+                    .render();
                 let path = write_generated_module(&mut ctx, &nix)?;
                 let transient_key = format!("__unlinkable{directive_index}");
                 if eval_instantiate(&mut ctx, &path, &transient_key, &modules, &aliases).is_ok() {
@@ -528,144 +543,66 @@ fn active_initializer_traps(
     ctx: &mut HarnessContext, module: &NixModule, modules: &HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>,
 ) -> Result<bool, String> {
-    for init in &module.info.data_initializers {
-        let limits = memory_limits_for_index(ctx, module, modules, aliases, init.memory_index)?;
-        let byte_len = limits
-            .min
-            .checked_mul(65536)
-            .ok_or_else(|| "memory byte size overflow".to_string())?;
-        let offset = active_offset(ctx, module, modules, aliases, init.base, init.offset)?;
-        let end = offset.saturating_add(init.data.len() as u64);
-        if offset > byte_len || end > byte_len {
-            return Ok(true);
-        }
-    }
-
-    for init in &module.info.table_initializers {
-        let limits = table_limits_for_index(ctx, module, modules, aliases, init.table_index)?;
-        let offset = active_offset(
-            ctx,
-            module,
-            modules,
-            aliases,
-            init.base,
-            u64::from(init.offset),
-        )?;
-        let end = offset.saturating_add(init.elements.len() as u64);
-        if offset > limits.min || end > limits.min {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
-fn active_offset(
-    ctx: &mut HarnessContext, module: &NixModule, modules: &HashMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>, base: Option<cranelift_wasm::GlobalIndex>, offset: u64,
-) -> Result<u64, String> {
-    let Some(base) = base else {
-        return Ok(offset);
-    };
-    Ok(global_i32_value(ctx, module, modules, aliases, base)?.saturating_add(offset))
-}
-
-fn global_i32_value(
-    ctx: &mut HarnessContext, module: &NixModule, modules: &HashMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>, index: cranelift_wasm::GlobalIndex,
-) -> Result<u64, String> {
-    if let Some((module_name, field_name)) = module.info.imported_globals.get(index.index()) {
-        return imported_global_i32_value(ctx, modules, aliases, module_name, field_name);
-    }
-
-    let Some(expr) = module.info.global_inits[index].as_ref() else {
-        return Err(format!("global {index:?} has no constant initializer"));
-    };
-    eval_i32_const_expr(ctx, module, modules, aliases, expr)
-}
-
-fn imported_global_i32_value(
-    ctx: &mut HarnessContext, modules: &HashMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>, module_name: &str, field_name: &str,
-) -> Result<u64, String> {
-    if module_name == "spectest" {
-        return match field_name {
-            "global_i32" => Ok(666),
-            _ => Err(format!(
-                "unsupported imported offset global {module_name}.{field_name}"
-            )),
-        };
-    }
-
-    let target_key = aliases
-        .get(module_name)
-        .cloned()
-        .unwrap_or_else(|| module_name.to_string());
-    let state = modules
-        .get(&target_key)
-        .ok_or_else(|| format!("unknown import module {module_name}"))?
-        .state
-        .clone();
-    let actual = eval_get(
+    let mut resolver = HarnessActiveInitializerResolver {
         ctx,
-        &target_key,
         modules,
         aliases,
-        field_name,
-        state.as_deref(),
-    )?;
-    first_json_u64(&actual.results)
+    };
+    wasm2nix::instantiation::active_initializers_trap(module, &mut resolver)
+        .map_err(|err| err.to_string())
 }
 
-fn eval_i32_const_expr(
-    ctx: &mut HarnessContext, module: &NixModule, modules: &HashMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>, expr: &cranelift_wasm::ConstExpr,
-) -> Result<u64, String> {
-    let mut stack = Vec::new();
-    for op in expr.ops().iter().copied() {
-        match op {
-            cranelift_wasm::ConstOp::I32Const(value) => stack.push(u64::from(value as u32)),
-            cranelift_wasm::ConstOp::GlobalGet(index) => {
-                stack.push(global_i32_value(ctx, module, modules, aliases, index)?);
-            }
-            cranelift_wasm::ConstOp::I32Add => {
-                let rhs = stack
-                    .pop()
-                    .ok_or_else(|| "malformed i32.add const expr".to_string())?;
-                let lhs = stack
-                    .pop()
-                    .ok_or_else(|| "malformed i32.add const expr".to_string())?;
-                stack.push(u64::from((lhs as u32).wrapping_add(rhs as u32)));
-            }
-            cranelift_wasm::ConstOp::I32Sub => {
-                let rhs = stack
-                    .pop()
-                    .ok_or_else(|| "malformed i32.sub const expr".to_string())?;
-                let lhs = stack
-                    .pop()
-                    .ok_or_else(|| "malformed i32.sub const expr".to_string())?;
-                stack.push(u64::from((lhs as u32).wrapping_sub(rhs as u32)));
-            }
-            cranelift_wasm::ConstOp::I32Mul => {
-                let rhs = stack
-                    .pop()
-                    .ok_or_else(|| "malformed i32.mul const expr".to_string())?;
-                let lhs = stack
-                    .pop()
-                    .ok_or_else(|| "malformed i32.mul const expr".to_string())?;
-                stack.push(u64::from((lhs as u32).wrapping_mul(rhs as u32)));
-            }
-            _ => {
-                return Err(format!(
-                    "unsupported active segment offset expression {op:?}"
-                ));
-            }
-        }
+struct HarnessActiveInitializerResolver<'a> {
+    ctx: &'a mut HarnessContext,
+    modules: &'a HashMap<String, HarnessModule>,
+    aliases: &'a HashMap<String, String>,
+}
+
+impl ActiveInitializerResolver for HarnessActiveInitializerResolver<'_> {
+    fn memory_min_pages(
+        &mut self, module: &NixModule, index: cranelift_wasm::MemoryIndex,
+    ) -> Result<u64, String> {
+        memory_limits_for_index(self.ctx, module, self.modules, self.aliases, index)
+            .map(|limits| limits.min)
     }
-    if stack.len() == 1 {
-        Ok(stack[0])
-    } else {
-        Err("malformed active segment offset expression".into())
+
+    fn table_min_elements(
+        &mut self, module: &NixModule, index: cranelift_wasm::TableIndex,
+    ) -> Result<u64, String> {
+        table_limits_for_index(self.ctx, module, self.modules, self.aliases, index)
+            .map(|limits| limits.min)
+    }
+
+    fn imported_global_i32(&mut self, module_name: &str, field_name: &str) -> Result<u64, String> {
+        if module_name == "spectest" {
+            return match field_name {
+                "global_i32" => Ok(666),
+                _ => Err(format!(
+                    "unsupported imported offset global {module_name}.{field_name}"
+                )),
+            };
+        }
+
+        let target_key = self
+            .aliases
+            .get(module_name)
+            .cloned()
+            .unwrap_or_else(|| module_name.to_string());
+        let state = self
+            .modules
+            .get(&target_key)
+            .ok_or_else(|| format!("unknown import module {module_name}"))?
+            .state
+            .clone();
+        let actual = eval_get(
+            self.ctx,
+            &target_key,
+            self.modules,
+            self.aliases,
+            field_name,
+            state.as_deref(),
+        )?;
+        first_json_u64(&actual.results)
     }
 }
 
@@ -1409,7 +1346,9 @@ fn apply_trapping_module_side_effects(
         .map_err(|e| format!("directive {directive_index}: {e}"))?;
     let initializer_traps = active_initializer_traps(ctx, &translated, modules, aliases)
         .map_err(|e| format!("directive {directive_index}: {e}"))?;
-    let nix = wasm2nix::clif_to_nix::lower_module(&translated).render();
+    let nix = wasm2nix::clif_to_nix::lower_module(&translated)
+        .map_err(|e| format!("directive {directive_index}: {e}"))?
+        .render();
     let path = write_generated_module(ctx, &nix)?;
     let transient_key = format!("__trap{directive_index}");
     let source_state = eval_initial_state(ctx, &path, &transient_key, modules, aliases)
@@ -1542,10 +1481,9 @@ fn apply_trapping_memory_side_effects(
         let Some(target_module) = modules.get(&target_key) else {
             continue;
         };
-        let Some(_target_memory_index) = target_module.memory_exports.get(import_field).copied()
-        else {
+        if !target_module.memory_exports.contains_key(import_field) {
             continue;
-        };
+        }
         let Some(target_state) = target_module.state.clone() else {
             continue;
         };
@@ -1709,10 +1647,9 @@ fn sync_memory_imports_to_targets(
         let Some(target_module) = modules.get(&target_key) else {
             continue;
         };
-        let Some(_target_memory_index) = target_module.memory_exports.get(import_field).copied()
-        else {
+        if !target_module.memory_exports.contains_key(import_field) {
             continue;
-        };
+        }
         let Some(target_state) = target_module.state.clone() else {
             continue;
         };
@@ -1724,7 +1661,7 @@ fn sync_memory_imports_to_targets(
     }
 }
 
-fn sync_memory_state_expr(dst_state: &str, src_state: &str, _src_memory_index: u32) -> String {
+fn sync_memory_state_expr(dst_state: &str, src_state: &str, src_memory_index: u32) -> String {
     Expr::app(
         harness_attr("syncMemoryState"),
         vec![Expr::attrset(
@@ -1734,7 +1671,7 @@ fn sync_memory_state_expr(dst_state: &str, src_state: &str, _src_memory_index: u
                 (AttrKey::ident("srcSt"), state_expr(src_state)),
                 (
                     AttrKey::ident("srcMemoryIndex"),
-                    Expr::int(i64::from(_src_memory_index)),
+                    Expr::int(i64::from(src_memory_index)),
                 ),
             ],
         )],
@@ -1819,10 +1756,15 @@ fn merge_table_state_expr(
 fn encoded_export_key(name: &str) -> String {
     let mut encoded = String::from("__wasm2nix_export_");
     for byte in name.as_bytes() {
-        use std::fmt::Write;
-        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+        push_hex_byte(&mut encoded, *byte);
     }
     encoded
+}
+
+fn push_hex_byte(out: &mut String, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push(HEX[(byte >> 4) as usize] as char);
+    out.push(HEX[(byte & 0x0F) as usize] as char);
 }
 
 fn wast_arg_to_nix(arg: &WastArg<'_>) -> Result<Expr, String> {

@@ -1,34 +1,17 @@
 pub mod clif_to_nix;
 pub mod error;
+pub mod instantiation;
 pub mod intrinsics;
+pub mod lowerings;
 pub mod nix;
 pub mod translator;
 
-#[derive(Debug)]
-pub struct TranslateStage(&'static str);
+use snafu::prelude::*;
 
-impl std::fmt::Display for TranslateStage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
-    }
-}
-
-impl std::error::Error for TranslateStage {}
-
-#[derive(Debug)]
-pub struct TranslateMessage(String);
-
-impl std::fmt::Display for TranslateMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for TranslateMessage {}
-
-pub fn lower_wasm_to_nix(wasm: &[u8]) -> Result<String, TranslateStage> {
+pub fn lower_wasm_to_nix(wasm: &[u8]) -> error::Result<String> {
     let module = translator::NixModule::translate(wasm)
-        .map_err(|err| TranslateMessage(err.to_string()))
-        .map_err(|_| TranslateStage("translate WebAssembly to Cranelift IR"))?;
-    Ok(clif_to_nix::lower_module(&module).render())
+        .map_err(error::TranslateWasmSource::from)
+        .context(error::TranslateWasmSnafu)?;
+    let lowered = lowerings::lower_module(&module).context(error::LowerNixSnafu)?;
+    Ok(lowered.render())
 }

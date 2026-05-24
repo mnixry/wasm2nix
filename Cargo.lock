@@ -678,6 +678,7 @@ dependencies = [
  "cranelift-wasm",
  "serde_json",
  "snafu",
+ "target-lexicon",
  "tempfile",
  "tracing",
  "wasmparser 0.217.1",

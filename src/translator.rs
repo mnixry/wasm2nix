@@ -18,6 +18,7 @@ use cranelift_wasm::{
     WASM32_MAX_SIZE, WasmError, WasmFuncType, WasmHeapType, WasmResult, WasmValType,
     translate_module,
 };
+use target_lexicon::PointerWidth;
 
 use crate::intrinsics as intr;
 
@@ -407,7 +408,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         let sig = func_environ.vmctx_sig(sigidx);
 
         let mut func = ir::Function::with_name_signature(
-            UserFuncName::user(intr::FUNC_NAMESPACE, func_index.as_u32()),
+            UserFuncName::user(intr::UserNamespace::Func.as_u32(), func_index.as_u32()),
             sig,
         );
         self.trans
@@ -550,13 +551,13 @@ impl<'m> NixFuncEnvironment<'m> {
     }
 
     fn import_intrinsic(
-        &mut self, func: &mut ir::Function, intrinsic_index: u32, sig: ir::Signature,
+        &mut self, func: &mut ir::Function, intrinsic: intr::Intrinsic, sig: ir::Signature,
     ) -> ir::FuncRef {
         let signature = func.import_signature(sig);
         let name =
             ir::ExternalName::User(func.declare_imported_user_function(ir::UserExternalName {
-                namespace: intr::INTRINSIC_NAMESPACE,
-                index: intrinsic_index,
+                namespace: intr::UserNamespace::Intrinsic.as_u32(),
+                index: intrinsic.index(),
             }));
         func.import_function(ir::ExtFuncData {
             name,
@@ -577,7 +578,7 @@ impl<'m> NixFuncEnvironment<'m> {
         ));
         sig.returns.push(ir::AbiParam::new(I32));
 
-        let fref = self.import_intrinsic(func, intr::MEM_GROW, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::MemGrow, sig);
         self.intrinsics.mem_grow = Some(fref);
         fref
     }
@@ -593,7 +594,7 @@ impl<'m> NixFuncEnvironment<'m> {
         ));
         sig.returns.push(ir::AbiParam::new(I32));
 
-        let fref = self.import_intrinsic(func, intr::MEM_SIZE, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::MemSize, sig);
         self.intrinsics.mem_size = Some(fref);
         fref
     }
@@ -609,7 +610,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, intr::MEM_COPY, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::MemCopy, sig);
         self.intrinsics.mem_copy = Some(fref);
         fref
     }
@@ -625,7 +626,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, intr::MEM_FILL, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::MemFill, sig);
         self.intrinsics.mem_fill = Some(fref);
         fref
     }
@@ -642,7 +643,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, intr::MEM_INIT, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::MemInit, sig);
         self.intrinsics.mem_init = Some(fref);
         fref
     }
@@ -656,7 +657,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, intr::DATA_DROP, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::DataDrop, sig);
         self.intrinsics.data_drop = Some(fref);
         fref
     }
@@ -674,7 +675,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, intr::TABLE_COPY, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::TableCopy, sig);
         self.intrinsics.table_copy = Some(fref);
         fref
     }
@@ -692,7 +693,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, intr::TABLE_INIT, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::TableInit, sig);
         self.intrinsics.table_init = Some(fref);
         fref
     }
@@ -706,7 +707,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, intr::ELEM_DROP, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::ElemDrop, sig);
         self.intrinsics.elem_drop = Some(fref);
         fref
     }
@@ -722,7 +723,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
         sig.returns.push(ir::AbiParam::new(I32));
-        let fref = self.import_intrinsic(func, intr::TABLE_GET, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::TableGet, sig);
         self.intrinsics.table_get = Some(fref);
         fref
     }
@@ -738,7 +739,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, intr::TABLE_SET, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::TableSet, sig);
         self.intrinsics.table_set = Some(fref);
         fref
     }
@@ -755,7 +756,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params.push(ir::AbiParam::new(I32));
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = self.import_intrinsic(func, intr::TABLE_FILL, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::TableFill, sig);
         self.intrinsics.table_fill = Some(fref);
         fref
     }
@@ -770,7 +771,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
         sig.returns.push(ir::AbiParam::new(I32));
-        let fref = self.import_intrinsic(func, intr::TABLE_SIZE, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::TableSize, sig);
         self.intrinsics.table_size = Some(fref);
         fref
     }
@@ -787,7 +788,7 @@ impl<'m> NixFuncEnvironment<'m> {
         sig.params
             .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
         sig.returns.push(ir::AbiParam::new(I32));
-        let fref = self.import_intrinsic(func, intr::TABLE_GROW, sig);
+        let fref = self.import_intrinsic(func, intr::Intrinsic::TableGrow, sig);
         self.intrinsics.table_grow = Some(fref);
         fref
     }
@@ -797,7 +798,7 @@ impl<'m> NixFuncEnvironment<'m> {
     ) -> ir::FuncRef {
         let mut sig = ir::Signature::new(CallConv::Fast);
         sig.returns.push(ir::AbiParam::new(I32));
-        self.import_intrinsic(func, intr::REF_FUNC_BASE + func_index.as_u32(), sig)
+        self.import_intrinsic(func, intr::Intrinsic::ref_func(func_index), sig)
     }
 
     fn intrinsic_global_get(&mut self, func: &mut ir::Function, ty: ir::Type) -> ir::FuncRef {
@@ -812,7 +813,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
                 sig.returns.push(ir::AbiParam::new(I32));
-                let fref = self.import_intrinsic(func, intr::GLOBAL_GET_I32, sig);
+                let fref = self.import_intrinsic(func, intr::Intrinsic::GlobalGetI32, sig);
                 self.intrinsics.global_get_i32 = Some(fref);
                 fref
             }
@@ -826,7 +827,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
                 sig.returns.push(ir::AbiParam::new(I64));
-                let fref = self.import_intrinsic(func, intr::GLOBAL_GET_I64, sig);
+                let fref = self.import_intrinsic(func, intr::Intrinsic::GlobalGetI64, sig);
                 self.intrinsics.global_get_i64 = Some(fref);
                 fref
             }
@@ -840,7 +841,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
                 sig.returns.push(ir::AbiParam::new(F32));
-                let fref = self.import_intrinsic(func, intr::GLOBAL_GET_F32, sig);
+                let fref = self.import_intrinsic(func, intr::Intrinsic::GlobalGetF32, sig);
                 self.intrinsics.global_get_f32 = Some(fref);
                 fref
             }
@@ -854,7 +855,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
                 sig.returns.push(ir::AbiParam::new(F64));
-                let fref = self.import_intrinsic(func, intr::GLOBAL_GET_F64, sig);
+                let fref = self.import_intrinsic(func, intr::Intrinsic::GlobalGetF64, sig);
                 self.intrinsics.global_get_f64 = Some(fref);
                 fref
             }
@@ -874,7 +875,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params.push(ir::AbiParam::new(I32));
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                let fref = self.import_intrinsic(func, intr::GLOBAL_SET_I32, sig);
+                let fref = self.import_intrinsic(func, intr::Intrinsic::GlobalSetI32, sig);
                 self.intrinsics.global_set_i32 = Some(fref);
                 fref
             }
@@ -888,7 +889,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params.push(ir::AbiParam::new(I64));
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                let fref = self.import_intrinsic(func, intr::GLOBAL_SET_I64, sig);
+                let fref = self.import_intrinsic(func, intr::Intrinsic::GlobalSetI64, sig);
                 self.intrinsics.global_set_i64 = Some(fref);
                 fref
             }
@@ -902,7 +903,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params.push(ir::AbiParam::new(F32));
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                let fref = self.import_intrinsic(func, intr::GLOBAL_SET_F32, sig);
+                let fref = self.import_intrinsic(func, intr::Intrinsic::GlobalSetF32, sig);
                 self.intrinsics.global_set_f32 = Some(fref);
                 fref
             }
@@ -916,7 +917,7 @@ impl<'m> NixFuncEnvironment<'m> {
                 sig.params.push(ir::AbiParam::new(F64));
                 sig.params
                     .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                let fref = self.import_intrinsic(func, intr::GLOBAL_SET_F64, sig);
+                let fref = self.import_intrinsic(func, intr::Intrinsic::GlobalSetF64, sig);
                 self.intrinsics.global_set_f64 = Some(fref);
                 fref
             }
@@ -930,10 +931,11 @@ impl<'m> NixFuncEnvironment<'m> {
         let mut sig = self.vmctx_sig(sig_index);
         sig.params.insert(0, ir::AbiParam::new(I32));
         let canonical_sig_index = self.mod_info.canonical_type_index(sig_index);
-        let intrinsic_index = intr::CALL_INDIRECT_BASE
-            + table_index.as_u32() * intr::CALL_INDIRECT_STRIDE
-            + canonical_sig_index.as_u32();
-        self.import_intrinsic(func, intrinsic_index, sig)
+        self.import_intrinsic(
+            func,
+            intr::Intrinsic::call_indirect(table_index, canonical_sig_index),
+            sig,
+        )
     }
 
     fn wasm_ty_to_clif_ty(ty: WasmValType) -> WasmResult<ir::Type> {
@@ -1021,7 +1023,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         // treated as linear offsets during CLIF→Nix lowering (we'll interpret
         // the base as 0).
         let base_name = func.declare_imported_user_function(ir::UserExternalName {
-            namespace: intr::INTRINSIC_NAMESPACE,
+            namespace: intr::UserNamespace::Symbol.as_u32(),
             index: 1000 + index.as_u32(),
         });
         let base = func.create_global_value(ir::GlobalValueData::Symbol {
@@ -1060,7 +1062,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         let signature = func.import_signature(self.vmctx_sig(sigidx));
         let name =
             ir::ExternalName::User(func.declare_imported_user_function(ir::UserExternalName {
-                namespace: intr::FUNC_NAMESPACE,
+                namespace: intr::UserNamespace::Func.as_u32(),
                 index: index.as_u32(),
             }));
         Ok(func.import_function(ir::ExtFuncData {
@@ -1074,10 +1076,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         &mut self, builder: &mut FunctionBuilder, _callee_index: FuncIndex, callee: ir::FuncRef,
         call_args: &[ir::Value],
     ) -> WasmResult<ir::Inst> {
-        let vmctx = builder
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(builder.func)?;
 
         let mut args = Vec::with_capacity(call_args.len() + 1);
         args.extend(call_args.iter().cloned());
@@ -1089,10 +1088,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         &mut self, builder: &mut FunctionBuilder, table_index: TableIndex, sig_index: TypeIndex,
         _sig_ref: ir::SigRef, callee: ir::Value, call_args: &[ir::Value],
     ) -> WasmResult<Option<ir::Inst>> {
-        let vmctx = builder
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(builder.func)?;
         let fref = self.intrinsic_call_indirect(builder.func, table_index, sig_index);
         let mut args = Vec::with_capacity(call_args.len() + 2);
         args.push(callee);
@@ -1128,10 +1124,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         if index.index() != 0 {
             return Err(WasmError::Unsupported("multiple memories".into()));
         }
-        let vmctx = pos
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(pos.func)?;
         let fref = self.intrinsic_mem_grow(pos.func);
         let inst = pos.ins().call(fref, &[val, vmctx]);
         Ok(pos.func.dfg.inst_results(inst)[0])
@@ -1143,10 +1136,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         if index.index() != 0 {
             return Err(WasmError::Unsupported("multiple memories".into()));
         }
-        let vmctx = pos
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(pos.func)?;
         let fref = self.intrinsic_mem_size(pos.func);
         let inst = pos.ins().call(fref, &[vmctx]);
         Ok(pos.func.dfg.inst_results(inst)[0])
@@ -1159,10 +1149,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         if src_index.index() != 0 || dst_index.index() != 0 {
             return Err(WasmError::Unsupported("multiple memories".into()));
         }
-        let vmctx = pos
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(pos.func)?;
         let fref = self.intrinsic_mem_copy(pos.func);
         pos.ins().call(fref, &[dst, src, len, vmctx]);
         Ok(())
@@ -1175,10 +1162,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         if index.index() != 0 {
             return Err(WasmError::Unsupported("multiple memories".into()));
         }
-        let vmctx = pos
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(pos.func)?;
         let fref = self.intrinsic_mem_fill(pos.func);
         pos.ins().call(fref, &[dst, val, len, vmctx]);
         Ok(())
@@ -1191,10 +1175,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         if index.index() != 0 {
             return Err(WasmError::Unsupported("multiple memories".into()));
         }
-        let vmctx = pos
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(pos.func)?;
         let seg = pos.ins().iconst(I32, i64::from(seg_index));
         let fref = self.intrinsic_mem_init(pos.func);
         pos.ins().call(fref, &[seg, dst, src, len, vmctx]);
@@ -1202,10 +1183,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_data_drop(&mut self, mut pos: FuncCursor, seg_index: u32) -> WasmResult<()> {
-        let vmctx = pos
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(pos.func)?;
         let seg = pos.ins().iconst(I32, i64::from(seg_index));
         let fref = self.intrinsic_data_drop(pos.func);
         pos.ins().call(fref, &[seg, vmctx]);
@@ -1215,10 +1193,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     fn translate_table_size(
         &mut self, mut pos: FuncCursor, index: TableIndex,
     ) -> WasmResult<ir::Value> {
-        let vmctx = pos
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(pos.func)?;
         let table = pos.ins().iconst(I32, i64::from(index.as_u32()));
         let fref = self.intrinsic_table_size(pos.func);
         let inst = pos.ins().call(fref, &[table, vmctx]);
@@ -1229,10 +1204,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         &mut self, mut pos: FuncCursor, table_index: TableIndex, delta: ir::Value,
         init_value: ir::Value,
     ) -> WasmResult<ir::Value> {
-        let vmctx = pos
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(pos.func)?;
         let table = pos.ins().iconst(I32, i64::from(table_index.as_u32()));
         let fref = self.intrinsic_table_grow(pos.func);
         let inst = pos.ins().call(fref, &[table, init_value, delta, vmctx]);
@@ -1242,10 +1214,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     fn translate_table_get(
         &mut self, builder: &mut FunctionBuilder, table_index: TableIndex, index: ir::Value,
     ) -> WasmResult<ir::Value> {
-        let vmctx = builder
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(builder.func)?;
         let table = builder.ins().iconst(I32, i64::from(table_index.as_u32()));
         let fref = self.intrinsic_table_get(builder.func);
         let call = builder.ins().call(fref, &[table, index, vmctx]);
@@ -1256,10 +1225,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         &mut self, builder: &mut FunctionBuilder, table_index: TableIndex, value: ir::Value,
         index: ir::Value,
     ) -> WasmResult<()> {
-        let vmctx = builder
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(builder.func)?;
         let table = builder.ins().iconst(I32, i64::from(table_index.as_u32()));
         let fref = self.intrinsic_table_set(builder.func);
         builder.ins().call(fref, &[table, index, value, vmctx]);
@@ -1270,10 +1236,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         &mut self, mut pos: FuncCursor, dst_table_index: TableIndex, src_table_index: TableIndex,
         dst: ir::Value, src: ir::Value, len: ir::Value,
     ) -> WasmResult<()> {
-        let vmctx = pos
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(pos.func)?;
         let dst_table = pos.ins().iconst(I32, i64::from(dst_table_index.as_u32()));
         let src_table = pos.ins().iconst(I32, i64::from(src_table_index.as_u32()));
         let fref = self.intrinsic_table_copy(pos.func);
@@ -1286,10 +1249,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         &mut self, mut pos: FuncCursor, table_index: TableIndex, dst: ir::Value, val: ir::Value,
         len: ir::Value,
     ) -> WasmResult<()> {
-        let vmctx = pos
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(pos.func)?;
         let table = pos.ins().iconst(I32, i64::from(table_index.as_u32()));
         let fref = self.intrinsic_table_fill(pos.func);
         pos.ins().call(fref, &[table, dst, val, len, vmctx]);
@@ -1300,10 +1260,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         &mut self, mut pos: FuncCursor, seg_index: u32, table_index: TableIndex, dst: ir::Value,
         src: ir::Value, len: ir::Value,
     ) -> WasmResult<()> {
-        let vmctx = pos
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(pos.func)?;
         let table = pos.ins().iconst(I32, i64::from(table_index.as_u32()));
         let seg = pos.ins().iconst(I32, i64::from(seg_index));
         let fref = self.intrinsic_table_init(pos.func);
@@ -1312,10 +1269,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_elem_drop(&mut self, mut pos: FuncCursor, seg_index: u32) -> WasmResult<()> {
-        let vmctx = pos
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(pos.func)?;
         let seg = pos.ins().iconst(I32, i64::from(seg_index));
         let fref = self.intrinsic_elem_drop(pos.func);
         pos.ins().call(fref, &[seg, vmctx]);
@@ -1350,10 +1304,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         let clif_ty = Self::wasm_ty_to_clif_ty(global.wasm_ty)?;
         let fref = self.intrinsic_global_get(builder.func, clif_ty);
 
-        let vmctx = builder
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(builder.func)?;
 
         let idx = builder.ins().iconst(I32, i64::from(global_index.as_u32()));
         let call = builder.ins().call(fref, &[idx, vmctx]);
@@ -1367,10 +1318,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         let clif_ty = Self::wasm_ty_to_clif_ty(global.wasm_ty)?;
         let fref = self.intrinsic_global_set(builder.func, clif_ty);
 
-        let vmctx = builder
-            .func
-            .special_param(ir::ArgumentPurpose::VMContext)
-            .expect("Missing vmctx parameter");
+        let vmctx = vmctx_param(builder.func)?;
 
         let idx = builder.ins().iconst(I32, i64::from(global_index.as_u32()));
         builder.ins().call(fref, &[idx, val, vmctx]);
@@ -1408,16 +1356,15 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 }
 
+fn vmctx_param(func: &ir::Function) -> WasmResult<ir::Value> {
+    func.special_param(ir::ArgumentPurpose::VMContext)
+        .ok_or_else(|| WasmError::Unsupported("missing VMContext parameter".into()))
+}
+
 fn default_frontend_config() -> TargetFrontendConfig {
-    let isa_name = std::env::consts::ARCH;
-
-    let builder = cranelift_codegen::isa::lookup_by_name(isa_name)
-        .or_else(|_| cranelift_codegen::isa::lookup_by_name("x86_64"))
-        .expect("No supported Cranelift ISA backend is enabled");
-
-    let flags = cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder());
-    let isa = builder
-        .finish(flags)
-        .expect("Failed to build Cranelift ISA");
-    isa.frontend_config()
+    TargetFrontendConfig {
+        default_call_conv: CallConv::Fast,
+        pointer_width: PointerWidth::U32,
+        page_size_align_log2: Memory::DEFAULT_PAGE_SIZE_LOG2,
+    }
 }

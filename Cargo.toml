@@ -10,6 +10,7 @@ cranelift-entity   = "*"
 cranelift-frontend = "*"
 cranelift-wasm     = "0.112.3"
 snafu              = "0.8.9"
+target-lexicon     = "0.12.16"
 tracing            = "0.1.44"
 
 [dependencies.wasmparser]
