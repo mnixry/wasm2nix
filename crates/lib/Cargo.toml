@@ -1,0 +1,21 @@
+[package]
+edition.workspace = true
+name              = "wasm2nix"
+version.workspace = true
+
+[dependencies]
+cranelift-codegen.workspace  = true
+cranelift-entity.workspace   = true
+cranelift-frontend.workspace = true
+cranelift-wasm.workspace     = true
+snafu.workspace              = true
+target-lexicon.workspace     = true
+tracing.workspace            = true
+wasm2nix-ast.workspace       = true
+wasmparser.workspace         = true
+
+[dev-dependencies]
+wast.workspace = true
+
+[lints]
+workspace = true

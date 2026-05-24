@@ -671,16 +671,41 @@ dependencies = [
 name = "wasm2nix"
 version = "0.1.0"
 dependencies = [
- "clap",
  "cranelift-codegen",
  "cranelift-entity",
  "cranelift-frontend",
  "cranelift-wasm",
- "serde_json",
  "snafu",
  "target-lexicon",
- "tempfile",
  "tracing",
+ "wasm2nix-ast",
+ "wasmparser 0.217.1",
+ "wast",
+]
+
+[[package]]
+name = "wasm2nix-ast"
+version = "0.1.0"
+
+[[package]]
+name = "wasm2nix-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "snafu",
+ "wasm2nix",
+]
+
+[[package]]
+name = "wasm2nix-wast"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen",
+ "cranelift-entity",
+ "cranelift-wasm",
+ "serde_json",
+ "tempfile",
+ "wasm2nix",
  "wasmparser 0.217.1",
  "wast",
 ]

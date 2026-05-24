@@ -1,26 +1,34 @@
-[package]
+[workspace]
+members = [
+    "crates/cli",
+    "crates/lib",
+    "crates/nix",
+    "crates/wast",
+]
+resolver = "3"
+
+[workspace.package]
 edition = "2024"
-name    = "wasm2nix"
 version = "0.1.0"
 
-[dependencies]
+[workspace.dependencies]
 clap               = { version = "4.5.54", features = ["derive"] }
 cranelift-codegen  = "*"
 cranelift-entity   = "*"
 cranelift-frontend = "*"
 cranelift-wasm     = "0.112.3"
+serde_json         = "1.0"
 snafu              = "0.8.9"
 target-lexicon     = "0.12.16"
+tempfile           = "3.14.0"
 tracing            = "0.1.44"
+wasm2nix           = { path = "crates/lib" }
+wasm2nix-ast       = { path = "crates/nix" }
+wast               = "250.0.0"
 
-[dependencies.wasmparser]
+[workspace.dependencies.wasmparser]
 features = ["features"]
 version  = "0.217.1"
-
-[dev-dependencies]
-serde_json = "1.0"
-tempfile   = "3.14.0"
-wast       = "250.0.0"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

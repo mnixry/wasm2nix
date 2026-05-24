@@ -1,0 +1,16 @@
+[package]
+edition.workspace = true
+name              = "wasm2nix-cli"
+version.workspace = true
+
+[[bin]]
+name = "wasm2nix"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace     = true
+snafu.workspace    = true
+wasm2nix.workspace = true
+
+[lints]
+workspace = true
