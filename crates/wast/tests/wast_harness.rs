@@ -122,7 +122,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                         "directive {directive_index}: module instantiation trapped during active segment initialization"
                     ));
                 }
-                let nix = wasm2nix::clif_to_nix::lower_module(&translated)
+                let nix = wasm2nix::lowerings::lower_module(&translated)
                     .map_err(|e| format!("directive {directive_index}: {e}"))?
                     .render();
                 let path = write_generated_module(&mut ctx, &nix)?;
@@ -306,7 +306,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                 {
                     continue;
                 }
-                let nix = wasm2nix::clif_to_nix::lower_module(&translated)
+                let nix = wasm2nix::lowerings::lower_module(&translated)
                     .map_err(|e| format!("directive {directive_index}: {e}"))?
                     .render();
                 let path = write_generated_module(&mut ctx, &nix)?;
@@ -1156,10 +1156,7 @@ fn eval_nix_json(ctx: &mut HarnessContext, expr: &Expr) -> Result<JsonValue, Str
 }
 
 fn rt_import_expr() -> Result<Expr, String> {
-    let path = std::env::current_dir()
-        .map_err(|e| e.to_string())?
-        .join("nix/rt.nix");
-    Ok(import_nix_file_expr(&path))
+    Ok(import_nix_file_expr(wasm2nix::runtime_nix_path()))
 }
 
 fn harness_import_expr() -> Result<Expr, String> {
@@ -1346,7 +1343,7 @@ fn apply_trapping_module_side_effects(
         .map_err(|e| format!("directive {directive_index}: {e}"))?;
     let initializer_traps = active_initializer_traps(ctx, &translated, modules, aliases)
         .map_err(|e| format!("directive {directive_index}: {e}"))?;
-    let nix = wasm2nix::clif_to_nix::lower_module(&translated)
+    let nix = wasm2nix::lowerings::lower_module(&translated)
         .map_err(|e| format!("directive {directive_index}: {e}"))?
         .render();
     let path = write_generated_module(ctx, &nix)?;

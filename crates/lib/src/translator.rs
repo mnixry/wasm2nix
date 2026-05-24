@@ -408,7 +408,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         let sig = func_environ.vmctx_sig(sigidx);
 
         let mut func = ir::Function::with_name_signature(
-            UserFuncName::user(intr::UserNamespace::Func.as_u32(), func_index.as_u32()),
+            UserFuncName::user(intr::UserNamespace::Func.into(), func_index.as_u32()),
             sig,
         );
         self.trans
@@ -556,8 +556,8 @@ impl<'m> NixFuncEnvironment<'m> {
         let signature = func.import_signature(sig);
         let name =
             ir::ExternalName::User(func.declare_imported_user_function(ir::UserExternalName {
-                namespace: intr::UserNamespace::Intrinsic.as_u32(),
-                index: intrinsic.index(),
+                namespace: intr::UserNamespace::Intrinsic.into(),
+                index: intrinsic.into(),
             }));
         func.import_function(ir::ExtFuncData {
             name,
@@ -1023,7 +1023,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         // treated as linear offsets during CLIF→Nix lowering (we'll interpret
         // the base as 0).
         let base_name = func.declare_imported_user_function(ir::UserExternalName {
-            namespace: intr::UserNamespace::Symbol.as_u32(),
+            namespace: intr::UserNamespace::Symbol.into(),
             index: 1000 + index.as_u32(),
         });
         let base = func.create_global_value(ir::GlobalValueData::Symbol {
@@ -1062,7 +1062,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
         let signature = func.import_signature(self.vmctx_sig(sigidx));
         let name =
             ir::ExternalName::User(func.declare_imported_user_function(ir::UserExternalName {
-                namespace: intr::UserNamespace::Func.as_u32(),
+                namespace: intr::UserNamespace::Func.into(),
                 index: index.as_u32(),
             }));
         Ok(func.import_function(ir::ExtFuncData {

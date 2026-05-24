@@ -1207,105 +1207,99 @@ fn resolve_callee(
     match name {
         ir::ExternalName::User(user_ref) => {
             let user = &func.params.user_named_funcs()[user_ref];
-            match intr::UserNamespace::from_u32(user.namespace) {
-                Some(intr::UserNamespace::Func) => {
+            match intr::UserNamespace::try_from(user.namespace) {
+                Ok(intr::UserNamespace::Func) => {
                     // wasm function: f{index}
                     Ok((
                         Expr::ident(format!("f{}", user.index)),
                         CallKind::StatefulRecord,
                     ))
                 }
-                Some(intr::UserNamespace::Intrinsic) => {
-                    match intr::Intrinsic::from_index(user.index) {
-                        Some(intr::Intrinsic::MemGrow) => {
-                            Ok((rt_fn(&["mem", "grow"]), CallKind::StatefulRecord))
-                        }
-                        Some(intr::Intrinsic::MemSize) => {
-                            Ok((rt_fn(&["mem", "size"]), CallKind::Pure))
-                        }
-                        Some(intr::Intrinsic::MemCopy) => {
-                            Ok((rt_fn(&["mem", "copy"]), CallKind::StatefulState))
-                        }
-                        Some(intr::Intrinsic::MemFill) => {
-                            Ok((rt_fn(&["mem", "fill"]), CallKind::StatefulState))
-                        }
-                        Some(intr::Intrinsic::MemInit) => {
-                            Ok((rt_fn(&["mem", "init"]), CallKind::StatefulState))
-                        }
-                        Some(intr::Intrinsic::DataDrop) => {
-                            Ok((rt_fn(&["mem", "data_drop"]), CallKind::StatefulState))
-                        }
-                        Some(intr::Intrinsic::TableCopy) => {
-                            Ok((rt_fn(&["table", "copy"]), CallKind::StatefulState))
-                        }
-                        Some(intr::Intrinsic::TableInit) => {
-                            Ok((rt_fn(&["table", "init"]), CallKind::StatefulState))
-                        }
-                        Some(intr::Intrinsic::ElemDrop) => {
-                            Ok((rt_fn(&["table", "elem_drop"]), CallKind::StatefulState))
-                        }
-                        Some(intr::Intrinsic::TableGet) => {
-                            Ok((rt_fn(&["table", "get"]), CallKind::Pure))
-                        }
-                        Some(intr::Intrinsic::TableSet) => {
-                            Ok((rt_fn(&["table", "set"]), CallKind::StatefulState))
-                        }
-                        Some(intr::Intrinsic::TableFill) => {
-                            Ok((rt_fn(&["table", "fill"]), CallKind::StatefulState))
-                        }
-                        Some(intr::Intrinsic::TableSize) => {
-                            Ok((rt_fn(&["table", "size"]), CallKind::Pure))
-                        }
-                        Some(intr::Intrinsic::TableGrow) => {
-                            Ok((rt_fn(&["table", "grow"]), CallKind::StatefulRecord))
-                        }
-                        Some(intr::Intrinsic::GlobalGetI32) => {
-                            Ok((rt_fn(&["global", "get_i32"]), CallKind::Pure))
-                        }
-                        Some(intr::Intrinsic::GlobalGetI64) => {
-                            Ok((rt_fn(&["global", "get_i64"]), CallKind::Pure))
-                        }
-                        Some(intr::Intrinsic::GlobalGetF32) => {
-                            Ok((rt_fn(&["global", "get_f32"]), CallKind::Pure))
-                        }
-                        Some(intr::Intrinsic::GlobalGetF64) => {
-                            Ok((rt_fn(&["global", "get_f64"]), CallKind::Pure))
-                        }
-                        Some(intr::Intrinsic::GlobalSetI32) => {
-                            Ok((rt_fn(&["global", "set_i32"]), CallKind::StatefulState))
-                        }
-                        Some(intr::Intrinsic::GlobalSetI64) => {
-                            Ok((rt_fn(&["global", "set_i64"]), CallKind::StatefulState))
-                        }
-                        Some(intr::Intrinsic::GlobalSetF32) => {
-                            Ok((rt_fn(&["global", "set_f32"]), CallKind::StatefulState))
-                        }
-                        Some(intr::Intrinsic::GlobalSetF64) => {
-                            Ok((rt_fn(&["global", "set_f64"]), CallKind::StatefulState))
-                        }
-                        Some(intr::Intrinsic::RefFunc { func_index }) => {
-                            Ok((lower_table_entry(module, func_index), CallKind::Pure))
-                        }
-                        Some(intr::Intrinsic::CallIndirect {
-                            table_index,
-                            type_index,
-                        }) => {
-                            let sig_index = cranelift_wasm::TypeIndex::from_u32(type_index);
-                            let Some(sig) = module.info.signatures.get(sig_index) else {
-                                return MissingTypeSnafu { type_index }.fail();
-                            };
-                            Ok((
-                                rt_fn(&["table", "call"]),
-                                CallKind::Indirect {
-                                    table_index,
-                                    type_id: signature_id(sig),
-                                },
-                            ))
-                        }
-                        None => UnknownIntrinsicSnafu { index: user.index }.fail(),
+                Ok(intr::UserNamespace::Intrinsic) => match intr::Intrinsic::try_from(user.index) {
+                    Ok(intr::Intrinsic::MemGrow) => {
+                        Ok((rt_fn(&["mem", "grow"]), CallKind::StatefulRecord))
                     }
-                }
-                Some(intr::UserNamespace::Symbol) | None => UnknownExternalNamespaceSnafu {
+                    Ok(intr::Intrinsic::MemSize) => Ok((rt_fn(&["mem", "size"]), CallKind::Pure)),
+                    Ok(intr::Intrinsic::MemCopy) => {
+                        Ok((rt_fn(&["mem", "copy"]), CallKind::StatefulState))
+                    }
+                    Ok(intr::Intrinsic::MemFill) => {
+                        Ok((rt_fn(&["mem", "fill"]), CallKind::StatefulState))
+                    }
+                    Ok(intr::Intrinsic::MemInit) => {
+                        Ok((rt_fn(&["mem", "init"]), CallKind::StatefulState))
+                    }
+                    Ok(intr::Intrinsic::DataDrop) => {
+                        Ok((rt_fn(&["mem", "data_drop"]), CallKind::StatefulState))
+                    }
+                    Ok(intr::Intrinsic::TableCopy) => {
+                        Ok((rt_fn(&["table", "copy"]), CallKind::StatefulState))
+                    }
+                    Ok(intr::Intrinsic::TableInit) => {
+                        Ok((rt_fn(&["table", "init"]), CallKind::StatefulState))
+                    }
+                    Ok(intr::Intrinsic::ElemDrop) => {
+                        Ok((rt_fn(&["table", "elem_drop"]), CallKind::StatefulState))
+                    }
+                    Ok(intr::Intrinsic::TableGet) => Ok((rt_fn(&["table", "get"]), CallKind::Pure)),
+                    Ok(intr::Intrinsic::TableSet) => {
+                        Ok((rt_fn(&["table", "set"]), CallKind::StatefulState))
+                    }
+                    Ok(intr::Intrinsic::TableFill) => {
+                        Ok((rt_fn(&["table", "fill"]), CallKind::StatefulState))
+                    }
+                    Ok(intr::Intrinsic::TableSize) => {
+                        Ok((rt_fn(&["table", "size"]), CallKind::Pure))
+                    }
+                    Ok(intr::Intrinsic::TableGrow) => {
+                        Ok((rt_fn(&["table", "grow"]), CallKind::StatefulRecord))
+                    }
+                    Ok(intr::Intrinsic::GlobalGetI32) => {
+                        Ok((rt_fn(&["global", "get_i32"]), CallKind::Pure))
+                    }
+                    Ok(intr::Intrinsic::GlobalGetI64) => {
+                        Ok((rt_fn(&["global", "get_i64"]), CallKind::Pure))
+                    }
+                    Ok(intr::Intrinsic::GlobalGetF32) => {
+                        Ok((rt_fn(&["global", "get_f32"]), CallKind::Pure))
+                    }
+                    Ok(intr::Intrinsic::GlobalGetF64) => {
+                        Ok((rt_fn(&["global", "get_f64"]), CallKind::Pure))
+                    }
+                    Ok(intr::Intrinsic::GlobalSetI32) => {
+                        Ok((rt_fn(&["global", "set_i32"]), CallKind::StatefulState))
+                    }
+                    Ok(intr::Intrinsic::GlobalSetI64) => {
+                        Ok((rt_fn(&["global", "set_i64"]), CallKind::StatefulState))
+                    }
+                    Ok(intr::Intrinsic::GlobalSetF32) => {
+                        Ok((rt_fn(&["global", "set_f32"]), CallKind::StatefulState))
+                    }
+                    Ok(intr::Intrinsic::GlobalSetF64) => {
+                        Ok((rt_fn(&["global", "set_f64"]), CallKind::StatefulState))
+                    }
+                    Ok(intr::Intrinsic::RefFunc { func_index }) => {
+                        Ok((lower_table_entry(module, func_index), CallKind::Pure))
+                    }
+                    Ok(intr::Intrinsic::CallIndirect {
+                        table_index,
+                        type_index,
+                    }) => {
+                        let sig_index = cranelift_wasm::TypeIndex::from_u32(type_index);
+                        let Some(sig) = module.info.signatures.get(sig_index) else {
+                            return MissingTypeSnafu { type_index }.fail();
+                        };
+                        Ok((
+                            rt_fn(&["table", "call"]),
+                            CallKind::Indirect {
+                                table_index,
+                                type_id: signature_id(sig),
+                            },
+                        ))
+                    }
+                    Err(_) => UnknownIntrinsicSnafu { index: user.index }.fail(),
+                },
+                Ok(intr::UserNamespace::Symbol) | Err(_) => UnknownExternalNamespaceSnafu {
                     namespace: user.namespace,
                 }
                 .fail(),

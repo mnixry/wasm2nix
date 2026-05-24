@@ -17,14 +17,14 @@
         let
           pkgs = import nixpkgs { inherit system; };
         in
-        import ./crates/wast/nix/tests.nix { inherit pkgs; }
+        import ./crates/lib/nix/tests.nix { inherit pkgs; }
       );
 
       checks = forAllSystems (
         system:
         let
           pkgs = import nixpkgs { inherit system; };
-          failed = import ./crates/wast/nix/tests.nix { inherit pkgs; };
+          failed = import ./crates/lib/nix/tests.nix { inherit pkgs; };
         in
         {
           runTests = pkgs.runCommand "wasm2nix-runTests" { FAILED = builtins.toJSON failed; } ''
