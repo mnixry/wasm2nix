@@ -71,6 +71,8 @@ impl UnOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Ident(String),
+    Raw(String),
+    Path(String),
     Int(i64),
     Bool(bool),
     Str(String),
@@ -118,6 +120,14 @@ pub enum Expr {
 impl Expr {
     pub fn ident(name: impl Into<String>) -> Self {
         Self::Ident(name.into())
+    }
+
+    pub fn raw(expr: impl Into<String>) -> Self {
+        Self::Raw(expr.into())
+    }
+
+    pub fn path(path: impl Into<String>) -> Self {
+        Self::Path(path.into())
     }
 
     pub fn int(v: i64) -> Self {
@@ -238,6 +248,8 @@ impl Expr {
             Expr::Select { .. } => Prec::Select,
             Expr::UnOp { .. } => Prec::Mul,
             Expr::Ident(_)
+            | Expr::Raw(_)
+            | Expr::Path(_)
             | Expr::Int(_)
             | Expr::Bool(_)
             | Expr::Str(_)
@@ -303,6 +315,8 @@ impl Printer {
 
         self.parens_if(need_parens, |p| match e {
             Expr::Ident(s) => p.push(s),
+            Expr::Raw(s) => p.push(s),
+            Expr::Path(s) => p.push(s),
             Expr::Int(v) if *v == i64::MIN => p.push("(0 - 9223372036854775807 - 1)"),
             Expr::Int(v) if *v < 0 => {
                 p.push("(");
