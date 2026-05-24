@@ -1,5 +1,6 @@
-use clap::Parser;
 use std::path::PathBuf;
+
+use clap::Parser;
 use wasm2nix::{error, log, lower_wasm_to_nix};
 
 #[derive(Debug, Clone, Parser)]

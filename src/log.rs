@@ -11,8 +11,8 @@ pub enum LogLevel {
 
 impl LogLevel {
     fn allows(self, lvl: slog::Level) -> bool {
-        // Lower is "more severe" in slog; allow everything up to the selected verbosity.
-        // Critical is treated like Error for our purposes.
+        // Lower is "more severe" in slog; allow everything up to the selected
+        // verbosity. Critical is treated like Error for our purposes.
         match self {
             LogLevel::Error => lvl <= slog::Level::Error,
             LogLevel::Warn => lvl <= slog::Level::Warning,

@@ -211,16 +211,16 @@ impl Expr {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Prec {
-    Top = 0,
+    Top         = 0,
     LetIfLambda = 10,
-    Or = 20,
-    And = 30,
-    Cmp = 40,
-    Add = 50,
-    Mul = 60,
-    Apply = 70,
-    Select = 80,
-    Atom = 90,
+    Or          = 20,
+    And         = 30,
+    Cmp         = 40,
+    Add         = 50,
+    Mul         = 60,
+    Apply       = 70,
+    Select      = 80,
+    Atom        = 90,
 }
 
 impl Expr {

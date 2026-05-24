@@ -1,5 +1,6 @@
-use snafu::prelude::*;
 use std::path::PathBuf;
+
+use snafu::prelude::*;
 
 #[derive(Debug, Snafu)]
 pub enum Error {

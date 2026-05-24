@@ -1,17 +1,21 @@
-use std::collections::{BTreeMap, HashMap};
-use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use cranelift_entity::EntityRef;
 use serde_json::Value as JsonValue;
 use wasm2nix::translator::NixModule;
-use wast::core::{NanPattern, WastArgCore, WastRetCore};
-use wast::lexer::Lexer;
-use wast::parser::{self, ParseBuffer};
-use wast::{Wast, WastArg, WastDirective, WastExecute, WastRet};
+use wast::{
+    Wast, WastArg, WastDirective, WastExecute, WastRet,
+    core::{NanPattern, WastArgCore, WastRetCore},
+    lexer::Lexer,
+    parser::{self, ParseBuffer},
+};
 
 static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
 
@@ -244,9 +248,7 @@ struct HarnessModule {
 }
 
 fn select_module_key(
-    module: Option<wast::token::Id<'_>>,
-    current: Option<&str>,
-    aliases: &HashMap<String, String>,
+    module: Option<wast::token::Id<'_>>, current: Option<&str>, aliases: &HashMap<String, String>,
 ) -> Result<String, String> {
     if let Some(module) = module {
         let name = module.name();
@@ -328,9 +330,7 @@ struct InvokeResult {
 }
 
 fn eval_instantiate(
-    module: &PathBuf,
-    module_key: &str,
-    modules: &HashMap<String, HarnessModule>,
+    module: &Path, module_key: &str, modules: &HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>,
 ) -> Result<String, String> {
     let world = EvalWorld::new(modules, aliases);
@@ -346,9 +346,7 @@ fn eval_instantiate(
 }
 
 fn eval_initial_state(
-    module: &PathBuf,
-    module_key: &str,
-    modules: &HashMap<String, HarnessModule>,
+    module: &Path, module_key: &str, modules: &HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>,
 ) -> Result<String, String> {
     let world = EvalWorld::new(modules, aliases);
@@ -364,12 +362,8 @@ fn eval_initial_state(
 }
 
 fn eval_invoke(
-    module_key: &str,
-    modules: &HashMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>,
-    name: &str,
-    args: &[WastArg<'_>],
-    state: Option<&str>,
+    module_key: &str, modules: &HashMap<String, HarnessModule>, aliases: &HashMap<String, String>,
+    name: &str, args: &[WastArg<'_>], state: Option<&str>,
 ) -> Result<InvokeResult, String> {
     let args = args
         .iter()
@@ -404,11 +398,8 @@ fn eval_invoke(
 }
 
 fn eval_get(
-    module_key: &str,
-    modules: &HashMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>,
-    name: &str,
-    state: Option<&str>,
+    module_key: &str, modules: &HashMap<String, HarnessModule>, aliases: &HashMap<String, String>,
+    name: &str, state: Option<&str>,
 ) -> Result<InvokeResult, String> {
     let state_expr = state.unwrap_or("i.st");
     let world = EvalWorld::new(modules, aliases);
@@ -510,9 +501,7 @@ impl EvalWorld {
 }
 
 fn imports_expr(
-    module_key: &str,
-    aliases: &HashMap<String, String>,
-    module_vars: &HashMap<String, String>,
+    module_key: &str, aliases: &HashMap<String, String>, module_vars: &HashMap<String, String>,
 ) -> String {
     let mut fields = BTreeMap::new();
     fields.insert("__moduleId".to_string(), nix_string(module_key));
@@ -541,9 +530,7 @@ fn spectest_imports_expr() -> String {
 }
 
 fn apply_trapping_module_side_effects(
-    directive_index: usize,
-    wat: &mut wast::Wat<'_>,
-    modules: &mut HashMap<String, HarnessModule>,
+    directive_index: usize, wat: &mut wast::Wat<'_>, modules: &mut HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>,
 ) -> Result<(), String> {
     let wasm = wat
@@ -575,9 +562,7 @@ fn apply_trapping_module_side_effects(
 }
 
 fn apply_trapping_table_side_effects(
-    module: &NixModule,
-    source_state: &str,
-    modules: &mut HashMap<String, HarnessModule>,
+    module: &NixModule, source_state: &str, modules: &mut HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>,
 ) {
     for init in &module.info.table_initializers {
@@ -624,12 +609,8 @@ fn apply_trapping_table_side_effects(
 }
 
 fn merge_table_entries_expr(
-    target_state: &str,
-    target_table_index: u32,
-    source_state: &str,
-    source_table_index: u32,
-    offset: u32,
-    len: u32,
+    target_state: &str, target_table_index: u32, source_state: &str, source_table_index: u32,
+    offset: u32, len: u32,
 ) -> String {
     let entries = (0..len)
         .map(|i| {
@@ -651,9 +632,7 @@ fn merge_table_entries_expr(
 }
 
 fn apply_trapping_memory_side_effects(
-    module: &NixModule,
-    source_state: &str,
-    modules: &mut HashMap<String, HarnessModule>,
+    module: &NixModule, source_state: &str, modules: &mut HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>,
 ) {
     for init in &module.info.data_initializers {
@@ -694,10 +673,7 @@ fn apply_trapping_memory_side_effects(
 }
 
 fn merge_memory_words_expr(
-    target_state: &str,
-    source_state: &str,
-    offset: u64,
-    len: usize,
+    target_state: &str, source_state: &str, offset: u64, len: usize,
 ) -> String {
     let first_word = offset / 4;
     let last_word = if len == 0 {
@@ -721,8 +697,7 @@ fn merge_memory_words_expr(
 }
 
 fn sync_global_imports_from_targets(
-    modules: &mut HashMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>,
+    modules: &mut HashMap<String, HarnessModule>, aliases: &HashMap<String, String>,
 ) {
     let mut keys = modules.keys().cloned().collect::<Vec<_>>();
     keys.sort();
@@ -767,8 +742,7 @@ fn sync_global_imports_from_targets(
 }
 
 fn sync_global_imports_to_targets(
-    source_key: &str,
-    modules: &mut HashMap<String, HarnessModule>,
+    source_key: &str, modules: &mut HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>,
 ) {
     let Some(source_module) = modules.get(source_key) else {
@@ -807,10 +781,7 @@ fn sync_global_imports_to_targets(
 }
 
 fn sync_global_state_expr(
-    dst_state: &str,
-    dst_global_index: u32,
-    src_state: &str,
-    src_global_index: u32,
+    dst_state: &str, dst_global_index: u32, src_state: &str, src_global_index: u32,
 ) -> String {
     format!(
         "(let dstSt = {dst_state}; srcSt = {src_state}; dstGlobals = dstSt.globals or {{}}; srcGlobals = srcSt.globals or {{}}; value = srcGlobals.{} or 0; in dstSt // {{ globals = dstGlobals // {{ {} = value; }}; }})",
@@ -820,8 +791,7 @@ fn sync_global_state_expr(
 }
 
 fn sync_memory_imports_to_targets(
-    source_key: &str,
-    modules: &mut HashMap<String, HarnessModule>,
+    source_key: &str, modules: &mut HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>,
 ) {
     let Some(source_module) = modules.get(source_key) else {
@@ -860,8 +830,7 @@ fn sync_memory_state_expr(dst_state: &str, src_state: &str, _src_memory_index: u
 }
 
 fn merge_imported_table_initializers(
-    module_key: &str,
-    modules: &mut HashMap<String, HarnessModule>,
+    module_key: &str, modules: &mut HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>,
 ) -> Result<(), String> {
     let imported_tables = modules
@@ -911,10 +880,7 @@ fn merge_imported_table_initializers(
 }
 
 fn merge_table_state_expr(
-    target_state: &str,
-    target_table_index: u32,
-    source_state: &str,
-    source_table_index: u32,
+    target_state: &str, target_table_index: u32, source_state: &str, source_table_index: u32,
 ) -> String {
     format!(
         "(let dstSt = {target_state}; srcSt = {source_state}; dstTables = dstSt.tables or {{}}; srcTables = srcSt.tables or {{}}; dstTable = dstTables.{} or {{ size = 0; elems = {{}}; }}; srcTable = srcTables.{} or {{ elems = {{}}; }}; mergedTable = dstTable // {{ elems = (dstTable.elems or {{}}) // (srcTable.elems or {{}}); }}; in dstSt // {{ tables = dstTables // {{ {} = mergedTable; }}; }})",
@@ -1054,7 +1020,7 @@ fn result_matches(expected: &WastRet<'_>, actual: &JsonValue) -> Result<bool, St
             let bits = json_number_to_u64(actual)?;
             Ok(f64_arithmetic_nan(bits))
         }
-        _ => Ok(actual.to_string() == expected_result_to_json(expected)?),
+        _ => Ok(*actual == expected_result_to_json(expected)?),
     }
 }
 
@@ -1072,18 +1038,18 @@ fn json_number_to_u64(value: &JsonValue) -> Result<u64, String> {
 }
 
 fn f32_canonical_nan(bits: u32) -> bool {
-    (bits & 0x7f80_0000) == 0x7f80_0000 && (bits & 0x007f_ffff) == 0x0040_0000
+    (bits & 0x7F80_0000) == 0x7F80_0000 && (bits & 0x007F_FFFF) == 0x0040_0000
 }
 
 fn f32_arithmetic_nan(bits: u32) -> bool {
-    (bits & 0x7f80_0000) == 0x7f80_0000 && (bits & 0x0040_0000) != 0
+    (bits & 0x7F80_0000) == 0x7F80_0000 && (bits & 0x0040_0000) != 0
 }
 
 fn f64_canonical_nan(bits: u64) -> bool {
-    (bits & 0x7ff0_0000_0000_0000) == 0x7ff0_0000_0000_0000
-        && (bits & 0x000f_ffff_ffff_ffff) == 0x0008_0000_0000_0000
+    (bits & 0x7FF0_0000_0000_0000) == 0x7FF0_0000_0000_0000
+        && (bits & 0x000F_FFFF_FFFF_FFFF) == 0x0008_0000_0000_0000
 }
 
 fn f64_arithmetic_nan(bits: u64) -> bool {
-    (bits & 0x7ff0_0000_0000_0000) == 0x7ff0_0000_0000_0000 && (bits & 0x0008_0000_0000_0000) != 0
+    (bits & 0x7FF0_0000_0000_0000) == 0x7FF0_0000_0000_0000 && (bits & 0x0008_0000_0000_0000) != 0
 }

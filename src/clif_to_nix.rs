@@ -1,19 +1,28 @@
-use crate::intrinsics as intr;
-use crate::nix::{AttrKey, BinOp, Expr, UnOp};
-use crate::translator::NixModule;
-use cranelift_codegen::ir;
-use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::types::{F32, F64, I8, I16, I32, I64};
-use cranelift_codegen::ir::{ArgumentPurpose, Block, Inst, InstructionData, Opcode};
+use std::collections::BTreeMap;
+
+use cranelift_codegen::{
+    ir,
+    ir::{
+        ArgumentPurpose, Block, Inst, InstructionData, Opcode,
+        condcodes::{FloatCC, IntCC},
+        types::{F32, F64, I8, I16, I32, I64},
+    },
+};
 use cranelift_entity::EntityRef;
 use cranelift_wasm::{ConstOp, WasmValType};
-use std::collections::BTreeMap;
+
+use crate::{
+    intrinsics as intr,
+    nix::{AttrKey, BinOp, Expr, UnOp},
+    translator::NixModule,
+};
 
 pub fn lower_module(module: &NixModule) -> Expr {
     // Top-level:
     // rt: imports:
-    // let moduleId = ...; funcs = rec { ... }; funcRegistry = ...; st0 = ...; st = ...; exports = ...;
-    // in exports // { instantiate = _args: { st = st; exports = exports; }; __wasm2nix = { funcs = funcs; }; }
+    // let moduleId = ...; funcs = rec { ... }; funcRegistry = ...; st0 = ...; st =
+    // ...; exports = ...; in exports // { instantiate = _args: { st = st;
+    // exports = exports; }; __wasm2nix = { funcs = funcs; }; }
     let funcs_expr = lower_funcs_rec_attrset(module);
     let exports_expr = lower_exports_attrset(module, ExportKeyMode::Public);
     let exports_by_name_expr = lower_exports_attrset(module, ExportKeyMode::Encoded);
@@ -199,7 +208,8 @@ fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> Expr {
             let Some(key) = export_attr_key(export_name, mode) else {
                 continue;
             };
-            // Use string keys for safety (names can contain characters invalid in identifiers).
+            // Use string keys for safety (names can contain characters invalid in
+            // identifiers).
             binds.push((AttrKey::string(key), f_expr.clone()));
         }
     }
@@ -351,7 +361,7 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
             let word_index = addr / 4;
             let shift = ((addr % 4) as u32) * 8;
             let old_word = words.get(&word_index).copied().unwrap_or(0);
-            let mask = !(0xff_u32 << shift);
+            let mask = !(0xFF_u32 << shift);
             let new_word = (old_word & mask) | (u32::from(byte) << shift);
             words.insert(word_index, new_word);
         }
@@ -1089,10 +1099,7 @@ fn block_free_values(func: &ir::Function, vmctx: ir::Value) -> BTreeMap<Block, V
 }
 
 fn push_free_value(
-    func: &ir::Function,
-    value: ir::Value,
-    vmctx: ir::Value,
-    defined: &[ir::Value],
+    func: &ir::Function, value: ir::Value, vmctx: ir::Value, defined: &[ir::Value],
     free: &mut Vec<ir::Value>,
 ) {
     let value = func.dfg.resolve_aliases(value);
@@ -1102,10 +1109,7 @@ fn push_free_value(
 }
 
 fn lower_block(
-    module: &NixModule,
-    func: &ir::Function,
-    block: Block,
-    vmctx: ir::Value,
+    module: &NixModule, func: &ir::Function, block: Block, vmctx: ir::Value,
     free_values: &BTreeMap<Block, Vec<ir::Value>>,
 ) -> Expr {
     // Block parameters: block params excluding vmctx, then `st`.
@@ -1136,10 +1140,7 @@ struct Step {
 }
 
 fn lower_block_body(
-    module: &NixModule,
-    func: &ir::Function,
-    block: Block,
-    vmctx: ir::Value,
+    module: &NixModule, func: &ir::Function, block: Block, vmctx: ir::Value,
     free_values: &BTreeMap<Block, Vec<ir::Value>>,
 ) -> Expr {
     let mut insts: Vec<Inst> = func.layout.block_insts(block).collect();
@@ -1176,11 +1177,7 @@ fn lower_block_body(
 }
 
 fn lower_inst(
-    module: &NixModule,
-    func: &ir::Function,
-    inst: Inst,
-    st_name: &str,
-    vmctx: ir::Value,
+    module: &NixModule, func: &ir::Function, inst: Inst, st_name: &str, vmctx: ir::Value,
 ) -> (Option<Step>, Option<String>) {
     let data = &func.dfg.insts[inst];
     let op = data.opcode();
@@ -1839,10 +1836,7 @@ fn unsupported_binds(inst: Inst, results: &[ir::Value], message: String) -> Vec<
 }
 
 fn lower_terminator(
-    func: &ir::Function,
-    inst: Inst,
-    st_name: &str,
-    vmctx: ir::Value,
+    func: &ir::Function, inst: Inst, st_name: &str, vmctx: ir::Value,
     free_values: &BTreeMap<Block, Vec<ir::Value>>,
 ) -> Expr {
     let data = &func.dfg.insts[inst];
@@ -1939,10 +1933,7 @@ fn lower_terminator(
 }
 
 fn lower_block_call(
-    func: &ir::Function,
-    call: ir::BlockCall,
-    st_name: &str,
-    vmctx: ir::Value,
+    func: &ir::Function, call: ir::BlockCall, st_name: &str, vmctx: ir::Value,
     free_values: &BTreeMap<Block, Vec<ir::Value>>,
 ) -> Expr {
     let target = call.block(&func.dfg.value_lists);
@@ -2003,9 +1994,7 @@ enum CallKind {
 }
 
 fn resolve_callee(
-    module: &NixModule,
-    func: &ir::Function,
-    name: ir::ExternalName,
+    module: &NixModule, func: &ir::Function, name: ir::ExternalName,
 ) -> (Expr, CallKind) {
     match name {
         ir::ExternalName::User(user_ref) => {
@@ -2293,9 +2282,9 @@ mod tests {
     #[test]
     fn generated_module_keeps_compat_exports_and_instantiate() {
         let wasm = [
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x60, 0x02, 0x7f,
-            0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64,
-            0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x60, 0x02, 0x7F,
+            0x7F, 0x01, 0x7F, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64,
+            0x00, 0x00, 0x0A, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6A, 0x0B,
         ];
         let nix = lower_wasm(&wasm);
 
@@ -2309,11 +2298,11 @@ mod tests {
     #[test]
     fn generated_module_embeds_active_data_segments() {
         let wasm = [
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
-            0x7f, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x11, 0x02, 0x06,
-            0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x04, 0x6c, 0x6f, 0x61, 0x64, 0x00,
-            0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x41, 0x04, 0x28, 0x02, 0x00, 0x0b, 0x0b, 0x0a,
-            0x01, 0x00, 0x41, 0x04, 0x0b, 0x04, 0x01, 0x02, 0x03, 0x04,
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x11, 0x02, 0x06,
+            0x6D, 0x65, 0x6D, 0x6F, 0x72, 0x79, 0x02, 0x00, 0x04, 0x6C, 0x6F, 0x61, 0x64, 0x00,
+            0x00, 0x0A, 0x09, 0x01, 0x07, 0x00, 0x41, 0x04, 0x28, 0x02, 0x00, 0x0B, 0x0B, 0x0A,
+            0x01, 0x00, 0x41, 0x04, 0x0B, 0x04, 0x01, 0x02, 0x03, 0x04,
         ];
         let nix = lower_wasm(&wasm);
 
@@ -2325,10 +2314,10 @@ mod tests {
     #[test]
     fn generated_module_runs_start_before_exposing_instance_state() {
         let wasm = [
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
-            0x03, 0x02, 0x01, 0x00, 0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x00, 0x0b, 0x07, 0x05,
-            0x01, 0x01, 0x67, 0x03, 0x00, 0x08, 0x01, 0x00, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x41,
-            0x2a, 0x24, 0x00, 0x0b,
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x06, 0x06, 0x01, 0x7F, 0x01, 0x41, 0x00, 0x0B, 0x07, 0x05,
+            0x01, 0x01, 0x67, 0x03, 0x00, 0x08, 0x01, 0x00, 0x0A, 0x08, 0x01, 0x06, 0x00, 0x41,
+            0x2A, 0x24, 0x00, 0x0B,
         ];
         let nix = lower_wasm(&wasm);
 
@@ -2363,11 +2352,11 @@ mod tests {
     #[test]
     fn generated_module_lowers_call_indirect_through_table_runtime() {
         let wasm = [
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f,
-            0x01, 0x7f, 0x03, 0x03, 0x02, 0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x07,
-            0x08, 0x01, 0x04, 0x63, 0x61, 0x6c, 0x6c, 0x00, 0x01, 0x09, 0x07, 0x01, 0x00, 0x41,
-            0x00, 0x0b, 0x01, 0x00, 0x0a, 0x13, 0x02, 0x07, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a,
-            0x0b, 0x09, 0x00, 0x20, 0x00, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b,
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7F,
+            0x01, 0x7F, 0x03, 0x03, 0x02, 0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x07,
+            0x08, 0x01, 0x04, 0x63, 0x61, 0x6C, 0x6C, 0x00, 0x01, 0x09, 0x07, 0x01, 0x00, 0x41,
+            0x00, 0x0B, 0x01, 0x00, 0x0A, 0x13, 0x02, 0x07, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6A,
+            0x0B, 0x09, 0x00, 0x20, 0x00, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0B,
         ];
         let nix = lower_wasm(&wasm);
 

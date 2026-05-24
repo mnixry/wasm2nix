@@ -1,11 +1,14 @@
-use crate::intrinsics as intr;
-use cranelift_codegen::cursor::FuncCursor;
-use cranelift_codegen::ir;
-use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::immediates::Imm64;
-use cranelift_codegen::ir::types::{F32, F64, I32, I64};
-use cranelift_codegen::ir::{InstBuilder, UserFuncName};
-use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
+use cranelift_codegen::{
+    cursor::FuncCursor,
+    ir,
+    ir::{
+        InstBuilder, UserFuncName,
+        condcodes::IntCC,
+        immediates::Imm64,
+        types::{F32, F64, I32, I64},
+    },
+    isa::{CallConv, TargetFrontendConfig},
+};
 use cranelift_entity::{EntityRef, PrimaryMap, SecondaryMap};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_wasm::{
@@ -15,6 +18,8 @@ use cranelift_wasm::{
     WASM32_MAX_SIZE, WasmError, WasmFuncType, WasmHeapType, WasmResult, WasmValType,
     translate_module,
 };
+
+use crate::intrinsics as intr;
 
 #[derive(Debug, Clone)]
 pub struct Exportable<T> {
@@ -168,8 +173,7 @@ impl TypeConvert for NixModule {
     }
 
     fn lookup_type_index(
-        &self,
-        _index: cranelift_wasm::wasmparser::UnpackedIndex,
+        &self, _index: cranelift_wasm::wasmparser::UnpackedIndex,
     ) -> cranelift_wasm::EngineOrModuleTypeIndex {
         unimplemented!("GC/reference types not supported in wasm2nix v0")
     }
@@ -226,10 +230,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn declare_func_import(
-        &mut self,
-        index: TypeIndex,
-        module: &'data str,
-        field: &'data str,
+        &mut self, index: TypeIndex, module: &'data str, field: &'data str,
     ) -> WasmResult<()> {
         assert_eq!(
             self.info.functions.len(),
@@ -244,10 +245,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn declare_table_import(
-        &mut self,
-        table: Table,
-        module: &'data str,
-        field: &'data str,
+        &mut self, table: Table, module: &'data str, field: &'data str,
     ) -> WasmResult<()> {
         self.info.tables.push(Exportable::new(table));
         self.info
@@ -257,10 +255,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn declare_memory_import(
-        &mut self,
-        memory: Memory,
-        module: &'data str,
-        field: &'data str,
+        &mut self, memory: Memory, module: &'data str, field: &'data str,
     ) -> WasmResult<()> {
         validate_memory_type(memory)?;
         self.info.memories.push(Exportable::new(memory));
@@ -271,10 +266,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn declare_global_import(
-        &mut self,
-        global: Global,
-        module: &'data str,
-        field: &'data str,
+        &mut self, global: Global, module: &'data str, field: &'data str,
     ) -> WasmResult<()> {
         validate_global_type(global)?;
         self.info.globals.push(Exportable::new(global));
@@ -315,9 +307,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn declare_table_export(
-        &mut self,
-        table_index: TableIndex,
-        name: &'data str,
+        &mut self, table_index: TableIndex, name: &'data str,
     ) -> WasmResult<()> {
         self.info.tables[table_index]
             .export_names
@@ -326,9 +316,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn declare_memory_export(
-        &mut self,
-        memory_index: MemoryIndex,
-        name: &'data str,
+        &mut self, memory_index: MemoryIndex, name: &'data str,
     ) -> WasmResult<()> {
         self.info.memories[memory_index]
             .export_names
@@ -337,9 +325,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn declare_global_export(
-        &mut self,
-        global_index: GlobalIndex,
-        name: &'data str,
+        &mut self, global_index: GlobalIndex, name: &'data str,
     ) -> WasmResult<()> {
         self.info.globals[global_index]
             .export_names
@@ -363,17 +349,15 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn declare_table_elements(
-        &mut self,
-        table_index: TableIndex,
-        base: Option<GlobalIndex>,
-        offset: u32,
+        &mut self, table_index: TableIndex, base: Option<GlobalIndex>, offset: u32,
         elements: Box<[FuncIndex]>,
     ) -> WasmResult<()> {
         let elem_index = ElemIndex::new(self.info.elem_segment_count);
         self.info.elem_segment_count += 1;
         let elements = elements.into_vec();
-        // Active element segments are consumed during instantiation. Keep their index present
-        // but empty so a later table.init with that index traps on segment bounds.
+        // Active element segments are consumed during instantiation. Keep their index
+        // present but empty so a later table.init with that index traps on
+        // segment bounds.
         self.info.element_segments[elem_index] = Vec::new();
         self.info.table_initializers.push(TableInitializer {
             elem_index,
@@ -386,9 +370,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn declare_passive_element(
-        &mut self,
-        index: ElemIndex,
-        elements: Box<[FuncIndex]>,
+        &mut self, index: ElemIndex, elements: Box<[FuncIndex]>,
     ) -> WasmResult<()> {
         let elements = elements.into_vec();
         self.info.passive_elements[index] = elements.clone();
@@ -435,10 +417,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn declare_data_initialization(
-        &mut self,
-        memory_index: MemoryIndex,
-        base: Option<GlobalIndex>,
-        offset: u64,
+        &mut self, memory_index: MemoryIndex, base: Option<GlobalIndex>, offset: u64,
         data: &'data [u8],
     ) -> WasmResult<()> {
         let data_index = DataIndex::new(self.info.data_segment_count);
@@ -571,10 +550,7 @@ impl<'m> NixFuncEnvironment<'m> {
     }
 
     fn import_intrinsic(
-        &mut self,
-        func: &mut ir::Function,
-        intrinsic_index: u32,
-        sig: ir::Signature,
+        &mut self, func: &mut ir::Function, intrinsic_index: u32, sig: ir::Signature,
     ) -> ir::FuncRef {
         let signature = func.import_signature(sig);
         let name =
@@ -817,9 +793,7 @@ impl<'m> NixFuncEnvironment<'m> {
     }
 
     fn intrinsic_ref_func(
-        &mut self,
-        func: &mut ir::Function,
-        func_index: FuncIndex,
+        &mut self, func: &mut ir::Function, func_index: FuncIndex,
     ) -> ir::FuncRef {
         let mut sig = ir::Signature::new(CallConv::Fast);
         sig.returns.push(ir::AbiParam::new(I32));
@@ -951,10 +925,7 @@ impl<'m> NixFuncEnvironment<'m> {
     }
 
     fn intrinsic_call_indirect(
-        &mut self,
-        func: &mut ir::Function,
-        table_index: TableIndex,
-        sig_index: TypeIndex,
+        &mut self, func: &mut ir::Function, table_index: TableIndex, sig_index: TypeIndex,
     ) -> ir::FuncRef {
         let mut sig = self.vmctx_sig(sig_index);
         sig.params.insert(0, ir::AbiParam::new(I32));
@@ -983,8 +954,7 @@ impl<'m> TypeConvert for NixFuncEnvironment<'m> {
     }
 
     fn lookup_type_index(
-        &self,
-        _index: cranelift_wasm::wasmparser::UnpackedIndex,
+        &self, _index: cranelift_wasm::wasmparser::UnpackedIndex,
     ) -> cranelift_wasm::EngineOrModuleTypeIndex {
         unimplemented!("GC/reference types not supported in wasm2nix v0")
     }
@@ -1018,18 +988,13 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn func_ref_result_needs_stack_map(
-        &self,
-        _func: &ir::Function,
-        _func_ref: ir::FuncRef,
-        _index: usize,
+        &self, _func: &ir::Function, _func_ref: ir::FuncRef, _index: usize,
     ) -> bool {
         false
     }
 
     fn make_global(
-        &mut self,
-        _func: &mut ir::Function,
-        _index: GlobalIndex,
+        &mut self, _func: &mut ir::Function, _index: GlobalIndex,
     ) -> WasmResult<GlobalVariable> {
         Ok(GlobalVariable::Custom)
     }
@@ -1052,8 +1017,9 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
             .ok_or_else(|| WasmError::Unsupported("memory referenced but not declared".into()))?;
         validate_memory_type(memory)?;
 
-        // Make the base address symbolic so `heap_addr` results are stable and can be treated as
-        // linear offsets during CLIF→Nix lowering (we'll interpret the base as 0).
+        // Make the base address symbolic so `heap_addr` results are stable and can be
+        // treated as linear offsets during CLIF→Nix lowering (we'll interpret
+        // the base as 0).
         let base_name = func.declare_imported_user_function(ir::UserExternalName {
             namespace: intr::INTRINSIC_NAMESPACE,
             index: 1000 + index.as_u32(),
@@ -1065,7 +1031,8 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
             tls: false,
         });
 
-        // Allow addressing up to the wasm32 maximum (4GiB); runtime will enforce actual size.
+        // Allow addressing up to the wasm32 maximum (4GiB); runtime will enforce actual
+        // size.
         let bound = WASM32_MAX_SIZE;
 
         Ok(self.heaps.push(HeapData {
@@ -1081,17 +1048,13 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn make_indirect_sig(
-        &mut self,
-        func: &mut ir::Function,
-        index: TypeIndex,
+        &mut self, func: &mut ir::Function, index: TypeIndex,
     ) -> WasmResult<ir::SigRef> {
         Ok(func.import_signature(self.vmctx_sig(index)))
     }
 
     fn make_direct_func(
-        &mut self,
-        func: &mut ir::Function,
-        index: FuncIndex,
+        &mut self, func: &mut ir::Function, index: FuncIndex,
     ) -> WasmResult<ir::FuncRef> {
         let sigidx = self.mod_info.functions[index].entity;
         let signature = func.import_signature(self.vmctx_sig(sigidx));
@@ -1108,10 +1071,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_call(
-        &mut self,
-        builder: &mut FunctionBuilder,
-        _callee_index: FuncIndex,
-        callee: ir::FuncRef,
+        &mut self, builder: &mut FunctionBuilder, _callee_index: FuncIndex, callee: ir::FuncRef,
         call_args: &[ir::Value],
     ) -> WasmResult<ir::Inst> {
         let vmctx = builder
@@ -1126,13 +1086,8 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_call_indirect(
-        &mut self,
-        builder: &mut FunctionBuilder,
-        table_index: TableIndex,
-        sig_index: TypeIndex,
-        _sig_ref: ir::SigRef,
-        callee: ir::Value,
-        call_args: &[ir::Value],
+        &mut self, builder: &mut FunctionBuilder, table_index: TableIndex, sig_index: TypeIndex,
+        _sig_ref: ir::SigRef, callee: ir::Value, call_args: &[ir::Value],
     ) -> WasmResult<Option<ir::Inst>> {
         let vmctx = builder
             .func
@@ -1147,43 +1102,28 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_return_call_indirect(
-        &mut self,
-        _builder: &mut FunctionBuilder,
-        _table_index: TableIndex,
-        _sig_index: TypeIndex,
-        _sig_ref: ir::SigRef,
-        _callee: ir::Value,
-        _call_args: &[ir::Value],
+        &mut self, _builder: &mut FunctionBuilder, _table_index: TableIndex, _sig_index: TypeIndex,
+        _sig_ref: ir::SigRef, _callee: ir::Value, _call_args: &[ir::Value],
     ) -> WasmResult<()> {
         Err(WasmError::Unsupported("return_call_indirect".into()))
     }
 
     fn translate_return_call_ref(
-        &mut self,
-        _builder: &mut FunctionBuilder,
-        _sig_ref: ir::SigRef,
-        _callee: ir::Value,
+        &mut self, _builder: &mut FunctionBuilder, _sig_ref: ir::SigRef, _callee: ir::Value,
         _call_args: &[ir::Value],
     ) -> WasmResult<()> {
         Err(WasmError::Unsupported("return_call_ref".into()))
     }
 
     fn translate_call_ref(
-        &mut self,
-        _builder: &mut FunctionBuilder,
-        _sig_ref: ir::SigRef,
-        _callee: ir::Value,
+        &mut self, _builder: &mut FunctionBuilder, _sig_ref: ir::SigRef, _callee: ir::Value,
         _call_args: &[ir::Value],
     ) -> WasmResult<ir::Inst> {
         Err(WasmError::Unsupported("call_ref".into()))
     }
 
     fn translate_memory_grow(
-        &mut self,
-        mut pos: FuncCursor,
-        index: MemoryIndex,
-        _heap: Heap,
-        val: ir::Value,
+        &mut self, mut pos: FuncCursor, index: MemoryIndex, _heap: Heap, val: ir::Value,
     ) -> WasmResult<ir::Value> {
         if index.index() != 0 {
             return Err(WasmError::Unsupported("multiple memories".into()));
@@ -1198,10 +1138,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_memory_size(
-        &mut self,
-        mut pos: FuncCursor,
-        index: MemoryIndex,
-        _heap: Heap,
+        &mut self, mut pos: FuncCursor, index: MemoryIndex, _heap: Heap,
     ) -> WasmResult<ir::Value> {
         if index.index() != 0 {
             return Err(WasmError::Unsupported("multiple memories".into()));
@@ -1216,15 +1153,8 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_memory_copy(
-        &mut self,
-        mut pos: FuncCursor,
-        src_index: MemoryIndex,
-        _src_heap: Heap,
-        dst_index: MemoryIndex,
-        _dst_heap: Heap,
-        dst: ir::Value,
-        src: ir::Value,
-        len: ir::Value,
+        &mut self, mut pos: FuncCursor, src_index: MemoryIndex, _src_heap: Heap,
+        dst_index: MemoryIndex, _dst_heap: Heap, dst: ir::Value, src: ir::Value, len: ir::Value,
     ) -> WasmResult<()> {
         if src_index.index() != 0 || dst_index.index() != 0 {
             return Err(WasmError::Unsupported("multiple memories".into()));
@@ -1239,13 +1169,8 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_memory_fill(
-        &mut self,
-        mut pos: FuncCursor,
-        index: MemoryIndex,
-        _heap: Heap,
-        dst: ir::Value,
-        val: ir::Value,
-        len: ir::Value,
+        &mut self, mut pos: FuncCursor, index: MemoryIndex, _heap: Heap, dst: ir::Value,
+        val: ir::Value, len: ir::Value,
     ) -> WasmResult<()> {
         if index.index() != 0 {
             return Err(WasmError::Unsupported("multiple memories".into()));
@@ -1260,14 +1185,8 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_memory_init(
-        &mut self,
-        mut pos: FuncCursor,
-        index: MemoryIndex,
-        _heap: Heap,
-        seg_index: u32,
-        dst: ir::Value,
-        src: ir::Value,
-        len: ir::Value,
+        &mut self, mut pos: FuncCursor, index: MemoryIndex, _heap: Heap, seg_index: u32,
+        dst: ir::Value, src: ir::Value, len: ir::Value,
     ) -> WasmResult<()> {
         if index.index() != 0 {
             return Err(WasmError::Unsupported("multiple memories".into()));
@@ -1294,9 +1213,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_table_size(
-        &mut self,
-        mut pos: FuncCursor,
-        index: TableIndex,
+        &mut self, mut pos: FuncCursor, index: TableIndex,
     ) -> WasmResult<ir::Value> {
         let vmctx = pos
             .func
@@ -1309,10 +1226,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_table_grow(
-        &mut self,
-        mut pos: FuncCursor,
-        table_index: TableIndex,
-        delta: ir::Value,
+        &mut self, mut pos: FuncCursor, table_index: TableIndex, delta: ir::Value,
         init_value: ir::Value,
     ) -> WasmResult<ir::Value> {
         let vmctx = pos
@@ -1326,10 +1240,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_table_get(
-        &mut self,
-        builder: &mut FunctionBuilder,
-        table_index: TableIndex,
-        index: ir::Value,
+        &mut self, builder: &mut FunctionBuilder, table_index: TableIndex, index: ir::Value,
     ) -> WasmResult<ir::Value> {
         let vmctx = builder
             .func
@@ -1342,10 +1253,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_table_set(
-        &mut self,
-        builder: &mut FunctionBuilder,
-        table_index: TableIndex,
-        value: ir::Value,
+        &mut self, builder: &mut FunctionBuilder, table_index: TableIndex, value: ir::Value,
         index: ir::Value,
     ) -> WasmResult<()> {
         let vmctx = builder
@@ -1359,13 +1267,8 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_table_copy(
-        &mut self,
-        mut pos: FuncCursor,
-        dst_table_index: TableIndex,
-        src_table_index: TableIndex,
-        dst: ir::Value,
-        src: ir::Value,
-        len: ir::Value,
+        &mut self, mut pos: FuncCursor, dst_table_index: TableIndex, src_table_index: TableIndex,
+        dst: ir::Value, src: ir::Value, len: ir::Value,
     ) -> WasmResult<()> {
         let vmctx = pos
             .func
@@ -1380,11 +1283,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_table_fill(
-        &mut self,
-        mut pos: FuncCursor,
-        table_index: TableIndex,
-        dst: ir::Value,
-        val: ir::Value,
+        &mut self, mut pos: FuncCursor, table_index: TableIndex, dst: ir::Value, val: ir::Value,
         len: ir::Value,
     ) -> WasmResult<()> {
         let vmctx = pos
@@ -1398,13 +1297,8 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_table_init(
-        &mut self,
-        mut pos: FuncCursor,
-        seg_index: u32,
-        table_index: TableIndex,
-        dst: ir::Value,
-        src: ir::Value,
-        len: ir::Value,
+        &mut self, mut pos: FuncCursor, seg_index: u32, table_index: TableIndex, dst: ir::Value,
+        src: ir::Value, len: ir::Value,
     ) -> WasmResult<()> {
         let vmctx = pos
             .func
@@ -1429,26 +1323,20 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_ref_null(
-        &mut self,
-        mut pos: FuncCursor,
-        _ty: WasmHeapType,
+        &mut self, mut pos: FuncCursor, _ty: WasmHeapType,
     ) -> WasmResult<ir::Value> {
         Ok(pos.ins().iconst(I32, 0))
     }
 
     fn translate_ref_is_null(
-        &mut self,
-        mut pos: FuncCursor,
-        value: ir::Value,
+        &mut self, mut pos: FuncCursor, value: ir::Value,
     ) -> WasmResult<ir::Value> {
         let is_null = pos.ins().icmp_imm(IntCC::Equal, value, 0);
         Ok(pos.ins().uextend(I32, is_null))
     }
 
     fn translate_ref_func(
-        &mut self,
-        mut pos: FuncCursor,
-        func_index: FuncIndex,
+        &mut self, mut pos: FuncCursor, func_index: FuncIndex,
     ) -> WasmResult<ir::Value> {
         let fref = self.intrinsic_ref_func(pos.func, func_index);
         let call = pos.ins().call(fref, &[]);
@@ -1456,9 +1344,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_custom_global_get(
-        &mut self,
-        builder: &mut FunctionBuilder,
-        global_index: GlobalIndex,
+        &mut self, builder: &mut FunctionBuilder, global_index: GlobalIndex,
     ) -> WasmResult<ir::Value> {
         let global = self.mod_info.globals[global_index].entity;
         let clif_ty = Self::wasm_ty_to_clif_ty(global.wasm_ty)?;
@@ -1475,10 +1361,7 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_custom_global_set(
-        &mut self,
-        builder: &mut FunctionBuilder,
-        global_index: GlobalIndex,
-        val: ir::Value,
+        &mut self, builder: &mut FunctionBuilder, global_index: GlobalIndex, val: ir::Value,
     ) -> WasmResult<()> {
         let global = self.mod_info.globals[global_index].entity;
         let clif_ty = Self::wasm_ty_to_clif_ty(global.wasm_ty)?;
@@ -1495,23 +1378,14 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_atomic_wait(
-        &mut self,
-        _pos: FuncCursor,
-        _index: MemoryIndex,
-        _heap: Heap,
-        _addr: ir::Value,
-        _expected: ir::Value,
-        _timeout: ir::Value,
+        &mut self, _pos: FuncCursor, _index: MemoryIndex, _heap: Heap, _addr: ir::Value,
+        _expected: ir::Value, _timeout: ir::Value,
     ) -> WasmResult<ir::Value> {
         Err(WasmError::Unsupported("atomics/threads".into()))
     }
 
     fn translate_atomic_notify(
-        &mut self,
-        _pos: FuncCursor,
-        _index: MemoryIndex,
-        _heap: Heap,
-        _addr: ir::Value,
+        &mut self, _pos: FuncCursor, _index: MemoryIndex, _heap: Heap, _addr: ir::Value,
         _count: ir::Value,
     ) -> WasmResult<ir::Value> {
         Err(WasmError::Unsupported("atomics/threads".into()))
@@ -1522,30 +1396,20 @@ impl<'m> FuncEnvironment for NixFuncEnvironment<'m> {
     }
 
     fn translate_i31_get_s(
-        &mut self,
-        _pos: FuncCursor,
-        _i31ref: ir::Value,
+        &mut self, _pos: FuncCursor, _i31ref: ir::Value,
     ) -> WasmResult<ir::Value> {
         Err(WasmError::Unsupported("i31.get_s".into()))
     }
 
     fn translate_i31_get_u(
-        &mut self,
-        _pos: FuncCursor,
-        _i31ref: ir::Value,
+        &mut self, _pos: FuncCursor, _i31ref: ir::Value,
     ) -> WasmResult<ir::Value> {
         Err(WasmError::Unsupported("i31.get_u".into()))
     }
 }
 
 fn default_frontend_config() -> TargetFrontendConfig {
-    let isa_name = match std::env::consts::ARCH {
-        "x86_64" => "x86_64",
-        "aarch64" => "aarch64",
-        "s390x" => "s390x",
-        "riscv64" => "riscv64",
-        other => other,
-    };
+    let isa_name = std::env::consts::ARCH;
 
     let builder = cranelift_codegen::isa::lookup_by_name(isa_name)
         .or_else(|_| cranelift_codegen::isa::lookup_by_name("x86_64"))
