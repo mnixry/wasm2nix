@@ -1,41 +1,115 @@
 {
+  # spell-checker: disable
   inputs = {
+    self.submodules = true;
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    flake-parts = {
+      url = "github:hercules-ci/flake-parts";
+      inputs.nixpkgs-lib.follows = "nixpkgs";
+    };
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    crane.url = "github:ipetkov/crane";
   };
-  outputs =
-    { self, nixpkgs }:
-    let
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-      ];
-      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
-    in
-    {
-      tests = forAllSystems (
-        system:
-        let
-          pkgs = import nixpkgs { inherit system; };
-        in
-        import ./crates/lib/nix/tests.nix { inherit pkgs; }
-      );
 
-      checks = forAllSystems (
-        system:
+  outputs =
+    { flake-parts, ... }@inputs:
+    flake-parts.lib.mkFlake { inherit inputs; } {
+      systems = inputs.nixpkgs.lib.systems.flakeExposed;
+      imports = [ inputs.treefmt-nix.flakeModule ];
+      perSystem =
+        {
+          config,
+          lib,
+          system,
+          ...
+        }:
         let
-          pkgs = import nixpkgs { inherit system; };
-          failed = import ./crates/lib/nix/tests.nix { inherit pkgs; };
+          pkgs = import inputs.nixpkgs {
+            inherit system;
+            overlays = [ (import inputs.rust-overlay) ];
+          };
+          rust = pkgs.rust-bin.stable.latest.default.override {
+            targets = [
+              "wasm32-unknown-unknown"
+            ];
+            extensions = [
+              "rust-src"
+              "llvm-tools-preview"
+            ];
+          };
+          rustfmt = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.rustfmt);
+          craneLib = (inputs.crane.mkLib pkgs).overrideToolchain (_: rust);
+          craneCommonArgs = craneLib.crateNameFromCargoToml { cargoToml = ./crates/lib/Cargo.toml; } // rec {
+            src = ./.;
+            strictDeps = true;
+            cargoVendorDir = craneLib.vendorMultipleCargoDeps {
+              inherit (craneLib.findCargoFiles src) cargoConfigs;
+              cargoLockList = [
+                ./Cargo.lock
+                "${rust}/lib/rustlib/src/rust/library/Cargo.lock"
+              ];
+            };
+          };
+          cargoArtifacts = craneLib.buildDepsOnly craneCommonArgs;
         in
         {
-          runTests = pkgs.runCommand "wasm2nix-runTests" { FAILED = builtins.toJSON failed; } ''
-            if [ "$FAILED" != "[]" ]; then
-              echo "wasm2nix tests failed:" >&2
-              echo "$FAILED" >&2
-              exit 1
-            fi
-            touch "$out"
-          '';
-        }
-      );
+          _module.args = { inherit inputs pkgs rust; };
+          treefmt =
+            { ... }:
+            {
+              projectRootFile = ".git/config";
+              settings.global.excludes = [
+                "crates/wast/tests/spec/**"
+              ];
+              programs.nixfmt.enable = true;
+              programs.taplo.enable = true;
+              programs.rustfmt = {
+                enable = true;
+                package = rustfmt;
+              };
+              programs.yamlfmt.enable = true;
+            };
+          devShells.default = pkgs.mkShell {
+            inherit (pkgs) stdenv;
+            inputsFrom = [ config.treefmt.build.devShell ];
+            buildInputs = [
+              (lib.hiPrio rustfmt)
+              rust
+            ]
+            ++ (
+              with pkgs;
+              [
+                cargo-edit
+                cargo-nextest
+              ]
+              ++ lib.optionals stdenv.isLinux [
+                llvmPackages.bolt
+                perf
+              ]
+              ++ lib.optionals stdenv.isDarwin [
+                darwin.libiconv
+                darwin.libresolv
+              ]
+            );
+            env.SDKROOT = pkgs.apple-sdk.sdkroot;
+          };
+          checks = {
+            clippy = craneLib.cargoClippy (
+              craneCommonArgs
+              // {
+                inherit cargoArtifacts;
+                cargoClippyExtraArgs = "--all-targets --all-features";
+              }
+            );
+            test = craneLib.cargoNextest (craneCommonArgs // { inherit cargoArtifacts; });
+          };
+        };
     };
 }
