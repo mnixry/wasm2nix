@@ -861,6 +861,10 @@ fn builtin_seq() -> Expr {
     Expr::select(Expr::ident("builtins"), AttrKey::ident("seq"))
 }
 
+fn builtin_deep_seq() -> Expr {
+    Expr::select(Expr::ident("builtins"), AttrKey::ident("deepSeq"))
+}
+
 fn builtin_elem_at() -> Expr {
     Expr::select(Expr::ident("builtins"), AttrKey::ident("elemAt"))
 }
@@ -947,6 +951,7 @@ mod tests {
         assert!(nix.contains("st = st;"));
         assert!(nix.contains("exports = exports;"));
         assert!(nix.contains("__wasm2nix ="));
+        assert!(nix.contains("builtins.deepSeq nextKeyed nextKeyed"));
     }
 
     #[test]

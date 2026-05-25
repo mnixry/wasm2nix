@@ -11,8 +11,8 @@ use cranelift_codegen::{
 use snafu::prelude::*;
 
 use super::{
-    builtin_elem_at, builtin_foldl_strict, builtin_generic_closure, builtin_get_attr,
-    builtin_length, builtin_seq, builtin_throw,
+    builtin_deep_seq, builtin_elem_at, builtin_foldl_strict, builtin_generic_closure,
+    builtin_get_attr, builtin_length, builtin_seq, builtin_throw,
     error::{
         EmptyBlockSnafu, MissingEntryBlockSnafu, MissingTypeSnafu, MissingVmContextSnafu, Result,
         UnknownExternalNamespaceSnafu, UnknownIntrinsicSnafu, UnsupportedExternalNameSnafu,
@@ -126,39 +126,59 @@ pub(super) fn lower_function(
                 Expr::string("done"),
             ),
             Expr::list(vec![]),
-            Expr::list(vec![Expr::app(
-                builtin_seq(),
+            Expr::list(vec![Expr::let_in(
                 vec![
-                    Expr::bool(true),
-                    Expr::let_in(
-                        vec![(
-                            "next".into(),
-                            Expr::app(
-                                Expr::ident("applyBlock"),
-                                vec![
-                                    Expr::select(Expr::ident("current"), AttrKey::ident("block")),
-                                    Expr::select(Expr::ident("current"), AttrKey::ident("args")),
-                                    Expr::select(Expr::ident("current"), AttrKey::ident("st")),
-                                ],
-                            ),
-                        )],
+                    (
+                        "next".into(),
+                        Expr::app(
+                            Expr::ident("applyBlock"),
+                            vec![
+                                Expr::select(Expr::ident("current"), AttrKey::ident("block")),
+                                Expr::select(Expr::ident("current"), AttrKey::ident("args")),
+                                Expr::select(Expr::ident("current"), AttrKey::ident("st")),
+                            ],
+                        ),
+                    ),
+                    (
+                        "nextKey".into(),
+                        Expr::bin(
+                            BinOp::Add,
+                            Expr::select(Expr::ident("current"), AttrKey::ident("key")),
+                            Expr::int(1),
+                        ),
+                    ),
+                    (
+                        "nextKeyed".into(),
                         Expr::bin(
                             BinOp::Update,
                             Expr::ident("next"),
                             Expr::attrset(
                                 false,
-                                vec![(
-                                    AttrKey::ident("key"),
-                                    Expr::bin(
-                                        BinOp::Add,
-                                        Expr::select(Expr::ident("current"), AttrKey::ident("key")),
-                                        Expr::int(1),
-                                    ),
-                                )],
+                                vec![(AttrKey::ident("key"), Expr::ident("nextKey"))],
+                            ),
+                        ),
+                    ),
+                    (
+                        "forceStep".into(),
+                        Expr::bin(
+                            BinOp::Eq,
+                            Expr::ident("nextKey"),
+                            Expr::bin(
+                                BinOp::Mul,
+                                Expr::bin(BinOp::Div, Expr::ident("nextKey"), Expr::int(1024)),
+                                Expr::int(1024),
                             ),
                         ),
                     ),
                 ],
+                Expr::if_then_else(
+                    Expr::ident("forceStep"),
+                    Expr::app(
+                        builtin_deep_seq(),
+                        vec![Expr::ident("nextKeyed"), Expr::ident("nextKeyed")],
+                    ),
+                    Expr::ident("nextKeyed"),
+                ),
             )]),
         ),
     );
