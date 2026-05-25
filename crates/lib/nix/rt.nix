@@ -1,11 +1,6 @@
 { }:
 let
-  genPowers =
-    n: value:
-    if n > 62 then
-      [ ]
-    else
-      [ value ] ++ genPowers (n + 1) (value * 2);
+  genPowers = n: value: if n > 62 then [ ] else [ value ] ++ genPowers (n + 1) (value * 2);
 
   powers = genPowers 0 1;
   pow2 = n: builtins.elemAt powers n;
@@ -24,9 +19,7 @@ let
   length = builtins.length;
   toString = builtins.toString;
 
-  mod =
-    value: divisor:
-    value - divisor * (value / divisor);
+  mod = value: divisor: value - divisor * (value / divisor);
 
   floorMod =
     value: divisor:
@@ -60,19 +53,10 @@ let
     in
     if v >= sign then v - modulus else v;
 
-  signedDiv =
-    lhs: rhs:
-    if rhs == 0 then
-      throw "wasm trap: integer divide by zero"
-    else
-      lhs / rhs;
+  signedDiv = lhs: rhs: if rhs == 0 then throw "wasm trap: integer divide by zero" else lhs / rhs;
 
   signedRem =
-    lhs: rhs:
-    if rhs == 0 then
-      throw "wasm trap: integer divide by zero"
-    else
-      lhs - rhs * (lhs / rhs);
+    lhs: rhs: if rhs == 0 then throw "wasm trap: integer divide by zero" else lhs - rhs * (lhs / rhs);
 
   mul32 =
     lhs: rhs:
@@ -90,145 +74,126 @@ let
 
   shiftCount32 = n: floorMod n 32;
 
-  unsignedShiftRight32 =
-    value: amount:
-    (u32 value) / pow2 (shiftCount32 amount);
+  unsignedShiftRight32 = value: amount: (u32 value) / pow2 (shiftCount32 amount);
 
   signedShiftRight32 =
     value: amount:
     let
       signed = toI32 value;
       divisor = pow2 (shiftCount32 amount);
-      quotient =
-        if signed < 0 then
-          0 - (((0 - signed) + divisor - 1) / divisor)
-        else
-          signed / divisor;
+      quotient = if signed < 0 then 0 - (((0 - signed) + divisor - 1) / divisor) else signed / divisor;
     in
     u32 quotient;
 
-  range =
-    count:
-    builtins.genList (i: i) count;
+  range = count: builtins.genList (i: i) count;
 
-  bitSetU32 =
-    value: bit:
-    floorMod ((u32 value) / pow2 bit) 2 == 1;
+  bitSetU32 = value: bit: floorMod ((u32 value) / pow2 bit) 2 == 1;
 
-  bitSetI64 =
-    value: bit:
-    i64BitSetParts (i64Parts value) bit;
+  bitSetI64 = value: bit: i64BitSetParts (i64Parts value) bit;
 
   clzBy =
     width: bitSet: value:
     let
-      result = builtins.foldl' (
-        acc: bit:
-        if acc.done then
-          acc
-        else if bitSet value (width - 1 - bit) then
-          acc // { done = true; }
-        else
-          acc // { count = acc.count + 1; }
-      ) { done = false; count = 0; } (range width);
+      result =
+        builtins.foldl'
+          (
+            acc: bit:
+            if acc.done then
+              acc
+            else if bitSet value (width - 1 - bit) then
+              acc // { done = true; }
+            else
+              acc // { count = acc.count + 1; }
+          )
+          {
+            done = false;
+            count = 0;
+          }
+          (range width);
     in
     result.count;
 
   ctzBy =
     width: bitSet: value:
     let
-      result = builtins.foldl' (
-        acc: bit:
-        if acc.done then
-          acc
-        else if bitSet value bit then
-          acc // { done = true; }
-        else
-          acc // { count = acc.count + 1; }
-      ) { done = false; count = 0; } (range width);
+      result =
+        builtins.foldl'
+          (
+            acc: bit:
+            if acc.done then
+              acc
+            else if bitSet value bit then
+              acc // { done = true; }
+            else
+              acc // { count = acc.count + 1; }
+          )
+          {
+            done = false;
+            count = 0;
+          }
+          (range width);
     in
     result.count;
 
   popcntBy =
     width: bitSet: value:
-    builtins.foldl' (
-      acc: bit:
-      if bitSet value bit then acc + 1 else acc
-    ) 0 (range width);
+    builtins.foldl' (acc: bit: if bitSet value bit then acc + 1 else acc) 0 (range width);
 
-  i32Bin =
-    {
-      add = lhs: rhs: u32 (u32 lhs + u32 rhs);
-      sub = lhs: rhs: u32 (u32 lhs - u32 rhs);
-      mul = mul32;
-      udiv =
-        lhs: rhs:
-        let
-          divisor = u32 rhs;
-        in
-        if divisor == 0 then
-          throw "wasm trap: integer divide by zero"
-        else
-          (u32 lhs) / divisor;
-      sdiv =
-        lhs: rhs:
-        let
-          a = toI32 lhs;
-          b = toI32 rhs;
-        in
-        if a == i32Min && b == -1 then
-          throw "wasm trap: integer overflow"
-        else
-          u32 (signedDiv a b);
-      urem =
-        lhs: rhs:
-        let
-          divisor = u32 rhs;
-        in
-        if divisor == 0 then
-          throw "wasm trap: integer divide by zero"
-        else
-          floorMod (u32 lhs) divisor;
-      srem =
-        lhs: rhs:
-        let
-          a = toI32 lhs;
-          b = toI32 rhs;
-        in
-        u32 (signedRem a b);
-      band = lhs: rhs: u32 (builtins.bitAnd (u32 lhs) (u32 rhs));
-      bor = lhs: rhs: u32 (builtins.bitOr (u32 lhs) (u32 rhs));
-      bxor = lhs: rhs: u32 (builtins.bitXor (u32 lhs) (u32 rhs));
-      bnot = value: u32Max - u32 value;
-      shl = lhs: rhs: mul32 lhs (pow2 (shiftCount32 rhs));
-      shr_u = unsignedShiftRight32;
-      shr_s = signedShiftRight32;
-      rotl =
-        lhs: rhs:
-        let
-          n = shiftCount32 rhs;
-        in
-        if n == 0 then
-          u32 lhs
-        else
-          i32Bin.bor (i32Bin.shl lhs n) (i32Bin.shr_u lhs (32 - n));
-      rotr =
-        lhs: rhs:
-        let
-          n = shiftCount32 rhs;
-        in
-        if n == 0 then
-          u32 lhs
-        else
-          i32Bin.bor (i32Bin.shr_u lhs n) (i32Bin.shl lhs (32 - n));
-      clz = clzBy 32 bitSetU32;
-      ctz = ctzBy 32 bitSetU32;
-      popcnt = popcntBy 32 bitSetU32;
-    };
+  i32Bin = {
+    add = lhs: rhs: u32 (u32 lhs + u32 rhs);
+    sub = lhs: rhs: u32 (u32 lhs - u32 rhs);
+    mul = mul32;
+    udiv =
+      lhs: rhs:
+      let
+        divisor = u32 rhs;
+      in
+      if divisor == 0 then throw "wasm trap: integer divide by zero" else (u32 lhs) / divisor;
+    sdiv =
+      lhs: rhs:
+      let
+        a = toI32 lhs;
+        b = toI32 rhs;
+      in
+      if a == i32Min && b == -1 then throw "wasm trap: integer overflow" else u32 (signedDiv a b);
+    urem =
+      lhs: rhs:
+      let
+        divisor = u32 rhs;
+      in
+      if divisor == 0 then throw "wasm trap: integer divide by zero" else floorMod (u32 lhs) divisor;
+    srem =
+      lhs: rhs:
+      let
+        a = toI32 lhs;
+        b = toI32 rhs;
+      in
+      u32 (signedRem a b);
+    band = lhs: rhs: u32 (builtins.bitAnd (u32 lhs) (u32 rhs));
+    bor = lhs: rhs: u32 (builtins.bitOr (u32 lhs) (u32 rhs));
+    bxor = lhs: rhs: u32 (builtins.bitXor (u32 lhs) (u32 rhs));
+    bnot = value: u32Max - u32 value;
+    shl = lhs: rhs: mul32 lhs (pow2 (shiftCount32 rhs));
+    shr_u = unsignedShiftRight32;
+    shr_s = signedShiftRight32;
+    rotl =
+      lhs: rhs:
+      let
+        n = shiftCount32 rhs;
+      in
+      if n == 0 then u32 lhs else i32Bin.bor (i32Bin.shl lhs n) (i32Bin.shr_u lhs (32 - n));
+    rotr =
+      lhs: rhs:
+      let
+        n = shiftCount32 rhs;
+      in
+      if n == 0 then u32 lhs else i32Bin.bor (i32Bin.shr_u lhs n) (i32Bin.shl lhs (32 - n));
+    clz = clzBy 32 bitSetU32;
+    ctz = ctzBy 32 bitSetU32;
+    popcnt = popcntBy 32 bitSetU32;
+  };
 
-  isI64Parts =
-    value:
-    builtins.isAttrs value && value ? lo && value ? hi;
+  isI64Parts = value: builtins.isAttrs value && value ? lo && value ? hi;
 
   i64Parts =
     value:
@@ -274,8 +239,7 @@ let
   i64PartsEq = lhs: rhs: lhs.lo == rhs.lo && lhs.hi == rhs.hi;
 
   i64BitSetParts =
-    parts: bit:
-    if bit < 32 then bitSetU32 parts.lo bit else bitSetU32 parts.hi (bit - 32);
+    parts: bit: if bit < 32 then bitSetU32 parts.lo bit else bitSetU32 parts.hi (bit - 32);
 
   i64SetBitParts =
     parts: bit:
@@ -292,7 +256,9 @@ let
       carry = loSum / u32Mod;
       hi = u32 (lhs.hi + rhs.hi + carry);
     in
-    { inherit lo hi; };
+    {
+      inherit lo hi;
+    };
 
   i64SubParts =
     lhs: rhs:
@@ -302,7 +268,9 @@ let
       lo = floorMod loRaw u32Mod;
       hi = u32 (lhs.hi - rhs.hi - borrow);
     in
-    { inherit lo hi; };
+    {
+      inherit lo hi;
+    };
 
   i64NegParts =
     parts:
@@ -311,7 +279,9 @@ let
       borrow = if parts.lo == 0 then 0 else 1;
       hi = u32 (0 - parts.hi - borrow);
     in
-    { inherit lo hi; };
+    {
+      inherit lo hi;
+    };
 
   i64AbsParts =
     value:
@@ -320,12 +290,8 @@ let
     in
     if i64IsNegativeParts parts then i64NegParts parts else parts;
 
-  i64UnsignedGteParts =
-    lhs: rhs:
-    lhs.hi > rhs.hi || (lhs.hi == rhs.hi && lhs.lo >= rhs.lo);
-  i64UnsignedGtParts =
-    lhs: rhs:
-    i64UnsignedGteParts lhs rhs && !(i64PartsEq lhs rhs);
+  i64UnsignedGteParts = lhs: rhs: lhs.hi > rhs.hi || (lhs.hi == rhs.hi && lhs.lo >= rhs.lo);
+  i64UnsignedGtParts = lhs: rhs: i64UnsignedGteParts lhs rhs && !(i64PartsEq lhs rhs);
 
   i64ShlParts =
     parts: amount:
@@ -340,7 +306,9 @@ let
         lo = u32 loShifted;
         hi = u32 (parts.hi * pow2 n + parts.lo / pow2 (32 - n));
       in
-      { inherit lo hi; }
+      {
+        inherit lo hi;
+      }
     else
       {
         lo = 0;
@@ -359,7 +327,9 @@ let
         lo = parts.lo / pow2 n + floorMod parts.hi (pow2 n) * pow2 (32 - n);
         hi = parts.hi / pow2 n;
       in
-      { inherit lo hi; }
+      {
+        inherit lo hi;
+      }
     else
       {
         lo = parts.hi / pow2 (n - 32);
@@ -375,7 +345,9 @@ let
         lo = acc.lo / 2 + (if floorMod acc.hi 2 == 1 then i32Sign else 0);
         hi = acc.hi / 2 + (if sign then i32Sign else 0);
       in
-      { inherit lo hi; }
+      {
+        inherit lo hi;
+      }
     ) parts (range (floorMod amount 64));
 
   i64MulParts =
@@ -409,28 +381,42 @@ let
       lo = r0 + r1 * base;
       hi = r2 + r3 * base;
     in
-    { inherit lo hi; };
+    {
+      inherit lo hi;
+    };
 
   i64UnsignedDivRemParts =
     lhs: rhs:
     if i64IsZeroParts rhs then
       throw "wasm trap: integer divide by zero"
     else
-      builtins.foldl' (
-        acc: i:
-        let
-          bit = 63 - i;
-          shifted = i64ShlParts acc.rem 1;
-          remWithBit = if i64BitSetParts lhs bit then i64SetBitParts shifted 0 else shifted;
-        in
-        if i64UnsignedGteParts remWithBit rhs then
-          {
-            quot = i64SetBitParts acc.quot bit;
-            rem = i64SubParts remWithBit rhs;
-          }
-        else
-          acc // { rem = remWithBit; }
-      ) { quot = { lo = 0; hi = 0; }; rem = { lo = 0; hi = 0; }; } (range 64);
+      builtins.foldl'
+        (
+          acc: i:
+          let
+            bit = 63 - i;
+            shifted = i64ShlParts acc.rem 1;
+            remWithBit = if i64BitSetParts lhs bit then i64SetBitParts shifted 0 else shifted;
+          in
+          if i64UnsignedGteParts remWithBit rhs then
+            {
+              quot = i64SetBitParts acc.quot bit;
+              rem = i64SubParts remWithBit rhs;
+            }
+          else
+            acc // { rem = remWithBit; }
+        )
+        {
+          quot = {
+            lo = 0;
+            hi = 0;
+          };
+          rem = {
+            lo = 0;
+            hi = 0;
+          };
+        }
+        (range 64);
 
   i64SignedDiv =
     lhs: rhs:
@@ -466,71 +452,73 @@ let
       in
       i64FromParts signed;
 
-  i64Bin =
-    rec {
-      add = lhs: rhs: i64FromParts (i64AddParts (i64Parts lhs) (i64Parts rhs));
-      sub = lhs: rhs: i64FromParts (i64SubParts (i64Parts lhs) (i64Parts rhs));
-      mul = lhs: rhs: i64FromParts (i64MulParts (i64Parts lhs) (i64Parts rhs));
-      udiv =
-        lhs: rhs:
-        i64FromParts (i64UnsignedDivRemParts (i64Parts lhs) (i64Parts rhs)).quot;
-      sdiv =
-        lhs: rhs:
-        i64SignedDiv lhs rhs;
-      urem =
-        lhs: rhs:
-        i64FromParts (i64UnsignedDivRemParts (i64Parts lhs) (i64Parts rhs)).rem;
-      srem = i64SignedRem;
-      band =
-        lhs: rhs:
-        let
-          a = i64Parts lhs;
-          b = i64Parts rhs;
-        in
-        i64FromParts {
-          lo = builtins.bitAnd a.lo b.lo;
-          hi = builtins.bitAnd a.hi b.hi;
-        };
-      bor =
-        lhs: rhs:
-        let
-          a = i64Parts lhs;
-          b = i64Parts rhs;
-        in
-        i64FromParts {
-          lo = builtins.bitOr a.lo b.lo;
-          hi = builtins.bitOr a.hi b.hi;
-        };
-      bxor =
-        lhs: rhs:
-        let
-          a = i64Parts lhs;
-          b = i64Parts rhs;
-        in
-        i64FromParts {
-          lo = builtins.bitXor a.lo b.lo;
-          hi = builtins.bitXor a.hi b.hi;
-        };
-      bnot = value: i64FromParts (i64NegParts (i64AddParts (i64Parts value) { lo = 1; hi = 0; }));
-      shl = lhs: rhs: i64FromParts (i64ShlParts (i64Parts lhs) rhs);
-      shr_u = lhs: rhs: i64FromParts (i64ShrUParts (i64Parts lhs) rhs);
-      shr_s = lhs: rhs: i64FromParts (i64ShrSParts (i64Parts lhs) rhs);
-      rotl =
-        lhs: rhs:
-        let
-          n = floorMod rhs 64;
-        in
-        if n == 0 then lhs else bor (shl lhs n) (shr_u lhs (64 - n));
-      rotr =
-        lhs: rhs:
-        let
-          n = floorMod rhs 64;
-        in
-        if n == 0 then lhs else bor (shr_u lhs n) (shl lhs (64 - n));
-      clz = value: checkI64 (clzBy 64 bitSetI64 value);
-      ctz = value: checkI64 (ctzBy 64 bitSetI64 value);
-      popcnt = value: checkI64 (popcntBy 64 bitSetI64 value);
-    };
+  i64Bin = rec {
+    add = lhs: rhs: i64FromParts (i64AddParts (i64Parts lhs) (i64Parts rhs));
+    sub = lhs: rhs: i64FromParts (i64SubParts (i64Parts lhs) (i64Parts rhs));
+    mul = lhs: rhs: i64FromParts (i64MulParts (i64Parts lhs) (i64Parts rhs));
+    udiv = lhs: rhs: i64FromParts (i64UnsignedDivRemParts (i64Parts lhs) (i64Parts rhs)).quot;
+    sdiv = lhs: rhs: i64SignedDiv lhs rhs;
+    urem = lhs: rhs: i64FromParts (i64UnsignedDivRemParts (i64Parts lhs) (i64Parts rhs)).rem;
+    srem = i64SignedRem;
+    band =
+      lhs: rhs:
+      let
+        a = i64Parts lhs;
+        b = i64Parts rhs;
+      in
+      i64FromParts {
+        lo = builtins.bitAnd a.lo b.lo;
+        hi = builtins.bitAnd a.hi b.hi;
+      };
+    bor =
+      lhs: rhs:
+      let
+        a = i64Parts lhs;
+        b = i64Parts rhs;
+      in
+      i64FromParts {
+        lo = builtins.bitOr a.lo b.lo;
+        hi = builtins.bitOr a.hi b.hi;
+      };
+    bxor =
+      lhs: rhs:
+      let
+        a = i64Parts lhs;
+        b = i64Parts rhs;
+      in
+      i64FromParts {
+        lo = builtins.bitXor a.lo b.lo;
+        hi = builtins.bitXor a.hi b.hi;
+      };
+    bnot =
+      value:
+      i64FromParts (
+        i64NegParts (
+          i64AddParts (i64Parts value) {
+            lo = 1;
+            hi = 0;
+          }
+        )
+      );
+    shl = lhs: rhs: i64FromParts (i64ShlParts (i64Parts lhs) rhs);
+    shr_u = lhs: rhs: i64FromParts (i64ShrUParts (i64Parts lhs) rhs);
+    shr_s = lhs: rhs: i64FromParts (i64ShrSParts (i64Parts lhs) rhs);
+    rotl =
+      lhs: rhs:
+      let
+        n = floorMod rhs 64;
+      in
+      if n == 0 then lhs else bor (shl lhs n) (shr_u lhs (64 - n));
+    rotr =
+      lhs: rhs:
+      let
+        n = floorMod rhs 64;
+      in
+      if n == 0 then lhs else bor (shr_u lhs n) (shl lhs (64 - n));
+    clz = value: checkI64 (clzBy 64 bitSetI64 value);
+    ctz = value: checkI64 (ctzBy 64 bitSetI64 value);
+    popcnt = value: checkI64 (popcntBy 64 bitSetI64 value);
+  };
 
   unsupportedFloat =
     ty: op: _lhs: _rhs:
@@ -540,19 +528,18 @@ let
     ty: op: _value:
     throw "wasm2nix runtime: ${ty}.${op} requires the soft IEEE-754 runtime";
 
-  cmp =
-    {
-      eq = lhs: rhs: lhs == rhs;
-      ne = lhs: rhs: lhs != rhs;
-      lt_u = lhs: rhs: u32 lhs < u32 rhs;
-      le_u = lhs: rhs: u32 lhs <= u32 rhs;
-      gt_u = lhs: rhs: u32 lhs > u32 rhs;
-      ge_u = lhs: rhs: u32 lhs >= u32 rhs;
-      lt_s = lhs: rhs: toI32 lhs < toI32 rhs;
-      le_s = lhs: rhs: toI32 lhs <= toI32 rhs;
-      gt_s = lhs: rhs: toI32 lhs > toI32 rhs;
-      ge_s = lhs: rhs: toI32 lhs >= toI32 rhs;
-    };
+  cmp = {
+    eq = lhs: rhs: lhs == rhs;
+    ne = lhs: rhs: lhs != rhs;
+    lt_u = lhs: rhs: u32 lhs < u32 rhs;
+    le_u = lhs: rhs: u32 lhs <= u32 rhs;
+    gt_u = lhs: rhs: u32 lhs > u32 rhs;
+    ge_u = lhs: rhs: u32 lhs >= u32 rhs;
+    lt_s = lhs: rhs: toI32 lhs < toI32 rhs;
+    le_s = lhs: rhs: toI32 lhs <= toI32 rhs;
+    gt_s = lhs: rhs: toI32 lhs > toI32 rhs;
+    ge_s = lhs: rhs: toI32 lhs >= toI32 rhs;
+  };
 
   cmp_i64 =
     let
@@ -568,12 +555,8 @@ let
       eq = eqParts;
       ne = lhs: rhs: !(eqParts lhs rhs);
       lt_u = lhs: rhs: !(i64UnsignedGteParts (i64Parts lhs) (i64Parts rhs));
-      le_u =
-        lhs: rhs:
-        i64UnsignedGteParts (i64Parts rhs) (i64Parts lhs);
-      gt_u =
-        lhs: rhs:
-        i64UnsignedGteParts (i64Parts lhs) (i64Parts rhs) && !(eqParts lhs rhs);
+      le_u = lhs: rhs: i64UnsignedGteParts (i64Parts rhs) (i64Parts lhs);
+      gt_u = lhs: rhs: i64UnsignedGteParts (i64Parts lhs) (i64Parts rhs) && !(eqParts lhs rhs);
       ge_u = lhs: rhs: i64UnsignedGteParts (i64Parts lhs) (i64Parts rhs);
       lt_s = lhs: rhs: checkI64 lhs < checkI64 rhs;
       le_s = lhs: rhs: checkI64 lhs <= checkI64 rhs;
@@ -715,11 +698,12 @@ let
     in
     a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo);
 
-  fcmp =
-    {
-      f32 = floatCmpFns f32IsNaN f32IsZero (lhs: rhs: u32 lhs == u32 rhs) (lhs: rhs: f32Key lhs < f32Key rhs);
-      f64 = floatCmpFns f64IsNaN f64IsZero (lhs: rhs: cmp_i64.eq lhs rhs) f64KeyLt;
-    };
+  fcmp = {
+    f32 = floatCmpFns f32IsNaN f32IsZero (lhs: rhs: u32 lhs == u32 rhs) (
+      lhs: rhs: f32Key lhs < f32Key rhs
+    );
+    f64 = floatCmpFns f64IsNaN f64IsZero (lhs: rhs: cmp_i64.eq lhs rhs) f64KeyLt;
+  };
 
   f32Min =
     lhs: rhs:
@@ -743,9 +727,7 @@ let
     else
       u32 rhs;
 
-  f32Copysign =
-    lhs: rhs:
-    u32 (f32Abs lhs + (if u32 rhs >= i32Sign then i32Sign else 0));
+  f32Copysign = lhs: rhs: u32 (f32Abs lhs + (if u32 rhs >= i32Sign then i32Sign else 0));
   f32QuietNaN =
     value:
     let
@@ -754,7 +736,12 @@ let
     if f32IsNaN bits then u32 (builtins.bitOr bits 4194304) else f32CanonicalNan;
   f32BinaryNaN =
     lhs: rhs:
-    if f32IsNaN lhs then f32QuietNaN lhs else if f32IsNaN rhs then f32QuietNaN rhs else f32CanonicalNan;
+    if f32IsNaN lhs then
+      f32QuietNaN lhs
+    else if f32IsNaN rhs then
+      f32QuietNaN rhs
+    else
+      f32CanonicalNan;
   f32Inf = sign: u32 ((if sign then i32Sign else 0) + f32PositiveInf);
   f32SignedZero = sign: if sign then i32Sign else 0;
   f32Neg = value: u32 (builtins.bitXor (u32 value) i32Sign);
@@ -862,7 +849,12 @@ let
     else if f32IsNaN rhs then
       f32BinaryNaN lhs rhs
     else if f32IsInf lhs || f32IsInf rhs then
-      if f32IsInf lhs && f32IsInf rhs && f32SignBit lhs != f32SignBit rhs then f32CanonicalNan else if f32IsInf lhs then u32 lhs else u32 rhs
+      if f32IsInf lhs && f32IsInf rhs && f32SignBit lhs != f32SignBit rhs then
+        f32CanonicalNan
+      else if f32IsInf lhs then
+        u32 lhs
+      else
+        u32 rhs
     else if f32IsZero lhs && f32IsZero rhs then
       if f32SignBit lhs == i32Sign && f32SignBit rhs == i32Sign then i32Sign else 0
     else if f32IsZero lhs then
@@ -871,8 +863,7 @@ let
       u32 lhs
     else
       f32AddFinite lhs rhs;
-  f32Sub =
-    lhs: rhs: f32Add lhs (f32Neg rhs);
+  f32Sub = lhs: rhs: f32Add lhs (f32Neg rhs);
   f32Mul =
     lhs: rhs:
     let
@@ -917,11 +908,7 @@ let
       in
       f32RoundFromParts sign sig (a.exp - b.exp - shift);
   f32NormalizeFinite =
-    sig: exp:
-    if sig >= 8388608 then
-      { inherit sig exp; }
-    else
-      f32NormalizeFinite (sig * 2) (exp - 1);
+    sig: exp: if sig >= 8388608 then { inherit sig exp; } else f32NormalizeFinite (sig * 2) (exp - 1);
   f32Sqrt =
     value:
     if f32IsNaN value then
@@ -991,7 +978,10 @@ let
         in
         if frac == 0 then u32 value else f32FromExactInt mode (if sign then 0 - roundedInt else roundedInt);
 
-  f64CanonicalNan = i64FromParts { lo = 0; hi = 2146959360; };
+  f64CanonicalNan = i64FromParts {
+    lo = 0;
+    hi = 2146959360;
+  };
 
   f64Min =
     lhs: rhs:
@@ -1038,10 +1028,8 @@ let
       }
     else
       f64CanonicalNan;
-  f64Neg =
-    f64MapParts (parts: parts // { hi = builtins.bitXor parts.hi i32Sign; });
-  f64Abs =
-    f64MapParts (parts: parts // { hi = builtins.bitAnd parts.hi 2147483647; });
+  f64Neg = f64MapParts (parts: parts // { hi = builtins.bitXor parts.hi i32Sign; });
+  f64Abs = f64MapParts (parts: parts // { hi = builtins.bitAnd parts.hi 2147483647; });
   f64PositiveInfParts = {
     lo = 0;
     hi = 2146435072;
@@ -1054,7 +1042,12 @@ let
     builtins.bitAnd parts.hi 2147483647 == f64PositiveInfParts.hi && parts.lo == 0;
   f64BinaryNaN =
     lhs: rhs:
-    if f64IsNaN lhs then f64QuietNaN lhs else if f64IsNaN rhs then f64QuietNaN rhs else f64CanonicalNan;
+    if f64IsNaN lhs then
+      f64QuietNaN lhs
+    else if f64IsNaN rhs then
+      f64QuietNaN rhs
+    else
+      f64CanonicalNan;
   f64Inf =
     sign:
     i64FromParts {
@@ -1103,10 +1096,7 @@ let
     go 4 0;
   big26AnyBelow =
     limbs: count:
-    if count <= 0 then
-      false
-    else
-      builtins.any (idx: big26Limb limbs idx != 0) (range count);
+    if count <= 0 then false else builtins.any (idx: big26Limb limbs idx != 0) (range count);
   big26BitLength =
     limbs:
     if limbs.l4 != 0 then
@@ -1237,10 +1227,7 @@ let
       exp = bitLength - 1 + scale;
       shift = bitLength - 56;
       sigExt =
-        if shift <= 0 then
-          big26ToSmall limbs * pow2 (0 - shift)
-        else
-          big26ShiftRightJamToSmall limbs shift;
+        if shift <= 0 then big26ToSmall limbs * pow2 (0 - shift) else big26ShiftRightJamToSmall limbs shift;
     in
     if bitLength == 0 then f64SignedZero sign else f64PackExt sign exp sigExt;
   f64RoundFromSmall =
@@ -1255,22 +1242,29 @@ let
   f64DivQuotientJam =
     numerator: denominator: shift:
     let
-      result = builtins.foldl' (
-        acc: _:
-        let
-          rem2 = acc.rem * 2;
-        in
-        if rem2 >= denominator then
+      result =
+        builtins.foldl'
+          (
+            acc: _:
+            let
+              rem2 = acc.rem * 2;
+            in
+            if rem2 >= denominator then
+              {
+                rem = rem2 - denominator;
+                quot = acc.quot * 2 + 1;
+              }
+            else
+              {
+                rem = rem2;
+                quot = acc.quot * 2;
+              }
+          )
           {
-            rem = rem2 - denominator;
-            quot = acc.quot * 2 + 1;
+            rem = floorMod numerator denominator;
+            quot = numerator / denominator;
           }
-        else
-          {
-            rem = rem2;
-            quot = acc.quot * 2;
-          }
-      ) { rem = floorMod numerator denominator; quot = numerator / denominator; } (range shift);
+          (range shift);
     in
     if result.rem == 0 then result.quot else builtins.bitOr result.quot 1;
   f64PackExt =
@@ -1362,7 +1356,12 @@ let
     if f64IsNaN lhs || f64IsNaN rhs then
       f64BinaryNaN lhs rhs
     else if f64IsInf lhs || f64IsInf rhs then
-      if f64IsInf lhs && f64IsInf rhs && f64SignBit lhs != f64SignBit rhs then f64CanonicalNan else if f64IsInf lhs then lhs else rhs
+      if f64IsInf lhs && f64IsInf rhs && f64SignBit lhs != f64SignBit rhs then
+        f64CanonicalNan
+      else if f64IsInf lhs then
+        lhs
+      else
+        rhs
     else if f64IsZero lhs && f64IsZero rhs then
       if f64SignBit lhs == i32Sign && f64SignBit rhs == i32Sign then i64Min else 0
     else if f64IsZero lhs then
@@ -1371,8 +1370,7 @@ let
       lhs
     else
       f64AddFinite lhs rhs;
-  f64Sub =
-    lhs: rhs: f64Add lhs (f64Neg rhs);
+  f64Sub = lhs: rhs: f64Add lhs (f64Neg rhs);
   f64Mul =
     lhs: rhs:
     let
@@ -1415,10 +1413,7 @@ let
       f64RoundFromSmall sign sig (a.exp - b.exp - shift);
   f64NormalizeFinite =
     sig: exp:
-    if sig >= 4503599627370496 then
-      { inherit sig exp; }
-    else
-      f64NormalizeFinite (sig * 2) (exp - 1);
+    if sig >= 4503599627370496 then { inherit sig exp; } else f64NormalizeFinite (sig * 2) (exp - 1);
   f64Sqrt =
     value:
     if f64IsNaN value then
@@ -1490,9 +1485,7 @@ let
         in
         if frac == 0 then value else f64FromExactInt mode (if sign then 0 - roundedInt else roundedInt);
 
-  f64MapParts =
-    f: value:
-    i64FromParts (f (i64Parts value));
+  f64MapParts = f: value: i64FromParts (f (i64Parts value));
 
   intBitLength =
     value:
@@ -1502,10 +1495,7 @@ let
     if v == 0 then
       0
     else
-      builtins.foldl' (
-        acc: bit:
-        if v >= pow2 bit then bit + 1 else acc
-      ) 0 (range 63);
+      builtins.foldl' (acc: bit: if v >= pow2 bit then bit + 1 else acc) 0 (range 63);
 
   exactIntFloatError =
     ty: op: reason:
@@ -1566,7 +1556,10 @@ let
           let
             divisor = pow2 (exp - 23);
           in
-          if floorMod magnitude divisor == 0 then magnitude / divisor - 8388608 else exactIntFloatError "f32" op "rounded result";
+          if floorMod magnitude divisor == 0 then
+            magnitude / divisor - 8388608
+          else
+            exactIntFloatError "f32" op "rounded result";
       sign = if negative then i32Sign else 0;
     in
     if magnitude == 0 then sign else u32 (sign + (exp + 127) * 8388608 + frac);
@@ -1675,18 +1668,31 @@ let
       in
       if q * b == a then f64FromExactInt "div" q else exactIntFloatError "f64" "div" "rounded result";
 
-  u64PartsFromNonNegative =
-    value:
-    {
-      lo = floorMod value u32Mod;
-      hi = value / u32Mod;
-    };
+  u64PartsFromNonNegative = value: {
+    lo = floorMod value u32Mod;
+    hi = value / u32Mod;
+  };
 
-  u64ZeroParts = { lo = 0; hi = 0; };
-  i32MaxParts = { lo = 2147483647; hi = 0; };
-  i32MinMagnitudeParts = { lo = i32Sign; hi = 0; };
-  i64MaxParts = { lo = u32Max; hi = 2147483647; };
-  i64MinMagnitudeParts = { lo = 0; hi = i32Sign; };
+  u64ZeroParts = {
+    lo = 0;
+    hi = 0;
+  };
+  i32MaxParts = {
+    lo = 2147483647;
+    hi = 0;
+  };
+  i32MinMagnitudeParts = {
+    lo = i32Sign;
+    hi = 0;
+  };
+  i64MaxParts = {
+    lo = u32Max;
+    hi = 2147483647;
+  };
+  i64MinMagnitudeParts = {
+    lo = 0;
+    hi = i32Sign;
+  };
 
   f32TruncInfo =
     value:
@@ -1757,10 +1763,7 @@ let
     else if info.isInf then
       if saturating then (if info.sign then i32Sign else 2147483647) else truncOverflow
     else if info.sign then
-      if tooNegative then
-        if saturating then i32Sign else truncOverflow
-      else
-        u32 (0 - magnitude)
+      if tooNegative then if saturating then i32Sign else truncOverflow else u32 (0 - magnitude)
     else if tooPositive then
       if saturating then 2147483647 else truncOverflow
     else
@@ -1796,10 +1799,7 @@ let
     else if info.isInf then
       if saturating then (if info.sign then i64Min else i64Max) else truncOverflow
     else if info.sign then
-      if tooNegative then
-        if saturating then i64Min else truncOverflow
-      else
-        truncNegResultI64 info.parts
+      if tooNegative then if saturating then i64Min else truncOverflow else truncNegResultI64 info.parts
     else if tooPositive then
       if saturating then i64Max else truncOverflow
     else
@@ -1878,10 +1878,7 @@ let
       signBit = if sign && !rounded.isZero then i32Sign else 0;
       frac = rounded.significand - 8388608;
     in
-    if rounded.isZero then
-      signBit
-    else
-      u32 (signBit + (rounded.exponent + 127) * 8388608 + frac);
+    if rounded.isZero then signBit else u32 (signBit + (rounded.exponent + 127) * 8388608 + frac);
 
   f64FromUnsignedParts =
     sign: parts:
@@ -2027,77 +2024,76 @@ let
     else
       f64FromUnsignedParts magnitude.sign magnitude.parts;
 
-  conv =
-    {
-      uextend = value: _ty: value;
-      sextend = value: value;
-      ireduce = u32;
-      sign_extend_8 = value: u32 (signExtend 8 value);
-      sign_extend_16 = value: u32 (signExtend 16 value);
-      sign_extend_8_i64 = value: checkI64 (signExtend 8 value);
-      sign_extend_16_i64 = value: checkI64 (signExtend 16 value);
-      sign_extend_32 = value: checkI64 (signExtend 32 value);
-      trunc_s = {
-        f32 = {
-          i32 = truncToI32Signed false "f32";
-          i64 = truncToI64Signed false "f32";
-        };
-        f64 = {
-          i32 = truncToI32Signed false "f64";
-          i64 = truncToI64Signed false "f64";
-        };
+  conv = {
+    uextend = value: _ty: value;
+    sextend = value: value;
+    ireduce = u32;
+    sign_extend_8 = value: u32 (signExtend 8 value);
+    sign_extend_16 = value: u32 (signExtend 16 value);
+    sign_extend_8_i64 = value: checkI64 (signExtend 8 value);
+    sign_extend_16_i64 = value: checkI64 (signExtend 16 value);
+    sign_extend_32 = value: checkI64 (signExtend 32 value);
+    trunc_s = {
+      f32 = {
+        i32 = truncToI32Signed false "f32";
+        i64 = truncToI64Signed false "f32";
       };
-      trunc_u = {
-        f32 = {
-          i32 = truncToI32Unsigned false "f32";
-          i64 = truncToI64Unsigned false "f32";
-        };
-        f64 = {
-          i32 = truncToI32Unsigned false "f64";
-          i64 = truncToI64Unsigned false "f64";
-        };
-      };
-      trunc_sat_s = {
-        f32 = {
-          i32 = truncToI32Signed true "f32";
-          i64 = truncToI64Signed true "f32";
-        };
-        f64 = {
-          i32 = truncToI32Signed true "f64";
-          i64 = truncToI64Signed true "f64";
-        };
-      };
-      trunc_sat_u = {
-        f32 = {
-          i32 = truncToI32Unsigned true "f32";
-          i64 = truncToI64Unsigned true "f32";
-        };
-        f64 = {
-          i32 = truncToI32Unsigned true "f64";
-          i64 = truncToI64Unsigned true "f64";
-        };
-      };
-      convert_s = {
-        i32 = {
-          f32 = convertIntToFloat true "i32" "f32";
-          f64 = convertIntToFloat true "i32" "f64";
-        };
-        i64 = {
-          f32 = convertIntToFloat true "i64" "f32";
-          f64 = convertIntToFloat true "i64" "f64";
-        };
-      };
-      convert_u = {
-        i32 = {
-          f32 = convertIntToFloat false "i32" "f32";
-          f64 = convertIntToFloat false "i32" "f64";
-        };
-        i64 = {
-          f32 = convertIntToFloat false "i64" "f32";
-          f64 = convertIntToFloat false "i64" "f64";
-        };
+      f64 = {
+        i32 = truncToI32Signed false "f64";
+        i64 = truncToI64Signed false "f64";
       };
     };
+    trunc_u = {
+      f32 = {
+        i32 = truncToI32Unsigned false "f32";
+        i64 = truncToI64Unsigned false "f32";
+      };
+      f64 = {
+        i32 = truncToI32Unsigned false "f64";
+        i64 = truncToI64Unsigned false "f64";
+      };
+    };
+    trunc_sat_s = {
+      f32 = {
+        i32 = truncToI32Signed true "f32";
+        i64 = truncToI64Signed true "f32";
+      };
+      f64 = {
+        i32 = truncToI32Signed true "f64";
+        i64 = truncToI64Signed true "f64";
+      };
+    };
+    trunc_sat_u = {
+      f32 = {
+        i32 = truncToI32Unsigned true "f32";
+        i64 = truncToI64Unsigned true "f32";
+      };
+      f64 = {
+        i32 = truncToI32Unsigned true "f64";
+        i64 = truncToI64Unsigned true "f64";
+      };
+    };
+    convert_s = {
+      i32 = {
+        f32 = convertIntToFloat true "i32" "f32";
+        f64 = convertIntToFloat true "i32" "f64";
+      };
+      i64 = {
+        f32 = convertIntToFloat true "i64" "f32";
+        f64 = convertIntToFloat true "i64" "f64";
+      };
+    };
+    convert_u = {
+      i32 = {
+        f32 = convertIntToFloat false "i32" "f32";
+        f64 = convertIntToFloat false "i32" "f64";
+      };
+      i64 = {
+        f32 = convertIntToFloat false "i64" "f32";
+        f64 = convertIntToFloat false "i64" "f64";
+      };
+    };
+  };
 
   getMem = st: st.mem or { };
   getPages = st: (getMem st).pages or { };
@@ -2126,7 +2122,9 @@ let
     idx: bytes: st:
     st
     // {
-      data = (dataSegments st) // { "${toString idx}" = bytes; };
+      data = (dataSegments st) // {
+        "${toString idx}" = bytes;
+      };
     };
 
   checkAccess =
@@ -2136,27 +2134,19 @@ let
       limit = pages * pageBytes;
       end = addr + width;
     in
-    if addr < 0 || end > limit then
-      throw "wasm trap: ${op} out of bounds"
-    else
-      true;
+    if addr < 0 || end > limit then throw "wasm trap: ${op} out of bounds" else true;
 
   checkSegmentAccess =
     op: segment: offset: width:
     let
       end = offset + width;
     in
-    if offset < 0 || end > length segment then
-      throw "wasm trap: ${op} out of bounds"
-    else
-      true;
+    if offset < 0 || end > length segment then throw "wasm trap: ${op} out of bounds" else true;
 
   wordIndex = addr: addr / 4;
   byteOffset = addr: floorMod addr 4;
 
-  getWord =
-    pages: idx:
-    pages.${toString idx} or 0;
+  getWord = pages: idx: pages.${toString idx} or 0;
 
   setWord =
     pages: idx: value:
@@ -2166,9 +2156,7 @@ let
     in
     if v == 0 then builtins.removeAttrs pages [ key ] else pages // { "${key}" = v; };
 
-  byteAt =
-    word: offset:
-    floorMod (word / pow2 (offset * 8)) 256;
+  byteAt = word: offset: floorMod (word / pow2 (offset * 8)) 256;
 
   setByte =
     word: offset: byte:
@@ -2204,13 +2192,10 @@ let
       map (i: getByteUnchecked pages (addr + i)) (range width)
     );
 
-  bytesToU16 =
-    bytes:
-    elemAt bytes 0 + elemAt bytes 1 * 256;
+  bytesToU16 = bytes: elemAt bytes 0 + elemAt bytes 1 * 256;
 
   bytesToU32 =
-    bytes:
-    elemAt bytes 0 + elemAt bytes 1 * 256 + elemAt bytes 2 * 65536 + elemAt bytes 3 * 16777216;
+    bytes: elemAt bytes 0 + elemAt bytes 1 * 256 + elemAt bytes 2 * 65536 + elemAt bytes 3 * 16777216;
 
   bytesToLimitedU64 =
     bytes:
@@ -2243,94 +2228,96 @@ let
     op: bytes: addr: st:
     builtins.seq (checkAccess op (length bytes) addr st) (
       let
-        pages = builtins.foldl' (
-          acc: i:
-          setByteUnchecked acc (addr + i) (elemAt bytes i)
-        ) (getPages st) (range (length bytes));
+        pages = builtins.foldl' (acc: i: setByteUnchecked acc (addr + i) (elemAt bytes i)) (getPages st) (
+          range (length bytes)
+        );
       in
       setPages pages st
     );
 
-  mem =
-    rec {
-      load_u8 = addr: st: elemAt (loadBytes "load_u8" 1 addr st) 0;
-      load_s8 = addr: st: u32 (signExtend 8 (load_u8 addr st));
-      load_s8_i64 = addr: st: checkI64 (signExtend 8 (load_u8 addr st));
-      load_u16 = addr: st: bytesToU16 (loadBytes "load_u16" 2 addr st);
-      load_s16 = addr: st: u32 (signExtend 16 (load_u16 addr st));
-      load_s16_i64 = addr: st: checkI64 (signExtend 16 (load_u16 addr st));
-      load_u32 = addr: st: bytesToU32 (loadBytes "load_u32" 4 addr st);
-      load_s32 = addr: st: u32 (signExtend 32 (load_u32 addr st));
-      load_s32_i64 = addr: st: checkI64 (signExtend 32 (load_u32 addr st));
-      load_i32 = load_u32;
-      load_f32 = load_u32;
-      load_i64 = addr: st: bytesToLimitedU64 (loadBytes "load_i64" 8 addr st);
-      load_f64 = load_i64;
+  mem = rec {
+    load_u8 = addr: st: elemAt (loadBytes "load_u8" 1 addr st) 0;
+    load_s8 = addr: st: u32 (signExtend 8 (load_u8 addr st));
+    load_s8_i64 = addr: st: checkI64 (signExtend 8 (load_u8 addr st));
+    load_u16 = addr: st: bytesToU16 (loadBytes "load_u16" 2 addr st);
+    load_s16 = addr: st: u32 (signExtend 16 (load_u16 addr st));
+    load_s16_i64 = addr: st: checkI64 (signExtend 16 (load_u16 addr st));
+    load_u32 = addr: st: bytesToU32 (loadBytes "load_u32" 4 addr st);
+    load_s32 = addr: st: u32 (signExtend 32 (load_u32 addr st));
+    load_s32_i64 = addr: st: checkI64 (signExtend 32 (load_u32 addr st));
+    load_i32 = load_u32;
+    load_f32 = load_u32;
+    load_i64 = addr: st: bytesToLimitedU64 (loadBytes "load_i64" 8 addr st);
+    load_f64 = load_i64;
 
-      store_u8 = value: addr: st: storeBytes "store_u8" [ (floorMod value 256) ] addr st;
-      store_u16 =
-        value: addr: st:
-        let
-          v = u32 value;
-        in
-        storeBytes "store_u16" [ (floorMod v 256) (floorMod (v / 256) 256) ] addr st;
-      store_i32 = value: addr: st: storeBytes "store_i32" (u32ToBytes value) addr st;
-      store_u32 = store_i32;
-      store_f32 = store_i32;
-      store_i64 = value: addr: st: storeBytes "store_i64" (limitedU64ToBytes value) addr st;
-      store_f64 = store_i64;
+    store_u8 =
+      value: addr: st:
+      storeBytes "store_u8" [ (floorMod value 256) ] addr st;
+    store_u16 =
+      value: addr: st:
+      let
+        v = u32 value;
+      in
+      storeBytes "store_u16" [
+        (floorMod v 256)
+        (floorMod (v / 256) 256)
+      ] addr st;
+    store_i32 =
+      value: addr: st:
+      storeBytes "store_i32" (u32ToBytes value) addr st;
+    store_u32 = store_i32;
+    store_f32 = store_i32;
+    store_i64 =
+      value: addr: st:
+      storeBytes "store_i64" (limitedU64ToBytes value) addr st;
+    store_f64 = store_i64;
 
-      size = st: pageCount st;
-      grow =
-        delta: st:
+    size = st: pageCount st;
+    grow =
+      delta: st:
+      let
+        old = pageCount st;
+        new = old + delta;
+        memoryMaxPages = (getMem st).maxPageCount or maxPages;
+      in
+      if delta < 0 || new > memoryMaxPages then
+        {
+          inherit st;
+          results = [ u32Max ];
+        }
+      else
+        {
+          st = setPageCount new st;
+          results = [ old ];
+        };
+    fill =
+      dst: value: len: st:
+      builtins.seq (checkAccess "memory.fill" len dst st) (
         let
-          old = pageCount st;
-          new = old + delta;
-          memoryMaxPages = (getMem st).maxPageCount or maxPages;
+          byte = floorMod value 256;
+          pages = builtins.foldl' (acc: i: setByteUnchecked acc (dst + i) byte) (getPages st) (range len);
         in
-        if delta < 0 || new > memoryMaxPages then
-          {
-            inherit st;
-            results = [ u32Max ];
-          }
-        else
-          {
-            st = setPageCount new st;
-            results = [ old ];
-          };
-      fill =
-        dst: value: len: st:
-        builtins.seq (checkAccess "memory.fill" len dst st) (
-          let
-            byte = floorMod value 256;
-            pages = builtins.foldl' (
-              acc: i:
-              setByteUnchecked acc (dst + i) byte
-            ) (getPages st) (range len);
-          in
-          setPages pages st
+        setPages pages st
+      );
+    copy =
+      dst: src: len: st:
+      let
+        bytes = loadBytes "memory.copy" len src st;
+      in
+      storeBytes "memory.copy" bytes dst st;
+    init =
+      segIndex: dst: src: len: st:
+      let
+        segment = getDataSegment segIndex st;
+        bytes = builtins.seq (checkSegmentAccess "memory.init segment" segment src len) (
+          builtins.genList (i: elemAt segment (src + i)) len
         );
-      copy =
-        dst: src: len: st:
-        let
-          bytes = loadBytes "memory.copy" len src st;
-        in
-        storeBytes "memory.copy" bytes dst st;
-      init =
-        segIndex: dst: src: len: st:
-        let
-          segment = getDataSegment segIndex st;
-          bytes =
-            builtins.seq (checkSegmentAccess "memory.init segment" segment src len) (
-              builtins.genList (i: elemAt segment (src + i)) len
-            );
-        in
-        storeBytes "memory.init" bytes dst st;
-      data_drop = segIndex: st: setDataSegment segIndex [ ] st;
-    };
+      in
+      storeBytes "memory.init" bytes dst st;
+    data_drop = segIndex: st: setDataSegment segIndex [ ] st;
+  };
 
-  globals =
-    st: st.globals or { };
+  globals = st: st.globals or { };
 
   global =
     let
@@ -2339,7 +2326,9 @@ let
         idx: value: st:
         st
         // {
-          globals = (globals st) // { "${toString idx}" = value; };
+          globals = (globals st) // {
+            "${toString idx}" = value;
+          };
         };
     in
     {
@@ -2347,27 +2336,37 @@ let
       get_i64 = get;
       get_f32 = get;
       get_f64 = get;
-      set_i32 = idx: value: st: set idx (if builtins.isAttrs value then value else u32 value) st;
-      set_i64 = idx: value: st: set idx (checkI64 value) st;
-      set_f32 = idx: value: st: set idx (u32 value) st;
+      set_i32 =
+        idx: value: st:
+        set idx (if builtins.isAttrs value then value else u32 value) st;
+      set_i64 =
+        idx: value: st:
+        set idx (checkI64 value) st;
+      set_f32 =
+        idx: value: st:
+        set idx (u32 value) st;
       set_f64 = set;
     };
 
-  tables =
-    st: st.tables or { };
+  tables = st: st.tables or { };
 
   table =
     let
-      getTable = tableIndex: st: (tables st).${toString tableIndex} or { elems = { }; size = 0; };
+      getTable =
+        tableIndex: st:
+        (tables st).${toString tableIndex} or {
+          elems = { };
+          size = 0;
+        };
       setTable =
         tableIndex: tableValue: st:
         st
         // {
-          tables = (tables st) // { "${toString tableIndex}" = tableValue; };
+          tables = (tables st) // {
+            "${toString tableIndex}" = tableValue;
+          };
         };
-      getEntry =
-        tableValue: elemIndex:
-        tableValue.elems.${toString elemIndex} or null;
+      getEntry = tableValue: elemIndex: tableValue.elems.${toString elemIndex} or null;
       setEntry =
         tableValue: elemIndex: entry:
         let
@@ -2376,24 +2375,24 @@ let
         in
         tableValue
         // {
-          elems = if entry == null then builtins.removeAttrs elems [ key ] else elems // { "${key}" = entry; };
+          elems =
+            if entry == null then builtins.removeAttrs elems [ key ] else elems // { "${key}" = entry; };
         };
       checkTableAccess =
         op: tableValue: offset: width:
         let
           end = offset + width;
         in
-        if offset < 0 || end > (tableValue.size or 0) then
-          throw "wasm trap: ${op} out of bounds"
-        else
-          true;
+        if offset < 0 || end > (tableValue.size or 0) then throw "wasm trap: ${op} out of bounds" else true;
       elemSegments = st: st.elemSegments or { };
       getElemSegment = segIndex: st: (elemSegments st).${toString segIndex} or [ ];
       setElemSegment =
         segIndex: values: st:
         st
         // {
-          elemSegments = (elemSegments st) // { "${toString segIndex}" = values; };
+          elemSegments = (elemSegments st) // {
+            "${toString segIndex}" = values;
+          };
         };
       applyArgs = builtins.foldl' (fn: arg: fn arg);
     in
@@ -2430,10 +2429,9 @@ let
         let
           tableValue = getTable tableIndex st;
           checked = checkTableAccess "table.set" tableValue elemIndex 1;
-          newTable =
-            builtins.seq checked (
-              setEntry tableValue elemIndex (if value == 0 then null else value)
-            );
+          newTable = builtins.seq checked (
+            setEntry tableValue elemIndex (if value == 0 then null else value)
+          );
         in
         builtins.deepSeq newTable (setTable tableIndex newTable st);
       size = tableIndex: st: (getTable tableIndex st).size or 0;
@@ -2453,11 +2451,9 @@ let
           }
         else
           let
-            newTable =
-              builtins.foldl' (
-                acc: i:
-                setEntry acc (old + i) entry
-              ) (tableValue // { size = new; }) (range delta);
+            newTable = builtins.foldl' (acc: i: setEntry acc (old + i) entry) (tableValue // { size = new; }) (
+              range delta
+            );
           in
           {
             st = builtins.deepSeq newTable (setTable tableIndex newTable st);
@@ -2469,13 +2465,9 @@ let
           tableValue = getTable tableIndex st;
           checked = checkTableAccess "table.fill" tableValue dst len;
           entry = if value == 0 then null else value;
-          newTable =
-            builtins.seq checked (
-              builtins.foldl' (
-                acc: i:
-                setEntry acc (dst + i) entry
-              ) tableValue (range len)
-            );
+          newTable = builtins.seq checked (
+            builtins.foldl' (acc: i: setEntry acc (dst + i) entry) tableValue (range len)
+          );
         in
         builtins.deepSeq newTable (setTable tableIndex newTable st);
       init =
@@ -2483,19 +2475,13 @@ let
         let
           tableValue = getTable tableIndex st;
           segment = getElemSegment segIndex st;
-          checked =
-            builtins.seq (checkTableAccess "table.init" tableValue dst len) (
-              builtins.seq (checkSegmentAccess "table.init segment" segment src len) true
-            );
-          entries =
-            builtins.seq checked (builtins.genList (i: elemAt segment (src + i)) len);
-          newTable =
-            builtins.seq checked (
-              builtins.foldl' (
-                acc: i:
-                setEntry acc (dst + i) (elemAt entries i)
-              ) tableValue (range len)
-            );
+          checked = builtins.seq (checkTableAccess "table.init" tableValue dst len) (
+            builtins.seq (checkSegmentAccess "table.init segment" segment src len) true
+          );
+          entries = builtins.seq checked (builtins.genList (i: elemAt segment (src + i)) len);
+          newTable = builtins.seq checked (
+            builtins.foldl' (acc: i: setEntry acc (dst + i) (elemAt entries i)) tableValue (range len)
+          );
         in
         builtins.deepSeq newTable (setTable tableIndex newTable st);
       elem_drop = segIndex: st: setElemSegment segIndex [ ] st;
@@ -2504,19 +2490,13 @@ let
         let
           dstTable = getTable dstTableIndex st;
           srcTable = getTable srcTableIndex st;
-          checked =
-            builtins.seq (checkTableAccess "table.copy destination" dstTable dst len) (
-              builtins.seq (checkTableAccess "table.copy source" srcTable src len) true
-            );
-          entries =
-            builtins.seq checked (builtins.genList (i: getEntry srcTable (src + i)) len);
-          newDstTable =
-            builtins.seq checked (
-              builtins.foldl' (
-                acc: i:
-                setEntry acc (dst + i) (elemAt entries i)
-              ) dstTable (range len)
-            );
+          checked = builtins.seq (checkTableAccess "table.copy destination" dstTable dst len) (
+            builtins.seq (checkTableAccess "table.copy source" srcTable src len) true
+          );
+          entries = builtins.seq checked (builtins.genList (i: getEntry srcTable (src + i)) len);
+          newDstTable = builtins.seq checked (
+            builtins.foldl' (acc: i: setEntry acc (dst + i) (elemAt entries i)) dstTable (range len)
+          );
         in
         builtins.deepSeq newDstTable (setTable dstTableIndex newDstTable st);
     };
@@ -2564,5 +2544,13 @@ rec {
     promote_f32 = f64PromoteF32;
   };
 
-  inherit cmp cmp_i64 fcmp conv mem global table;
+  inherit
+    cmp
+    cmp_i64
+    fcmp
+    conv
+    mem
+    global
+    table
+    ;
 }

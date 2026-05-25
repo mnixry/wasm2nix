@@ -1,4 +1,6 @@
-{ tracePrints ? true }:
+{
+  tracePrints ? true,
+}:
 let
   traceCall =
     name: args: st:
@@ -48,14 +50,18 @@ rec {
     print_i64 = v: traceCall "print_i64" [ v ];
     print_f32 = v: traceCall "print_f32" [ v ];
     print_f64 = v: traceCall "print_f64" [ v ];
-    print_i32_f32 = i: f: traceCall "print_i32_f32" [
-      i
-      f
-    ];
-    print_f64_f64 = a: b: traceCall "print_f64_f64" [
-      a
-      b
-    ];
+    print_i32_f32 =
+      i: f:
+      traceCall "print_i32_f32" [
+        i
+        f
+      ];
+    print_f64_f64 =
+      a: b:
+      traceCall "print_f64_f64" [
+        a
+        b
+      ];
   };
 
   dynamicMemoryLimits =

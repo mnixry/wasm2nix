@@ -484,7 +484,12 @@
         (rt.mem.load_u8 2 st1)
         (rt.mem.load_u8 3 st1)
       ];
-    expected = [ 0 255 255 255 ];
+    expected = [
+      0
+      255
+      255
+      255
+    ];
   };
   test_mem_copy_uses_original_source_for_overlap = {
     expr =
@@ -498,24 +503,44 @@
         (rt.mem.load_u8 3 st2)
         (rt.mem.load_u8 4 st2)
       ];
-    expected = [ 170 187 204 221 ];
+    expected = [
+      170
+      187
+      204
+      221
+    ];
   };
   test_mem_init_reads_data_segment = {
     expr =
       let
-        st1 = st0 // { data = { "0" = [ 170 187 204 ]; }; };
+        st1 = st0 // {
+          data = {
+            "0" = [
+              170
+              187
+              204
+            ];
+          };
+        };
         st2 = rt.mem.init 0 4 1 2 st1;
       in
       [
         (rt.mem.load_u8 4 st2)
         (rt.mem.load_u8 5 st2)
       ];
-    expected = [ 187 204 ];
+    expected = [
+      187
+      204
+    ];
   };
   test_data_drop_makes_segment_empty = {
     expr =
       let
-        st1 = st0 // { data = { "0" = [ 1 ]; }; };
+        st1 = st0 // {
+          data = {
+            "0" = [ 1 ];
+          };
+        };
         st2 = rt.mem.data_drop 0 st1;
       in
       tryOk (rt.mem.init 0 0 0 1 st2);
@@ -535,12 +560,10 @@
     expr =
       let
         funcs = {
-          f0 =
-            x: st:
-            {
-              inherit st;
-              results = [ (rt.i32.add x 1) ];
-            };
+          f0 = x: st: {
+            inherit st;
+            results = [ (rt.i32.add x 1) ];
+          };
         };
         st1 = st0 // {
           tables = {
@@ -563,12 +586,10 @@
     expr =
       let
         funcs = {
-          f0 =
-            st:
-            {
-              inherit st;
-              results = [ ];
-            };
+          f0 = st: {
+            inherit st;
+            results = [ ];
+          };
         };
         st1 = st0 // {
           tables = {
@@ -622,12 +643,10 @@
     expr =
       let
         funcs = {
-          f0 =
-            st:
-            {
-              inherit st;
-              results = [ 42 ];
-            };
+          f0 = st: {
+            inherit st;
+            results = [ 42 ];
+          };
         };
         st1 = st0 // {
           tables = {
