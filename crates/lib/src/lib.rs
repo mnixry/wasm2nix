@@ -11,14 +11,22 @@ pub use wasm2nix_ast as nix;
 
 pub const DEFAULT_RUNTIME_FILE_NAME: &str = "wasm2nix-rt.nix";
 
-pub fn runtime_nix() -> &'static str {
+#[must_use]
+pub const fn runtime_nix() -> &'static str {
     include_str!("../nix/rt.nix")
 }
 
+#[must_use]
 pub fn runtime_nix_path() -> &'static Path {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/nix/rt.nix"))
 }
 
+/// Lowers a Wasm module to a complete Nix module wrapper.
+///
+/// # Errors
+///
+/// Returns an error when the Wasm bytes cannot be translated or when lowering
+/// to the Nix AST fails.
 pub fn lower_wasm_to_nix(wasm: &[u8], runtime_path_expr: &str) -> error::Result<String> {
     let module = lower_wasm_to_nix_module(wasm)?;
     Ok(format!(
@@ -26,6 +34,12 @@ pub fn lower_wasm_to_nix(wasm: &[u8], runtime_path_expr: &str) -> error::Result<
     ))
 }
 
+/// Lowers a Wasm module to the inner Nix module expression.
+///
+/// # Errors
+///
+/// Returns an error when the Wasm bytes cannot be translated or when lowering
+/// to the Nix AST fails.
 pub fn lower_wasm_to_nix_module(wasm: &[u8]) -> error::Result<String> {
     let module = translator::NixModule::translate(wasm)
         .map_err(error::TranslateWasmSource::from)

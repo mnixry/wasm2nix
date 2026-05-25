@@ -26,6 +26,7 @@ use crate::{
     translator::NixModule,
 };
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn lower_function(
     module: &NixModule, func_index: u32, func: &ir::Function,
 ) -> Result<Expr> {
@@ -400,6 +401,7 @@ fn lower_block_body(
     Ok(expr)
 }
 
+#[allow(clippy::too_many_lines)]
 fn lower_inst(
     module: &NixModule, func: &ir::Function, inst: Inst, st_name: &str, vmctx: ir::Value,
 ) -> Result<(Option<Step>, Option<String>)> {
@@ -431,7 +433,7 @@ fn lower_inst(
             let v = i64::from(*imm);
             let nix_int = if ty == I32 {
                 // represent i32 as u32 in i64 range
-                i64::from(v as u32)
+                i64::from(v.cast_unsigned() as u32)
             } else {
                 v
             };
@@ -449,7 +451,7 @@ fn lower_inst(
         InstructionData::UnaryIeee64 { imm, .. } if op == Opcode::F64const => {
             let dst = results[0];
             let bits = imm.bits();
-            let binds = vec![(value_name(dst), Expr::int(bits as i64))];
+            let binds = vec![(value_name(dst), Expr::int(bits.cast_signed()))];
             (seq_on_result(binds), None)
         }
 
@@ -576,10 +578,8 @@ fn lower_inst(
                     } else {
                         ("f32", "demote_f64")
                     };
-                    let binds = vec![(
-                        value_name(out),
-                        Expr::app(rt_fn(&[ty_key, op_name]), vec![a]),
-                    )];
+                    let path: [&str; 2] = (ty_key, op_name).into();
+                    let binds = vec![(value_name(out), Expr::app(rt_fn(&path), vec![a]))];
                     (seq_on_result(binds), None)
                 }
                 Opcode::Bnot => {
@@ -611,10 +611,8 @@ fn lower_inst(
                             .fail();
                         }
                     };
-                    let binds = vec![(
-                        value_name(out),
-                        Expr::app(rt_fn(&[ty_key, op_name]), vec![a]),
-                    )];
+                    let path = [ty_key, op_name];
+                    let binds = vec![(value_name(out), Expr::app(rt_fn(&path), vec![a]))];
                     (seq_on_result(binds), None)
                 }
                 Opcode::Fneg
@@ -643,10 +641,8 @@ fn lower_inst(
                             .fail();
                         }
                     };
-                    let binds = vec![(
-                        value_name(out),
-                        Expr::app(rt_fn(&[ty_key, op_name]), vec![a]),
-                    )];
+                    let path = [ty_key, op_name];
+                    let binds = vec![(value_name(out), Expr::app(rt_fn(&path), vec![a]))];
                     (seq_on_result(binds), None)
                 }
                 _ => {
@@ -685,9 +681,9 @@ fn lower_inst(
             let ty_key = types::numeric_type_key(out_ty, "binary output")?;
 
             let op_name = match op {
-                Opcode::Iadd => "add",
-                Opcode::Isub => "sub",
-                Opcode::Imul => "mul",
+                Opcode::Iadd | Opcode::Fadd => "add",
+                Opcode::Isub | Opcode::Fsub => "sub",
+                Opcode::Imul | Opcode::Fmul => "mul",
                 Opcode::Udiv => "udiv",
                 Opcode::Sdiv => "sdiv",
                 Opcode::Urem => "urem",
@@ -700,9 +696,6 @@ fn lower_inst(
                 Opcode::Sshr => "shr_s",
                 Opcode::Rotl => "rotl",
                 Opcode::Rotr => "rotr",
-                Opcode::Fadd => "add",
-                Opcode::Fsub => "sub",
-                Opcode::Fmul => "mul",
                 Opcode::Fdiv => "div",
                 Opcode::Fmin => "min",
                 Opcode::Fmax => "max",
@@ -715,7 +708,8 @@ fn lower_inst(
                 }
             };
 
-            let e = Expr::app(rt_fn(&[ty_key, op_name]), vec![a, b]);
+            let path = [ty_key, op_name];
+            let e = Expr::app(rt_fn(&path), vec![a, b]);
             let binds = vec![(value_name(out), e)];
             (seq_on_result(binds), None)
         }
@@ -726,7 +720,7 @@ fn lower_inst(
             let out_ty = func.dfg.value_type(out);
             let imm64 = i64::from(*imm);
             let imm_expr = if out_ty == I32 {
-                Expr::int(i64::from(imm64 as u32))
+                Expr::int(i64::from(imm64.cast_unsigned() as u32))
             } else {
                 Expr::int(imm64)
             };
@@ -751,7 +745,8 @@ fn lower_inst(
                 }
             };
 
-            let e = Expr::app(rt_fn(&[ty_key, op_name]), vec![a, imm_expr]);
+            let path = [ty_key, op_name];
+            let e = Expr::app(rt_fn(&path), vec![a, imm_expr]);
             let binds = vec![(value_name(out), e)];
             (seq_on_result(binds), None)
         }
@@ -790,7 +785,7 @@ fn lower_inst(
             let ty = func.dfg.value_type(*arg);
             let imm64 = i64::from(*imm);
             let imm_expr = if ty == I32 {
-                Expr::int(i64::from(imm64 as u32))
+                Expr::int(i64::from(imm64.cast_unsigned() as u32))
             } else {
                 Expr::int(imm64)
             };
@@ -819,7 +814,7 @@ fn lower_inst(
             let addr = if off == 0 {
                 base
             } else {
-                Expr::bin(BinOp::Add, base, Expr::int(off as i64))
+                Expr::bin(BinOp::Add, base, Expr::int(i64::from(off)))
             };
             let st = Expr::ident(st_name);
             let e = Expr::app(
@@ -838,7 +833,7 @@ fn lower_inst(
             let addr = if off == 0 {
                 base
             } else {
-                Expr::bin(BinOp::Add, base, Expr::int(off as i64))
+                Expr::bin(BinOp::Add, base, Expr::int(i64::from(off)))
             };
 
             let new_st = format!("st_{}", inst.as_u32());
@@ -902,16 +897,9 @@ fn lower_inst(
         // Calls: use analyze_call() to get func_ref and args.
         _ if op == Opcode::Call => {
             let call_info = data.analyze_call(&func.dfg.value_lists);
-            let (fref, args) = match call_info {
-                ir::instructions::CallInfo::Direct(fref, args) => (fref, args),
-                _ => {
-                    let binds = unsupported_binds(
-                        inst,
-                        results,
-                        "wasm2nix: unsupported call kind".to_string(),
-                    );
-                    return Ok((Some(Step { binds, force: None }), None));
-                }
+            let ir::instructions::CallInfo::Direct(fref, args) = call_info else {
+                let binds = unsupported_binds(inst, results, "wasm2nix: unsupported call kind");
+                return Ok((Some(Step { binds, force: None }), None));
             };
 
             let callee = func.dfg.ext_funcs[fref].name.clone();
@@ -936,10 +924,10 @@ fn lower_inst(
                 } => {
                     let tmp = format!("call_{}", inst.as_u32());
                     let new_st = format!("st_{}", inst.as_u32());
-                    let callee = match args.first().copied() {
-                        Some(value) => value_expr(func, value, st_name, vmctx),
-                        None => Expr::int(0),
-                    };
+                    let callee_value = args.first().copied().map_or_else(
+                        || Expr::int(0),
+                        |value| value_expr(func, value, st_name, vmctx),
+                    );
                     let wasm_args = args
                         .iter()
                         .copied()
@@ -947,7 +935,7 @@ fn lower_inst(
                         .filter(|v| *v != vmctx)
                         .map(|v| value_expr(func, v, st_name, vmctx))
                         .collect::<Vec<_>>();
-                    let call_e = Expr::app(
+                    let indirect_call = Expr::app(
                         callee_expr,
                         vec![
                             Expr::int(i64::from(table_index)),
@@ -955,14 +943,14 @@ fn lower_inst(
                             Expr::ident("moduleId"),
                             Expr::ident("funcs"),
                             Expr::ident("funcRegistry"),
-                            callee,
+                            callee_value,
                             Expr::list(wasm_args),
                             Expr::ident(st_name),
                         ],
                     );
 
                     let mut binds: Vec<(String, Expr)> = Vec::new();
-                    binds.push((tmp.clone(), call_e));
+                    binds.push((tmp.clone(), indirect_call));
                     binds.push((
                         new_st.clone(),
                         Expr::select(Expr::ident(&tmp), AttrKey::ident("st")),
@@ -970,7 +958,7 @@ fn lower_inst(
 
                     let results_list = Expr::select(Expr::ident(&tmp), AttrKey::ident("results"));
                     for (i, &rv) in results.iter().enumerate() {
-                        let idx = Expr::int(i as i64);
+                        let idx = Expr::int(i64::try_from(i).expect("result index fits in i64"));
                         let v = Expr::app(builtin_elem_at(), vec![results_list.clone(), idx]);
                         binds.push((value_name(rv), v));
                     }
@@ -992,10 +980,10 @@ fn lower_inst(
                         .copied()
                         .map(|v| value_expr(func, v, st_name, vmctx))
                         .collect();
-                    let call_e = Expr::app(callee_expr, arg_exprs);
+                    let stateful_call = Expr::app(callee_expr, arg_exprs);
 
                     let mut binds: Vec<(String, Expr)> = Vec::new();
-                    binds.push((tmp.clone(), call_e));
+                    binds.push((tmp.clone(), stateful_call));
                     binds.push((
                         new_st.clone(),
                         Expr::select(Expr::ident(&tmp), AttrKey::ident("st")),
@@ -1004,7 +992,7 @@ fn lower_inst(
                     // results are in `tmp.results` as a list
                     let results_list = Expr::select(Expr::ident(&tmp), AttrKey::ident("results"));
                     for (i, &rv) in results.iter().enumerate() {
-                        let idx = Expr::int(i as i64);
+                        let idx = Expr::int(i64::try_from(i).expect("result index fits in i64"));
                         let v = Expr::app(builtin_elem_at(), vec![results_list.clone(), idx]);
                         binds.push((value_name(rv), v));
                     }
@@ -1049,7 +1037,10 @@ fn lower_inst(
     })
 }
 
-fn unsupported_binds(inst: Inst, results: &[ir::Value], message: String) -> Vec<(String, Expr)> {
+fn unsupported_binds(
+    inst: Inst, results: &[ir::Value], message: impl Into<String>,
+) -> Vec<(String, Expr)> {
+    let message = message.into();
     let throw_expr = || Expr::app(builtin_throw(), vec![Expr::string(message.clone())]);
     if results.is_empty() {
         vec![(format!("unsupported_{}", inst.as_u32()), throw_expr())]
@@ -1105,7 +1096,11 @@ fn lower_terminator(
             );
             for (i, branch) in table_data.as_slice().iter().copied().enumerate().rev() {
                 expr = Expr::if_then_else(
-                    Expr::bin(BinOp::Eq, index.clone(), Expr::int(i as i64)),
+                    Expr::bin(
+                        BinOp::Eq,
+                        index.clone(),
+                        Expr::int(i64::try_from(i).expect("branch index fits in i64")),
+                    ),
                     lower_block_call(func, branch, st_name, vmctx, free_values),
                     expr,
                 );
@@ -1114,10 +1109,9 @@ fn lower_terminator(
         }
 
         (Opcode::Trap, _) => {
-            let trap_code = match data.trap_code() {
-                Some(code) => code.to_string(),
-                None => "?".into(),
-            };
+            let trap_code = data
+                .trap_code()
+                .map_or_else(|| "?".into(), |code| code.to_string());
             Expr::app(
                 builtin_throw(),
                 vec![Expr::string(format!("wasm2nix: trap {trap_code}"))],
@@ -1221,6 +1215,7 @@ enum CallKind {
     Indirect { table_index: u32, type_id: String },
 }
 
+#[allow(clippy::too_many_lines)]
 fn resolve_callee(
     module: &NixModule, func: &ir::Function, name: ir::ExternalName,
 ) -> Result<(Expr, CallKind)> {
@@ -1332,7 +1327,7 @@ fn resolve_callee(
     }
 }
 
-fn intcc_name(cc: IntCC) -> &'static str {
+const fn intcc_name(cc: IntCC) -> &'static str {
     match cc {
         IntCC::Equal => "eq",
         IntCC::NotEqual => "ne",
@@ -1347,7 +1342,7 @@ fn intcc_name(cc: IntCC) -> &'static str {
     }
 }
 
-fn floatcc_name(cc: FloatCC) -> &'static str {
+const fn floatcc_name(cc: FloatCC) -> &'static str {
     match cc {
         FloatCC::Ordered => "ord",
         FloatCC::Unordered => "uno",

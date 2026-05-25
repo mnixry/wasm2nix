@@ -74,7 +74,7 @@ impl HarnessContext {
         })
     }
 
-    fn write_temp_nix_file(&mut self, kind: &str, nix: &str) -> Result<PathBuf, String> {
+    fn write_temp_nix_file(&self, kind: &str, nix: &str) -> Result<PathBuf, String> {
         use std::io::Write;
 
         let mut file = TempFileBuilder::new()
@@ -88,18 +88,21 @@ impl HarnessContext {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_wast_script(script: &str) -> Result<(), String> {
-    let mut ctx = HarnessContext::new()?;
+    let ctx = HarnessContext::new()?;
     let mut lexer = Lexer::new(script);
     lexer.allow_confusing_unicode(true);
     let buf = ParseBuffer::new_with_lexer(lexer).map_err(|e| e.to_string())?;
-    let wast = parser::parse::<Wast<'_>>(&buf).map_err(|e| e.to_string())?;
+    let directives = parser::parse::<Wast<'_>>(&buf)
+        .map_err(|e| e.to_string())?
+        .directives;
     let mut modules: HashMap<String, HarnessModule> = HashMap::new();
     let mut aliases: HashMap<String, String> = HashMap::new();
     let mut current_module: Option<String> = None;
     let mut next_anon_module = 0usize;
 
-    for (directive_index, directive) in wast.directives.into_iter().enumerate() {
+    for (directive_index, directive) in directives.into_iter().enumerate() {
         match directive {
             WastDirective::Module(mut module) => {
                 let module_name = module.name().map(|id| id.name().to_string());
@@ -108,7 +111,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                 let imported_tables = translated.info.imported_tables.clone();
                 let imported_globals = translated.info.imported_globals.clone();
                 let imported_memories = translated.info.imported_memories.clone();
-                validate_imports_for_linking(&mut ctx, &translated, &modules, &aliases)
+                validate_imports_for_linking(&ctx, &translated, &modules, &aliases)
                     .map_err(|e| format!("directive {directive_index}: {e}"))?;
                 let func_exports = func_exports(&translated);
                 let table_exports = table_exports(&translated);
@@ -117,7 +120,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                 let table_export_limits = table_export_limits(&translated);
                 let global_export_types = global_export_types(&translated);
                 let memory_export_limits = memory_export_limits(&translated);
-                if active_initializer_traps(&mut ctx, &translated, &modules, &aliases)? {
+                if active_initializer_traps(&ctx, &translated, &modules, &aliases)? {
                     return Err(format!(
                         "directive {directive_index}: module instantiation trapped during active segment initialization"
                     ));
@@ -125,13 +128,13 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                 let nix = wasm2nix::lowerings::lower_module(&translated)
                     .map_err(|e| format!("directive {directive_index}: {e}"))?
                     .render();
-                let path = write_generated_module(&mut ctx, &nix)?;
+                let path = write_generated_module(&ctx, &nix)?;
                 let key = module_name.unwrap_or_else(|| {
                     let key = format!("__anon{next_anon_module}");
                     next_anon_module += 1;
                     key
                 });
-                let state = eval_instantiate(&mut ctx, &path, &key, &modules, &aliases)?;
+                let state = eval_instantiate(&ctx, &path, &key, &modules, &aliases)?;
                 modules.insert(
                     key.clone(),
                     HarnessModule {
@@ -169,7 +172,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                             .state
                             .clone();
                         let actual = eval_invoke(
-                            &mut ctx,
+                            &ctx,
                             &key,
                             &modules,
                             &aliases,
@@ -200,7 +203,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                             .ok_or_else(|| format!("unknown module {key}"))?
                             .state
                             .clone();
-                        eval_get(&mut ctx, &key, &modules, &aliases, global, state.as_deref())
+                        eval_get(&ctx, &key, &modules, &aliases, global, state.as_deref())
                             .map_err(|e| format!("directive {directive_index}: {e}"))?
                     }
                     WastExecute::Wat(_) => {
@@ -226,7 +229,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                         .get(&key)
                         .ok_or_else(|| format!("unknown module {key}"))?;
                     if eval_invoke(
-                        &mut ctx,
+                        &ctx,
                         &key,
                         &modules,
                         &aliases,
@@ -245,7 +248,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                         .get(&key)
                         .ok_or_else(|| format!("unknown module {key}"))?;
                     if eval_get(
-                        &mut ctx,
+                        &ctx,
                         &key,
                         &modules,
                         &aliases,
@@ -257,11 +260,11 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                         return Err(format!("assert_trap get {global} did not trap"));
                     }
                 }
-                WastExecute::Wat(mut wat) => {
+                WastExecute::Wat(mut inline_module) => {
                     apply_trapping_module_side_effects(
-                        &mut ctx,
+                        &ctx,
                         directive_index,
-                        &mut wat,
+                        &mut inline_module,
                         &mut modules,
                         &aliases,
                     )?;
@@ -302,16 +305,15 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                     .map_err(|e| format!("directive {directive_index}: {e}"))?;
                 let translated = NixModule::translate(&wasm)
                     .map_err(|e| format!("directive {directive_index}: {e}"))?;
-                if validate_imports_for_linking(&mut ctx, &translated, &modules, &aliases).is_err()
-                {
+                if validate_imports_for_linking(&ctx, &translated, &modules, &aliases).is_err() {
                     continue;
                 }
                 let nix = wasm2nix::lowerings::lower_module(&translated)
                     .map_err(|e| format!("directive {directive_index}: {e}"))?
                     .render();
-                let path = write_generated_module(&mut ctx, &nix)?;
+                let path = write_generated_module(&ctx, &nix)?;
                 let transient_key = format!("__unlinkable{directive_index}");
-                if eval_instantiate(&mut ctx, &path, &transient_key, &modules, &aliases).is_ok() {
+                if eval_instantiate(&ctx, &path, &transient_key, &modules, &aliases).is_ok() {
                     return Err(format!(
                         "directive {directive_index}: assert_unlinkable module instantiated successfully"
                     ));
@@ -323,7 +325,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                     .get(&key)
                     .ok_or_else(|| format!("unknown module {key}"))?;
                 if eval_invoke(
-                    &mut ctx,
+                    &ctx,
                     &key,
                     &modules,
                     &aliases,
@@ -347,7 +349,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
                     .state
                     .clone();
                 let actual = eval_invoke(
-                    &mut ctx,
+                    &ctx,
                     &key,
                     &modules,
                     &aliases,
@@ -379,7 +381,7 @@ fn run_wast_script(script: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn harness_wasm_features() -> wasmparser::WasmFeatures {
+const fn harness_wasm_features() -> wasmparser::WasmFeatures {
     wasmparser::WasmFeatures::WASM1
         .union(wasmparser::WasmFeatures::MUTABLE_GLOBAL)
         .union(wasmparser::WasmFeatures::SIGN_EXTENSION)
@@ -433,21 +435,24 @@ struct TableImportType {
 fn select_module_key(
     module: Option<wast::token::Id<'_>>, current: Option<&str>, aliases: &HashMap<String, String>,
 ) -> Result<String, String> {
-    if let Some(module) = module {
-        let name = module.name();
-        Ok(aliases
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| name.to_string()))
-    } else {
-        current
-            .map(str::to_string)
-            .ok_or_else(|| "module access before module".to_string())
-    }
+    module.map_or_else(
+        || {
+            current
+                .map(str::to_string)
+                .ok_or_else(|| "module access before module".to_string())
+        },
+        |module| {
+            let name = module.name();
+            Ok(aliases
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.to_string()))
+        },
+    )
 }
 
 fn validate_imports_for_linking(
-    ctx: &mut HarnessContext, module: &NixModule, modules: &HashMap<String, HarnessModule>,
+    ctx: &HarnessContext, module: &NixModule, modules: &HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>,
 ) -> Result<(), String> {
     for (idx, (module_name, field_name)) in module.info.imported_funcs.iter().enumerate() {
@@ -540,7 +545,7 @@ fn validate_imports_for_linking(
 }
 
 fn active_initializer_traps(
-    ctx: &mut HarnessContext, module: &NixModule, modules: &HashMap<String, HarnessModule>,
+    ctx: &HarnessContext, module: &NixModule, modules: &HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>,
 ) -> Result<bool, String> {
     let mut resolver = HarnessActiveInitializerResolver {
@@ -553,7 +558,7 @@ fn active_initializer_traps(
 }
 
 struct HarnessActiveInitializerResolver<'a> {
-    ctx: &'a mut HarnessContext,
+    ctx: &'a HarnessContext,
     modules: &'a HashMap<String, HarnessModule>,
     aliases: &'a HashMap<String, String>,
 }
@@ -617,7 +622,7 @@ fn first_json_u64(value: &JsonValue) -> Result<u64, String> {
 }
 
 fn memory_limits_for_index(
-    ctx: &mut HarnessContext, module: &NixModule, modules: &HashMap<String, HarnessModule>,
+    ctx: &HarnessContext, module: &NixModule, modules: &HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>, index: cranelift_wasm::MemoryIndex,
 ) -> Result<Limits, String> {
     if let Some((module_name, field_name)) = module.info.imported_memories.get(index.index()) {
@@ -637,7 +642,7 @@ fn memory_limits_for_index(
 }
 
 fn table_limits_for_index(
-    ctx: &mut HarnessContext, module: &NixModule, modules: &HashMap<String, HarnessModule>,
+    ctx: &HarnessContext, module: &NixModule, modules: &HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>, index: cranelift_wasm::TableIndex,
 ) -> Result<Limits, String> {
     if let Some((module_name, field_name)) = module.info.imported_tables.get(index.index()) {
@@ -664,16 +669,15 @@ fn limits_match(expected: Limits, actual: Limits) -> bool {
     if actual.min < expected.min {
         return false;
     }
-    match expected.max {
-        Some(expected_max) => actual
+    expected.max.is_none_or(|expected_max| {
+        actual
             .max
-            .is_some_and(|actual_max| actual_max <= expected_max),
-        None => true,
-    }
+            .is_some_and(|actual_max| actual_max <= expected_max)
+    })
 }
 
 fn lookup_import(
-    ctx: &mut HarnessContext, modules: &HashMap<String, HarnessModule>,
+    ctx: &HarnessContext, modules: &HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>, module_name: &str, field_name: &str,
 ) -> Result<ImportType, String> {
     if module_name == "spectest" {
@@ -768,7 +772,7 @@ fn spectest_import(field_name: &str) -> Option<ImportType> {
 }
 
 fn dynamic_memory_limits(
-    ctx: &mut HarnessContext, state: &str, _index: u32, static_limits: Limits,
+    ctx: &HarnessContext, state: &str, _index: u32, static_limits: Limits,
 ) -> Result<Limits, String> {
     let expr = Expr::app(
         harness_attr("dynamicMemoryLimits"),
@@ -788,7 +792,7 @@ fn dynamic_memory_limits(
 }
 
 fn dynamic_table_limits(
-    ctx: &mut HarnessContext, state: &str, index: u32, static_limits: Limits,
+    ctx: &HarnessContext, state: &str, index: u32, static_limits: Limits,
 ) -> Result<Limits, String> {
     let expr = Expr::app(
         harness_attr("dynamicTableLimits"),
@@ -824,7 +828,7 @@ fn limits_from_json(value: JsonValue, static_limits: Limits) -> Result<Limits, S
     Ok(Limits { min, max })
 }
 
-fn write_generated_module(ctx: &mut HarnessContext, nix: &str) -> Result<PathBuf, String> {
+fn write_generated_module(ctx: &HarnessContext, nix: &str) -> Result<PathBuf, String> {
     ctx.write_temp_nix_file("wast", nix)
 }
 
@@ -974,7 +978,7 @@ struct InvokeResult {
 }
 
 fn eval_instantiate(
-    ctx: &mut HarnessContext, module: &Path, module_key: &str,
+    ctx: &HarnessContext, module: &Path, module_key: &str,
     modules: &HashMap<String, HarnessModule>, aliases: &HashMap<String, String>,
 ) -> Result<String, String> {
     let world = EvalWorld::new(modules, aliases);
@@ -983,7 +987,7 @@ fn eval_instantiate(
         eval_binds(
             world,
             vec![("m_new".into(), import_module_expr(module, imports))],
-        )?,
+        ),
         Expr::let_in(
             vec![(
                 "i".into(),
@@ -1000,7 +1004,7 @@ fn eval_instantiate(
 }
 
 fn eval_initial_state(
-    ctx: &mut HarnessContext, module: &Path, module_key: &str,
+    ctx: &HarnessContext, module: &Path, module_key: &str,
     modules: &HashMap<String, HarnessModule>, aliases: &HashMap<String, String>,
 ) -> Result<String, String> {
     let world = EvalWorld::new(modules, aliases);
@@ -1009,7 +1013,7 @@ fn eval_initial_state(
         eval_binds(
             world,
             vec![("m_new".into(), import_module_expr(module, imports))],
-        )?,
+        ),
         select_string_path(Expr::ident("m_new"), &["__wasm2nix", "st0"]),
     );
     let value = eval_nix_json(ctx, &expr)?;
@@ -1017,7 +1021,7 @@ fn eval_initial_state(
 }
 
 fn eval_invoke(
-    ctx: &mut HarnessContext, module_key: &str, modules: &HashMap<String, HarnessModule>,
+    ctx: &HarnessContext, module_key: &str, modules: &HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>, name: &str, args: &[WastArg<'_>], state: Option<&str>,
 ) -> Result<InvokeResult, String> {
     let args = args
@@ -1027,9 +1031,10 @@ fn eval_invoke(
         .into_iter()
         .chain(std::iter::once(Expr::ident("st_in")))
         .collect::<Vec<_>>();
-    let state_expr = state
-        .map(state_expr)
-        .unwrap_or_else(|| Expr::select(Expr::ident("i"), AttrKey::ident("st")));
+    let state_expr = state.map_or_else(
+        || Expr::select(Expr::ident("i"), AttrKey::ident("st")),
+        state_expr,
+    );
     let world = EvalWorld::new(modules, aliases);
     let module_var = world
         .module_vars
@@ -1057,7 +1062,7 @@ fn eval_invoke(
                 ("st_in".into(), state_expr),
                 ("call".into(), Expr::app(export, args)),
             ],
-        )?,
+        ),
         Expr::attrset(
             false,
             vec![
@@ -1079,12 +1084,13 @@ fn eval_invoke(
 }
 
 fn eval_get(
-    ctx: &mut HarnessContext, module_key: &str, modules: &HashMap<String, HarnessModule>,
+    ctx: &HarnessContext, module_key: &str, modules: &HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>, name: &str, state: Option<&str>,
 ) -> Result<InvokeResult, String> {
-    let state_expr = state
-        .map(state_expr)
-        .unwrap_or_else(|| Expr::select(Expr::ident("i"), AttrKey::ident("st")));
+    let state_expr = state.map_or_else(
+        || Expr::select(Expr::ident("i"), AttrKey::ident("st")),
+        state_expr,
+    );
     let world = EvalWorld::new(modules, aliases);
     let module_var = world
         .module_vars
@@ -1118,7 +1124,7 @@ fn eval_get(
                     ),
                 ),
             ],
-        )?,
+        ),
         Expr::attrset(
             false,
             vec![
@@ -1136,7 +1142,7 @@ fn eval_get(
     Ok(InvokeResult { results, state })
 }
 
-fn eval_nix_json(ctx: &mut HarnessContext, expr: &Expr) -> Result<JsonValue, String> {
+fn eval_nix_json(ctx: &HarnessContext, expr: &Expr) -> Result<JsonValue, String> {
     let expr = Expr::let_in(
         vec![("harness".into(), harness_import_expr()?)],
         Expr::app(harness_attr("toJSON"), vec![expr.clone()]),
@@ -1155,8 +1161,8 @@ fn eval_nix_json(ctx: &mut HarnessContext, expr: &Expr) -> Result<JsonValue, Str
     Ok(value)
 }
 
-fn rt_import_expr() -> Result<Expr, String> {
-    Ok(import_nix_file_expr(wasm2nix::runtime_nix_path()))
+fn rt_import_expr() -> Expr {
+    import_nix_file_expr(wasm2nix::runtime_nix_path())
 }
 
 fn harness_import_expr() -> Result<Expr, String> {
@@ -1166,12 +1172,12 @@ fn harness_import_expr() -> Result<Expr, String> {
     Ok(import_nix_file_expr(&path))
 }
 
-fn eval_binds(world: EvalWorld, extra: Vec<(String, Expr)>) -> Result<Vec<(String, Expr)>, String> {
+fn eval_binds(world: EvalWorld, extra: Vec<(String, Expr)>) -> Vec<(String, Expr)> {
     let mut binds = Vec::with_capacity(world.binds.len() + extra.len() + 1);
-    binds.push(("rt".into(), rt_import_expr()?));
+    binds.push(("rt".into(), rt_import_expr()));
     binds.extend(world.binds);
     binds.extend(extra);
-    Ok(binds)
+    binds
 }
 
 fn import_nix_file_expr(path: &Path) -> Expr {
@@ -1195,7 +1201,7 @@ fn import_module_expr(path: &Path, imports: Expr) -> Expr {
     )
 }
 
-fn empty_attrset() -> Expr {
+const fn empty_attrset() -> Expr {
     Expr::attrset(false, vec![])
 }
 
@@ -1256,15 +1262,21 @@ impl EvalWorld {
             let state_var = format!("m{i}_state");
             let imports = imports_expr(key, aliases, &module_vars);
             binds.push((raw_var.clone(), import_module_expr(&module.path, imports)));
-            let module_state_expr = module.state.as_deref().map(state_expr).unwrap_or_else(|| {
-                Expr::select(
-                    Expr::app(
-                        Expr::select(Expr::ident(raw_var.as_str()), AttrKey::ident("instantiate")),
-                        vec![empty_attrset()],
-                    ),
-                    AttrKey::ident("st"),
-                )
-            });
+            let module_state_expr = module.state.as_deref().map_or_else(
+                || {
+                    Expr::select(
+                        Expr::app(
+                            Expr::select(
+                                Expr::ident(raw_var.as_str()),
+                                AttrKey::ident("instantiate"),
+                            ),
+                            vec![empty_attrset()],
+                        ),
+                        AttrKey::ident("st"),
+                    )
+                },
+                state_expr,
+            );
             binds.push((state_var.clone(), module_state_expr));
             binds.push((
                 import_var.clone(),
@@ -1331,7 +1343,7 @@ fn imports_expr(
 }
 
 fn apply_trapping_module_side_effects(
-    ctx: &mut HarnessContext, directive_index: usize, wat: &mut wast::Wat<'_>,
+    ctx: &HarnessContext, directive_index: usize, wat: &mut wast::Wat<'_>,
     modules: &mut HashMap<String, HarnessModule>, aliases: &HashMap<String, String>,
 ) -> Result<(), String> {
     let wasm = wat
@@ -1526,9 +1538,8 @@ fn sync_global_imports_from_targets(
         let Some(source_module) = modules.get(&source_key) else {
             continue;
         };
-        let mut source_state = match source_module.state.clone() {
-            Some(state) => state,
-            None => continue,
+        let Some(mut source_state) = source_module.state.clone() else {
+            continue;
         };
         let imports = source_module.imported_globals.clone();
 
@@ -1766,10 +1777,10 @@ fn push_hex_byte(out: &mut String, byte: u8) {
 
 fn wast_arg_to_nix(arg: &WastArg<'_>) -> Result<Expr, String> {
     match arg {
-        WastArg::Core(WastArgCore::I32(value)) => Ok(Expr::int(i64::from(*value as u32))),
+        WastArg::Core(WastArgCore::I32(value)) => Ok(Expr::int(i64::from(value.cast_unsigned()))),
         WastArg::Core(WastArgCore::I64(value)) => Ok(Expr::int(*value)),
         WastArg::Core(WastArgCore::F32(value)) => Ok(Expr::int(i64::from(value.bits))),
-        WastArg::Core(WastArgCore::F64(value)) => Ok(Expr::int(value.bits as i64)),
+        WastArg::Core(WastArgCore::F64(value)) => Ok(Expr::int(value.bits.cast_signed())),
         WastArg::Core(WastArgCore::RefExtern(value)) => Ok(Expr::attrset(
             false,
             vec![(AttrKey::ident("extern"), Expr::int(i64::from(*value)))],
@@ -1794,16 +1805,19 @@ fn expected_results_json(results: &[WastRet<'_>]) -> Result<String, String> {
 
 fn expected_result_label(ret: &WastRet<'_>) -> Result<String, String> {
     match ret {
-        WastRet::Core(WastRetCore::I32(value)) => Ok((*value as u32).to_string()),
+        WastRet::Core(WastRetCore::I32(value)) => Ok(value.cast_unsigned().to_string()),
         WastRet::Core(WastRetCore::I64(value)) => Ok(value.to_string()),
         WastRet::Core(WastRetCore::F32(NanPattern::Value(value))) => Ok(value.bits.to_string()),
         WastRet::Core(WastRetCore::F64(NanPattern::Value(value))) => {
-            Ok((value.bits as i64).to_string())
+            Ok(value.bits.cast_signed().to_string())
         }
-        WastRet::Core(WastRetCore::F32(NanPattern::CanonicalNan))
-        | WastRet::Core(WastRetCore::F64(NanPattern::CanonicalNan)) => Ok("nan:canonical".into()),
-        WastRet::Core(WastRetCore::F32(NanPattern::ArithmeticNan))
-        | WastRet::Core(WastRetCore::F64(NanPattern::ArithmeticNan)) => Ok("nan:arithmetic".into()),
+        WastRet::Core(
+            WastRetCore::F32(NanPattern::CanonicalNan) | WastRetCore::F64(NanPattern::CanonicalNan),
+        ) => Ok("nan:canonical".into()),
+        WastRet::Core(
+            WastRetCore::F32(NanPattern::ArithmeticNan)
+            | WastRetCore::F64(NanPattern::ArithmeticNan),
+        ) => Ok("nan:arithmetic".into()),
         WastRet::Core(WastRetCore::RefExtern(Some(value))) => Ok(format!("{{\"extern\":{value}}}")),
         WastRet::Core(WastRetCore::RefNull(_)) => Ok("0".to_string()),
         _ => Err("unsupported assert_return result for this harness slice".into()),
@@ -1812,24 +1826,22 @@ fn expected_result_label(ret: &WastRet<'_>) -> Result<String, String> {
 
 fn expected_result_value(ret: &WastRet<'_>) -> Result<JsonValue, String> {
     match ret {
-        WastRet::Core(WastRetCore::I32(value)) => Ok(JsonValue::from(*value as u32)),
+        WastRet::Core(WastRetCore::I32(value)) => Ok(JsonValue::from(value.cast_unsigned())),
         WastRet::Core(WastRetCore::I64(value)) => Ok(JsonValue::from(*value)),
         WastRet::Core(WastRetCore::F32(NanPattern::Value(value))) => {
             Ok(JsonValue::from(value.bits))
         }
         WastRet::Core(WastRetCore::F64(NanPattern::Value(value))) => {
-            Ok(JsonValue::from(value.bits as i64))
+            Ok(JsonValue::from(value.bits.cast_signed()))
         }
         WastRet::Core(WastRetCore::RefExtern(Some(value))) => {
             Ok(serde_json::json!({ "extern": value }))
         }
         WastRet::Core(WastRetCore::RefNull(_)) => Ok(JsonValue::from(0)),
-        WastRet::Core(WastRetCore::F32(NanPattern::CanonicalNan))
-        | WastRet::Core(WastRetCore::F64(NanPattern::CanonicalNan))
-        | WastRet::Core(WastRetCore::F32(NanPattern::ArithmeticNan))
-        | WastRet::Core(WastRetCore::F64(NanPattern::ArithmeticNan)) => {
-            Err("NaN patterns must be matched by predicate".into())
-        }
+        WastRet::Core(
+            WastRetCore::F32(NanPattern::CanonicalNan | NanPattern::ArithmeticNan)
+            | WastRetCore::F64(NanPattern::CanonicalNan | NanPattern::ArithmeticNan),
+        ) => Err("NaN patterns must be matched by predicate".into()),
         _ => Err("unsupported assert_return result for this harness slice".into()),
     }
 }
@@ -1875,29 +1887,31 @@ fn json_number_to_u64(value: &JsonValue) -> Result<u64, String> {
     let JsonValue::Number(number) = value else {
         return Err("expected numeric result".into());
     };
-    if let Some(value) = number.as_u64() {
-        Ok(value)
-    } else if let Some(value) = number.as_i64() {
-        Ok(value as u64)
-    } else {
-        Err("expected integer result".into())
-    }
+    number.as_u64().map_or_else(
+        || {
+            number
+                .as_i64()
+                .map(i64::cast_unsigned)
+                .ok_or_else(|| "expected integer result".into())
+        },
+        Ok,
+    )
 }
 
-fn f32_canonical_nan(bits: u32) -> bool {
+const fn f32_canonical_nan(bits: u32) -> bool {
     (bits & 0x7F80_0000) == 0x7F80_0000 && (bits & 0x007F_FFFF) == 0x0040_0000
 }
 
-fn f32_arithmetic_nan(bits: u32) -> bool {
+const fn f32_arithmetic_nan(bits: u32) -> bool {
     (bits & 0x7F80_0000) == 0x7F80_0000 && (bits & 0x0040_0000) != 0
 }
 
-fn f64_canonical_nan(bits: u64) -> bool {
+const fn f64_canonical_nan(bits: u64) -> bool {
     (bits & 0x7FF0_0000_0000_0000) == 0x7FF0_0000_0000_0000
         && (bits & 0x000F_FFFF_FFFF_FFFF) == 0x0008_0000_0000_0000
 }
 
-fn f64_arithmetic_nan(bits: u64) -> bool {
+const fn f64_arithmetic_nan(bits: u64) -> bool {
     (bits & 0x7FF0_0000_0000_0000) == 0x7FF0_0000_0000_0000 && (bits & 0x0008_0000_0000_0000) != 0
 }
 

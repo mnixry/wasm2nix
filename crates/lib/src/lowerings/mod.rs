@@ -16,6 +16,12 @@ use crate::{
     translator::NixModule,
 };
 
+/// Lowers the translated module metadata and functions to a Nix expression.
+///
+/// # Errors
+///
+/// Returns an error when a Wasm construct is malformed or not yet supported by
+/// the lowering layer.
 pub fn lower_module(module: &NixModule) -> Result<Expr> {
     // Top-level:
     // rt: imports:
@@ -118,18 +124,19 @@ fn lower_func_registry() -> Expr {
 }
 
 fn lower_start_state(module: &NixModule) -> Expr {
-    if let Some(start) = module.info.start_func {
-        let start_func = Expr::select(
-            Expr::ident("funcs"),
-            AttrKey::ident(format!("f{}", start.as_u32())),
-        );
-        Expr::select(
-            Expr::app(start_func, vec![Expr::ident("st0")]),
-            AttrKey::ident("st"),
-        )
-    } else {
-        Expr::ident("st0")
-    }
+    module.info.start_func.map_or_else(
+        || Expr::ident("st0"),
+        |start| {
+            let start_func = Expr::select(
+                Expr::ident("funcs"),
+                AttrKey::ident(format!("f{}", start.as_u32())),
+            );
+            Expr::select(
+                Expr::app(start_func, vec![Expr::ident("st0")]),
+                AttrKey::ident("st"),
+            )
+        },
+    )
 }
 
 fn lower_funcs_rec_attrset(module: &NixModule) -> Result<Expr> {
@@ -143,7 +150,7 @@ fn lower_funcs_rec_attrset(module: &NixModule) -> Result<Expr> {
         binds.push((AttrKey::ident(format!("f{idx}")), imported));
     }
 
-    for (defined_idx, func) in module.info.function_bodies.iter() {
+    for (defined_idx, func) in &module.info.function_bodies {
         let func_index = module.num_func_imports() as u32 + defined_idx.as_u32();
         let name = format!("f{func_index}");
         let lowered = inst::lower_function(module, func_index, func)?;
@@ -197,7 +204,7 @@ enum ExportKeyMode {
 fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> Result<Expr> {
     let mut binds: Vec<(AttrKey, Expr)> = Vec::new();
 
-    for (func_index, func_decl) in module.info.functions.iter() {
+    for (func_index, func_decl) in &module.info.functions {
         if func_decl.export_names.is_empty() {
             continue;
         }
@@ -213,7 +220,7 @@ fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> Result<Expr
         }
     }
 
-    for (memory_index, memory_decl) in module.info.memories.iter() {
+    for (memory_index, memory_decl) in &module.info.memories {
         for export_name in &memory_decl.export_names {
             let Some(key) = export_attr_key(export_name, mode) else {
                 continue;
@@ -225,7 +232,7 @@ fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> Result<Expr
         }
     }
 
-    for (table_index, table_decl) in module.info.tables.iter() {
+    for (table_index, table_decl) in &module.info.tables {
         for export_name in &table_decl.export_names {
             let Some(key) = export_attr_key(export_name, mode) else {
                 continue;
@@ -237,7 +244,7 @@ fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> Result<Expr
         }
     }
 
-    for (global_index, global_decl) in module.info.globals.iter() {
+    for (global_index, global_decl) in &module.info.globals {
         for export_name in &global_decl.export_names {
             let Some(key) = export_attr_key(export_name, mode) else {
                 continue;
@@ -305,9 +312,11 @@ fn lower_initial_memory(module: &NixModule) -> Expr {
         );
     };
 
-    let declared_min = Expr::int(memory.entity.minimum as i64);
+    let declared_min =
+        Expr::int(i64::try_from(memory.entity.minimum).expect("memory minimum fits in i64"));
     let declared_max_pages = memory.entity.maximum.unwrap_or(65536);
-    let declared_max = Expr::int(declared_max_pages as i64);
+    let declared_max =
+        Expr::int(i64::try_from(declared_max_pages).expect("memory maximum fits in i64"));
     let overlay_pages = lower_initial_memory_pages(module);
 
     if let Some((module_name, field_name)) = module.info.imported_memories.get(memory_index.index())
@@ -430,7 +439,7 @@ fn lower_initial_globals(module: &NixModule) -> Result<Expr> {
     let mut binds = Vec::new();
     let mut global_attrs = Vec::new();
 
-    for (idx, global) in module.info.globals.iter() {
+    for (idx, global) in &module.info.globals {
         let bind_name = global_bind_name(idx);
         let value = if let Some((module_name, field_name)) =
             module.info.imported_globals.get(idx.index())
@@ -463,7 +472,7 @@ fn lower_initial_globals(module: &NixModule) -> Result<Expr> {
 fn lower_initial_tables(module: &NixModule) -> Expr {
     let mut table_binds: Vec<(AttrKey, Expr)> = Vec::new();
 
-    for (table_index, table_decl) in module.info.tables.iter() {
+    for (table_index, table_decl) in &module.info.tables {
         let mut elems: BTreeMap<u32, Expr> = BTreeMap::new();
         for init in &module.info.table_initializers {
             if init.table_index != table_index || init.base.is_some() {
@@ -717,10 +726,10 @@ fn lower_const_expr(
 
     for op in expr.ops().iter().copied() {
         match op {
-            ConstOp::I32Const(value) => stack.push(Expr::int(i64::from(value as u32))),
+            ConstOp::I32Const(value) => stack.push(Expr::int(i64::from(value.cast_unsigned()))),
             ConstOp::I64Const(value) => stack.push(Expr::int(value)),
             ConstOp::F32Const(bits) => stack.push(Expr::int(i64::from(bits))),
-            ConstOp::F64Const(bits) => stack.push(Expr::int(bits as i64)),
+            ConstOp::F64Const(bits) => stack.push(Expr::int(bits.cast_signed())),
             ConstOp::GlobalGet(idx) => stack.push(Expr::ident(global_bind_name(idx))),
             ConstOp::RefNull if matches!(ty, WasmValType::Ref(_)) => stack.push(Expr::int(0)),
             ConstOp::RefFunc(func_index) if matches!(ty, WasmValType::Ref(_)) => {

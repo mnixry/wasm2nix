@@ -16,7 +16,7 @@ use super::{
 };
 use crate::nix::Expr;
 
-pub(crate) fn int_type_key(ty: ir::Type, context: &'static str) -> Result<&'static str> {
+pub fn int_type_key(ty: ir::Type, context: &'static str) -> Result<&'static str> {
     if ty == I32 {
         Ok("i32")
     } else if ty == I64 {
@@ -30,7 +30,7 @@ pub(crate) fn int_type_key(ty: ir::Type, context: &'static str) -> Result<&'stat
     }
 }
 
-pub(crate) fn float_type_key(ty: ir::Type, context: &'static str) -> Result<&'static str> {
+pub fn float_type_key(ty: ir::Type, context: &'static str) -> Result<&'static str> {
     if ty == F32 {
         Ok("f32")
     } else if ty == F64 {
@@ -44,7 +44,7 @@ pub(crate) fn float_type_key(ty: ir::Type, context: &'static str) -> Result<&'st
     }
 }
 
-pub(crate) fn numeric_type_key(ty: ir::Type, context: &'static str) -> Result<&'static str> {
+pub fn numeric_type_key(ty: ir::Type, context: &'static str) -> Result<&'static str> {
     if ty == I32 {
         Ok("i32")
     } else if ty == I64 {
@@ -62,7 +62,7 @@ pub(crate) fn numeric_type_key(ty: ir::Type, context: &'static str) -> Result<&'
     }
 }
 
-pub(crate) fn load_fn_name(op: Opcode, ty: ir::Type) -> Result<&'static str> {
+pub fn load_fn_name(op: Opcode, ty: ir::Type) -> Result<&'static str> {
     match op {
         Opcode::Load => match ty {
             I32 => Ok("load_i32"),
@@ -92,7 +92,7 @@ pub(crate) fn load_fn_name(op: Opcode, ty: ir::Type) -> Result<&'static str> {
     }
 }
 
-pub(crate) fn store_fn_name(op: Opcode, ty: ir::Type) -> Result<&'static str> {
+pub fn store_fn_name(op: Opcode, ty: ir::Type) -> Result<&'static str> {
     match op {
         Opcode::Store => match ty {
             I32 => Ok("store_i32"),
@@ -116,32 +116,30 @@ pub(crate) fn store_fn_name(op: Opcode, ty: ir::Type) -> Result<&'static str> {
     }
 }
 
-pub(crate) fn global_get_name(ty: WasmValType) -> Result<&'static str> {
+pub fn global_get_name(ty: WasmValType) -> Result<&'static str> {
     match ty {
-        WasmValType::I32 => Ok("get_i32"),
+        WasmValType::I32 | WasmValType::Ref(_) => Ok("get_i32"),
         WasmValType::I64 => Ok("get_i64"),
         WasmValType::F32 => Ok("get_f32"),
         WasmValType::F64 => Ok("get_f64"),
-        WasmValType::Ref(_) => Ok("get_i32"),
         WasmValType::V128 => UnsupportedGlobalTypeSnafu { ty: ty.to_string() }.fail(),
     }
 }
 
-pub(crate) fn global_set_name(ty: WasmValType) -> Result<&'static str> {
+pub fn global_set_name(ty: WasmValType) -> Result<&'static str> {
     match ty {
-        WasmValType::I32 => Ok("set_i32"),
+        WasmValType::I32 | WasmValType::Ref(_) => Ok("set_i32"),
         WasmValType::I64 => Ok("set_i64"),
         WasmValType::F32 => Ok("set_f32"),
         WasmValType::F64 => Ok("set_f64"),
-        WasmValType::Ref(_) => Ok("set_i32"),
         WasmValType::V128 => UnsupportedGlobalTypeSnafu { ty: ty.to_string() }.fail(),
     }
 }
 
-pub(crate) fn global_get_expr(ty: WasmValType) -> Result<Expr> {
+pub fn global_get_expr(ty: WasmValType) -> Result<Expr> {
     Ok(rt_fn(&["global", global_get_name(ty)?]))
 }
 
-pub(crate) fn global_set_expr(ty: WasmValType) -> Result<Expr> {
+pub fn global_set_expr(ty: WasmValType) -> Result<Expr> {
     Ok(rt_fn(&["global", global_set_name(ty)?]))
 }

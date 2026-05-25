@@ -1,6 +1,7 @@
 use std::{
     env,
     error::Error,
+    fmt::Write as _,
     fs,
     path::{Path, PathBuf},
 };
@@ -35,11 +36,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             .ok_or_else(|| format!("WAST file name must be UTF-8: {}", path.display()))?;
         let test_name = format!("core_{}", sanitize_ident(stem));
         generated.push_str("#[test]\n");
-        generated.push_str(&format!("fn {test_name}() {{\n"));
-        generated.push_str(&format!(
-            "    run_wast_file_path({:?});\n",
+        writeln!(&mut generated, "fn {test_name}() {{")?;
+        writeln!(
+            &mut generated,
+            "    run_wast_file_path({:?});",
             path.to_string_lossy()
-        ));
+        )?;
         generated.push_str("}\n\n");
     }
 

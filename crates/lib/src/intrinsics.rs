@@ -72,6 +72,7 @@ impl Intrinsic {
     pub const CALL_INDIRECT_STRIDE: u32 = 10000;
     pub const REF_FUNC_BASE: u32 = 1_000_000_000;
 
+    #[must_use]
     pub fn call_indirect(table_index: cranelift_wasm::TableIndex, type_index: TypeIndex) -> Self {
         Self::CallIndirect {
             table_index: table_index.as_u32(),
@@ -79,7 +80,8 @@ impl Intrinsic {
         }
     }
 
-    pub fn ref_func(func_index: FuncIndex) -> Self {
+    #[must_use]
+    pub const fn ref_func(func_index: FuncIndex) -> Self {
         Self::RefFunc { func_index }
     }
 }

@@ -33,22 +33,22 @@ pub enum BinOp {
 }
 
 impl BinOp {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
-            BinOp::Add => "+",
-            BinOp::Sub => "-",
-            BinOp::Mul => "*",
-            BinOp::Div => "/",
-            BinOp::Mod => "%",
-            BinOp::Eq => "==",
-            BinOp::Neq => "!=",
-            BinOp::Lt => "<",
-            BinOp::Le => "<=",
-            BinOp::Gt => ">",
-            BinOp::Ge => ">=",
-            BinOp::And => "&&",
-            BinOp::Or => "||",
-            BinOp::Update => "//",
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Mod => "%",
+            Self::Eq => "==",
+            Self::Neq => "!=",
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Gt => ">",
+            Self::Ge => ">=",
+            Self::And => "&&",
+            Self::Or => "||",
+            Self::Update => "//",
         }
     }
 }
@@ -60,10 +60,10 @@ pub enum UnOp {
 }
 
 impl UnOp {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
-            UnOp::Not => "!",
-            UnOp::Neg => "-",
+            Self::Not => "!",
+            Self::Neg => "-",
         }
     }
 }
@@ -78,42 +78,42 @@ pub enum Expr {
     Str(String),
     Null,
 
-    List(Vec<Expr>),
+    List(Vec<Self>),
     AttrSet {
         rec: bool,
-        binds: Vec<(AttrKey, Expr)>,
+        binds: Vec<(AttrKey, Self)>,
     },
 
     Select {
-        expr: Box<Expr>,
+        expr: Box<Self>,
         attr: AttrKey,
     },
     Lambda {
         param: String,
-        body: Box<Expr>,
+        body: Box<Self>,
     },
     LetIn {
-        binds: Vec<(String, Expr)>,
-        body: Box<Expr>,
+        binds: Vec<(String, Self)>,
+        body: Box<Self>,
     },
     IfThenElse {
-        cond: Box<Expr>,
-        then_expr: Box<Expr>,
-        else_expr: Box<Expr>,
+        cond: Box<Self>,
+        then_expr: Box<Self>,
+        else_expr: Box<Self>,
     },
 
     Apply {
-        func: Box<Expr>,
-        arg: Box<Expr>,
+        func: Box<Self>,
+        arg: Box<Self>,
     },
     BinOp {
         op: BinOp,
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
+        lhs: Box<Self>,
+        rhs: Box<Self>,
     },
     UnOp {
         op: UnOp,
-        expr: Box<Expr>,
+        expr: Box<Self>,
     },
 }
 
@@ -130,11 +130,13 @@ impl Expr {
         Self::Path(path.into())
     }
 
-    pub fn int(v: i64) -> Self {
+    #[must_use]
+    pub const fn int(v: i64) -> Self {
         Self::Int(v)
     }
 
-    pub fn bool(v: bool) -> Self {
+    #[must_use]
+    pub const fn bool(v: bool) -> Self {
         Self::Bool(v)
     }
 
@@ -142,40 +144,46 @@ impl Expr {
         Self::Str(v.into())
     }
 
-    pub fn null() -> Self {
+    #[must_use]
+    pub const fn null() -> Self {
         Self::Null
     }
 
-    pub fn list(items: Vec<Expr>) -> Self {
+    #[must_use]
+    pub const fn list(items: Vec<Self>) -> Self {
         Self::List(items)
     }
 
-    pub fn attrset(rec: bool, binds: Vec<(AttrKey, Expr)>) -> Self {
+    #[must_use]
+    pub const fn attrset(rec: bool, binds: Vec<(AttrKey, Self)>) -> Self {
         Self::AttrSet { rec, binds }
     }
 
-    pub fn select(expr: Expr, attr: AttrKey) -> Self {
+    #[must_use]
+    pub fn select(expr: Self, attr: AttrKey) -> Self {
         Self::Select {
             expr: Box::new(expr),
             attr,
         }
     }
 
-    pub fn lambda(param: impl Into<String>, body: Expr) -> Self {
+    pub fn lambda(param: impl Into<String>, body: Self) -> Self {
         Self::Lambda {
             param: param.into(),
             body: Box::new(body),
         }
     }
 
-    pub fn let_in(binds: Vec<(String, Expr)>, body: Expr) -> Self {
+    #[must_use]
+    pub fn let_in(binds: Vec<(String, Self)>, body: Self) -> Self {
         Self::LetIn {
             binds,
             body: Box::new(body),
         }
     }
 
-    pub fn if_then_else(cond: Expr, then_expr: Expr, else_expr: Expr) -> Self {
+    #[must_use]
+    pub fn if_then_else(cond: Self, then_expr: Self, else_expr: Self) -> Self {
         Self::IfThenElse {
             cond: Box::new(cond),
             then_expr: Box::new(then_expr),
@@ -183,21 +191,23 @@ impl Expr {
         }
     }
 
-    pub fn apply(func: Expr, arg: Expr) -> Self {
+    #[must_use]
+    pub fn apply(func: Self, arg: Self) -> Self {
         Self::Apply {
             func: Box::new(func),
             arg: Box::new(arg),
         }
     }
 
-    pub fn app(mut func: Expr, args: impl IntoIterator<Item = Expr>) -> Self {
+    pub fn app(mut func: Self, args: impl IntoIterator<Item = Self>) -> Self {
         for arg in args {
-            func = Expr::apply(func, arg);
+            func = Self::apply(func, arg);
         }
         func
     }
 
-    pub fn bin(op: BinOp, lhs: Expr, rhs: Expr) -> Self {
+    #[must_use]
+    pub fn bin(op: BinOp, lhs: Self, rhs: Self) -> Self {
         Self::BinOp {
             op,
             lhs: Box::new(lhs),
@@ -205,13 +215,15 @@ impl Expr {
         }
     }
 
-    pub fn un(op: UnOp, expr: Expr) -> Self {
+    #[must_use]
+    pub fn un(op: UnOp, expr: Self) -> Self {
         Self::UnOp {
             op,
             expr: Box::new(expr),
         }
     }
 
+    #[must_use]
     pub fn render(&self) -> String {
         let mut p = Printer::new();
         p.expr(self, Prec::Top);
@@ -234,28 +246,28 @@ enum Prec {
 }
 
 impl Expr {
-    fn prec(&self) -> Prec {
+    const fn prec(&self) -> Prec {
         match self {
-            Expr::LetIn { .. } | Expr::IfThenElse { .. } | Expr::Lambda { .. } => Prec::LetIfLambda,
-            Expr::BinOp { op, .. } => match op {
+            Self::LetIn { .. } | Self::IfThenElse { .. } | Self::Lambda { .. } => Prec::LetIfLambda,
+            Self::BinOp { op, .. } => match op {
                 BinOp::Or => Prec::Or,
                 BinOp::And => Prec::And,
                 BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Prec::Cmp,
                 BinOp::Add | BinOp::Sub | BinOp::Update => Prec::Add,
                 BinOp::Mul | BinOp::Div | BinOp::Mod => Prec::Mul,
             },
-            Expr::Apply { .. } => Prec::Apply,
-            Expr::Select { .. } => Prec::Select,
-            Expr::UnOp { .. } => Prec::Mul,
-            Expr::Ident(_)
-            | Expr::Raw(_)
-            | Expr::Path(_)
-            | Expr::Int(_)
-            | Expr::Bool(_)
-            | Expr::Str(_)
-            | Expr::Null
-            | Expr::List(_)
-            | Expr::AttrSet { .. } => Prec::Atom,
+            Self::Apply { .. } => Prec::Apply,
+            Self::Select { .. } => Prec::Select,
+            Self::UnOp { .. } => Prec::Mul,
+            Self::Ident(_)
+            | Self::Raw(_)
+            | Self::Path(_)
+            | Self::Int(_)
+            | Self::Bool(_)
+            | Self::Str(_)
+            | Self::Null
+            | Self::List(_)
+            | Self::AttrSet { .. } => Prec::Atom,
         }
     }
 }
@@ -266,7 +278,7 @@ struct Printer {
 }
 
 impl Printer {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             out: String::new(),
             indent: 0,
@@ -309,14 +321,13 @@ impl Printer {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn expr(&mut self, e: &Expr, parent: Prec) {
         let my_prec = e.prec();
         let need_parens = my_prec < parent;
 
         self.parens_if(need_parens, |p| match e {
-            Expr::Ident(s) => p.push(s),
-            Expr::Raw(s) => p.push(s),
-            Expr::Path(s) => p.push(s),
+            Expr::Ident(s) | Expr::Raw(s) | Expr::Path(s) => p.push(s),
             Expr::Int(v) if *v == i64::MIN => p.push("(0 - 9223372036854775807 - 1)"),
             Expr::Int(v) if *v < 0 => {
                 p.push("(");
@@ -470,7 +481,7 @@ mod tests {
         let s = e.render();
         assert!(s.contains("let"));
         assert!(s.contains("in"));
-        assert!(s.contains("{"));
+        assert!(s.contains('{'));
         assert!(s.contains("x = 1;"));
     }
 }

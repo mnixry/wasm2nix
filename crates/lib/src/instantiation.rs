@@ -11,7 +11,7 @@ pub struct ResolverError {
 }
 
 impl ResolverError {
-    fn new(message: String) -> Self {
+    const fn new(message: String) -> Self {
         Self { message }
     }
 }
@@ -38,13 +38,36 @@ pub enum InstantiationError {
 pub type Result<T, E = InstantiationError> = std::result::Result<T, E>;
 
 pub trait ActiveInitializerResolver {
+    /// Returns the minimum page count for a memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the memory cannot be resolved.
     fn memory_min_pages(&mut self, module: &NixModule, index: MemoryIndex) -> Result<u64, String>;
 
+    /// Returns the minimum element count for a table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the table cannot be resolved.
     fn table_min_elements(&mut self, module: &NixModule, index: TableIndex) -> Result<u64, String>;
 
+    /// Returns the current value of an imported i32 global.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the imported global cannot be resolved.
     fn imported_global_i32(&mut self, module_name: &str, field_name: &str) -> Result<u64, String>;
 }
 
+/// Reports whether active data or element initializers would trap during
+/// instantiation.
+///
+/// # Errors
+///
+/// Returns an error when an imported initializer input cannot be resolved, when
+/// initializer arithmetic overflows, or when an initializer expression is
+/// malformed or unsupported.
 pub fn active_initializers_trap(
     module: &NixModule, resolver: &mut impl ActiveInitializerResolver,
 ) -> Result<bool> {
@@ -110,7 +133,7 @@ fn eval_i32_const_expr(
     let mut stack = Vec::new();
     for op in expr.ops().iter().copied() {
         match op {
-            ConstOp::I32Const(value) => stack.push(u64::from(value as u32)),
+            ConstOp::I32Const(value) => stack.push(u64::from(value.cast_unsigned())),
             ConstOp::GlobalGet(index) => stack.push(global_i32_value(module, resolver, index)?),
             ConstOp::I32Add => {
                 let rhs = stack.pop().context(MalformedConstExprSnafu {

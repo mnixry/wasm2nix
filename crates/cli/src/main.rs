@@ -31,13 +31,12 @@ fn main() -> error::Result<()> {
         path: args.input.clone(),
     })?;
 
-    let out_path = match args.output.clone() {
-        Some(path) => path,
-        None => {
-            let mut path = args.input.clone();
-            path.set_extension("nix");
-            path
-        }
+    let out_path = if let Some(path) = args.output.clone() {
+        path
+    } else {
+        let mut path = args.input.clone();
+        path.set_extension("nix");
+        path
     };
 
     let runtime_path = runtime_path_for_output(&out_path, args.export_rt_path.as_deref());
@@ -52,14 +51,11 @@ fn main() -> error::Result<()> {
     );
 
     if !args.no_export_rt {
-        std::fs::write(&runtime_path, runtime_nix()).context(error::WriteNixSnafu {
-            path: runtime_path.clone(),
-        })?;
+        std::fs::write(&runtime_path, runtime_nix())
+            .context(error::WriteNixSnafu { path: runtime_path })?;
     }
 
-    std::fs::write(&out_path, nix).context(error::WriteNixSnafu {
-        path: out_path.clone(),
-    })?;
+    std::fs::write(&out_path, nix).context(error::WriteNixSnafu { path: out_path })?;
     Ok(())
 }
 
