@@ -1,16 +1,16 @@
 [package]
 edition = "2021"
-name = "yaml-to-json-wasm"
+name    = "yaml-to-json-wasm"
 version = "0.1.0"
 
 [lib]
-crate-type = [
-  "cdylib",
-  "rlib",
-]
-name = "yaml_to_json"
-path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+name       = "yaml_to_json"
+path       = "src/lib.rs"
 
 [dependencies]
-saphyr = { version = "0.0.6", default-features = false }
+saphyr     = { version = "0.0.6", default-features = false }
 serde_json = "1.0"
+
+[lints]
+workspace = true

@@ -1,7 +1,9 @@
 #![no_std]
+#![allow(unsafe_code)]
 extern crate alloc;
 
 use alloc::{
+    boxed::Box,
     string::{String, ToString},
     vec::Vec,
 };
@@ -33,6 +35,13 @@ pub extern "C" fn yaml_to_json(ptr: u32, len: u32) -> u32 {
             1
         }
     }
+}
+
+#[no_mangle]
+pub extern "C" fn alloc(len: u32) -> *mut u8 {
+    let box_ptr = alloc::boxed::Box::new(Vec::<u8>::with_capacity(len as usize));
+    let ptr = Box::leak(box_ptr);
+    ptr.as_mut_ptr()
 }
 
 #[no_mangle]
@@ -73,7 +82,14 @@ fn yaml_to_json_value(node: &Yaml<'_>) -> Result<Value, String> {
         Yaml::Mapping(mapping) => {
             let mut entries = mapping
                 .iter()
-                .map(|(key, value)| Ok((mapping_key_to_string(key)?, value)))
+                .map(|(key, value)| {
+                    Ok((
+                        key.as_str()
+                            .ok_or("mapping key is not a string")?
+                            .to_string(),
+                        value,
+                    ))
+                })
                 .collect::<Result<Vec<_>, String>>()?;
             entries.sort_by(|left, right| left.0.cmp(&right.0));
 
@@ -111,28 +127,6 @@ fn scalar_to_json_value(scalar: &Scalar<'_>) -> Result<Value, String> {
                 .ok_or_else(|| "YAML float cannot be represented as a JSON number".to_string())
         }
         Scalar::String(value) => Ok(Value::String(value.to_string())),
-    }
-}
-
-fn mapping_key_to_string(key: &Yaml<'_>) -> Result<String, String> {
-    if let Some(value) = key.as_str() {
-        Ok(value.to_string())
-    } else if let Some(value) = key.as_integer() {
-        Ok(value.to_string())
-    } else if let Some(value) = key.as_bool() {
-        Ok(if value { "true" } else { "false" }.to_string())
-    } else if let Some(value) = key.as_floating_point() {
-        if !value.is_finite() {
-            Err("non-finite YAML floats cannot be used as JSON object keys".to_string())
-        } else {
-            Ok(value.to_string())
-        }
-    } else if key.is_null() {
-        Ok("null".to_string())
-    } else if let Some(value) = key.get_tagged_node() {
-        mapping_key_to_string(value)
-    } else {
-        Err("only scalar YAML mapping keys can be represented as JSON object keys".to_string())
     }
 }
 

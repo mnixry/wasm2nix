@@ -1,7 +1,7 @@
 {
   # spell-checker: disable
   inputs = {
-    self.submodules = true;
+    # self.submodules = true;
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts = {
       url = "github:hercules-ci/flake-parts";
@@ -98,7 +98,7 @@
                 darwin.libresolv
               ]
             );
-            env.SDKROOT = pkgs.apple-sdk.sdkroot;
+            env = lib.optionalAttrs pkgs.stdenv.isDarwin { SDKROOT = pkgs.apple-sdk.sdkroot; };
           };
           checks = {
             clippy = craneLib.cargoClippy (

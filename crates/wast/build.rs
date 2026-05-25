@@ -7,7 +7,8 @@ use std::{
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let spec_dir = Path::new("tests/spec/test/core");
+    let spec_dir = Path::new(&env::var("CARGO_MANIFEST_DIR")?).join("tests/spec/test/core");
+
     println!("cargo:rerun-if-changed={}", spec_dir.display());
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR must be set")?);

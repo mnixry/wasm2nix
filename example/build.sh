@@ -4,11 +4,14 @@ set -euo pipefail
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 repo_root="$(CDPATH= cd -- "$script_dir/.." && pwd)"
 generated_dir="$script_dir/generated"
-wasm_path="$script_dir/target/wasm32-unknown-unknown/release/yaml_to_json.wasm"
+wasm_path="$repo_root/target/wasm32-unknown-unknown/release/yaml_to_json.wasm"
 
 cargo build --manifest-path "$repo_root/Cargo.toml" -p wasm2nix-cli
 cargo build --manifest-path "$script_dir/Cargo.toml" --release --target wasm32-unknown-unknown
 
+if [[ -d "$generated_dir" ]]; then
+  rm -rf "$generated_dir"
+fi
 mkdir -p "$generated_dir"
 "$repo_root/target/debug/wasm2nix" "$wasm_path" -o "$generated_dir/yaml_to_json.nix"
 
