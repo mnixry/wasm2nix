@@ -1,0 +1,23 @@
+[package]
+build             = "build.rs"
+edition.workspace = true
+name              = "wasm2nix-runtime"
+version.workspace = true
+
+[dependencies]
+wasm2nix-ast.path = "../nix"
+
+cranelift-wasm.workspace = true
+snafu.workspace          = true
+
+[build-dependencies]
+proc-macro2.workspace = true
+quote.workspace       = true
+serde_json.workspace  = true
+syn.workspace         = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

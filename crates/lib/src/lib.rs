@@ -1,25 +1,10 @@
 pub mod error;
 pub mod instantiation;
-pub mod intrinsics;
 pub mod lowerings;
 pub mod translator;
 
-use std::path::Path;
-
 use snafu::prelude::*;
 pub use wasm2nix_ast as nix;
-
-pub const DEFAULT_RUNTIME_FILE_NAME: &str = "wasm2nix-rt.nix";
-
-#[must_use]
-pub const fn runtime_nix() -> &'static str {
-    include_str!("../nix/rt.nix")
-}
-
-#[must_use]
-pub fn runtime_nix_path() -> &'static Path {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/nix/rt.nix"))
-}
 
 /// Lowers a Wasm module to a complete Nix module wrapper.
 ///
@@ -59,16 +44,13 @@ mod tests {
             0x03, 0x02, 0x01, 0x00, 0x0A, 0x04, 0x01, 0x02, 0x00, 0x0B,
         ];
 
-        let nix = lower_wasm_to_nix(&wasm, &format!("./{DEFAULT_RUNTIME_FILE_NAME}"))
-            .expect("wasm should lower");
+        let nix = lower_wasm_to_nix(
+            &wasm,
+            &format!("./{}", wasm2nix_runtime::DEFAULT_RUNTIME_FILE_NAME),
+        )
+        .expect("wasm should lower");
 
         assert!(nix.starts_with("{ imports ? { }, rt ? import ./wasm2nix-rt.nix { } }:"));
         assert!(nix.ends_with(") rt imports"));
-    }
-
-    #[test]
-    fn runtime_source_is_library_owned() {
-        assert!(runtime_nix().contains("wasm2nix runtime"));
-        assert!(runtime_nix_path().ends_with("nix/rt.nix"));
     }
 }

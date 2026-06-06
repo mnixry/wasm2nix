@@ -1,6 +1,8 @@
 use cranelift_wasm::{FuncIndex, TypeIndex};
 use snafu::Snafu;
 
+use crate::{RuntimeFunction, RuntimeResultKind};
+
 #[derive(Debug, Snafu)]
 pub enum IntrinsicCastError {
     #[snafu(display("user namespace cast failed, unexpected value: {value}"))]
@@ -24,7 +26,7 @@ impl TryFrom<u32> for UserNamespace {
             0 => Ok(Self::Func),
             1 => Ok(Self::Intrinsic),
             2 => Ok(Self::Symbol),
-            _ => IntrinsicIndexCastSnafu { value }.fail(),
+            _ => UserNamespaceCastSnafu { value }.fail(),
         }
     }
 }
@@ -83,6 +85,43 @@ impl Intrinsic {
     #[must_use]
     pub const fn ref_func(func_index: FuncIndex) -> Self {
         Self::RefFunc { func_index }
+    }
+
+    #[must_use]
+    pub const fn runtime_function(self) -> Option<RuntimeFunction> {
+        match self {
+            Self::MemGrow => Some(RuntimeFunction::MemGrow),
+            Self::MemSize => Some(RuntimeFunction::MemSize),
+            Self::MemCopy => Some(RuntimeFunction::MemCopy),
+            Self::MemFill => Some(RuntimeFunction::MemFill),
+            Self::MemInit => Some(RuntimeFunction::MemInit),
+            Self::DataDrop => Some(RuntimeFunction::MemDataDrop),
+            Self::GlobalGetI32 => Some(RuntimeFunction::GlobalGetI32),
+            Self::GlobalGetI64 => Some(RuntimeFunction::GlobalGetI64),
+            Self::GlobalGetF32 => Some(RuntimeFunction::GlobalGetF32),
+            Self::GlobalGetF64 => Some(RuntimeFunction::GlobalGetF64),
+            Self::GlobalSetI32 => Some(RuntimeFunction::GlobalSetI32),
+            Self::GlobalSetI64 => Some(RuntimeFunction::GlobalSetI64),
+            Self::GlobalSetF32 => Some(RuntimeFunction::GlobalSetF32),
+            Self::GlobalSetF64 => Some(RuntimeFunction::GlobalSetF64),
+            Self::TableCopy => Some(RuntimeFunction::TableCopy),
+            Self::TableInit => Some(RuntimeFunction::TableInit),
+            Self::ElemDrop => Some(RuntimeFunction::TableElemDrop),
+            Self::TableGet => Some(RuntimeFunction::TableGet),
+            Self::TableSet => Some(RuntimeFunction::TableSet),
+            Self::TableFill => Some(RuntimeFunction::TableFill),
+            Self::TableSize => Some(RuntimeFunction::TableSize),
+            Self::TableGrow => Some(RuntimeFunction::TableGrow),
+            Self::CallIndirect { .. } | Self::RefFunc { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn runtime_result_kind(self) -> Option<RuntimeResultKind> {
+        match self.runtime_function() {
+            Some(function) => Some(function.result_kind()),
+            None => None,
+        }
     }
 }
 

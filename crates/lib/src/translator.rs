@@ -21,8 +21,7 @@ use cranelift_wasm::{
     translate_module,
 };
 use target_lexicon::PointerWidth;
-
-use crate::intrinsics as intr;
+use wasm2nix_runtime::intrinsics as intr;
 
 #[derive(Debug, Clone)]
 pub struct Exportable<T> {

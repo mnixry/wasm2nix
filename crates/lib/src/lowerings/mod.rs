@@ -11,6 +11,7 @@ use cranelift_wasm::{ConstOp, WasmValType};
 use error::MalformedConstExprSnafu;
 pub use error::{LowerError, Result};
 use snafu::prelude::*;
+use wasm2nix_runtime::{RuntimeFunction, RuntimeNamespace};
 
 use crate::{
     nix::{AttrKey, Expr, nix},
@@ -512,10 +513,10 @@ fn lower_const_expr(
                 let lhs = stack.pop().context(MalformedConstExprSnafu {
                     reason: format!("{op:?} missing left operand"),
                 })?;
-                let op_name = match op {
-                    ConstOp::I32Add => "add",
-                    ConstOp::I32Sub => "sub",
-                    ConstOp::I32Mul => "mul",
+                let function = match op {
+                    ConstOp::I32Add => RuntimeFunction::I32Add,
+                    ConstOp::I32Sub => RuntimeFunction::I32Sub,
+                    ConstOp::I32Mul => RuntimeFunction::I32Mul,
                     _ => {
                         return MalformedConstExprSnafu {
                             reason: format!("unexpected operator {op:?}"),
@@ -523,7 +524,7 @@ fn lower_const_expr(
                         .fail();
                     }
                 };
-                stack.push(Expr::app(rt_fn(&["i32", op_name]), vec![lhs, rhs]));
+                stack.push(function.call(vec![lhs, rhs]));
             }
             ConstOp::I64Add | ConstOp::I64Sub | ConstOp::I64Mul => {
                 let rhs = stack.pop().context(MalformedConstExprSnafu {
@@ -532,10 +533,10 @@ fn lower_const_expr(
                 let lhs = stack.pop().context(MalformedConstExprSnafu {
                     reason: format!("{op:?} missing left operand"),
                 })?;
-                let op_name = match op {
-                    ConstOp::I64Add => "add",
-                    ConstOp::I64Sub => "sub",
-                    ConstOp::I64Mul => "mul",
+                let function = match op {
+                    ConstOp::I64Add => RuntimeFunction::I64Add,
+                    ConstOp::I64Sub => RuntimeFunction::I64Sub,
+                    ConstOp::I64Mul => RuntimeFunction::I64Mul,
                     _ => {
                         return MalformedConstExprSnafu {
                             reason: format!("unexpected operator {op:?}"),
@@ -543,7 +544,7 @@ fn lower_const_expr(
                         .fail();
                     }
                 };
-                stack.push(Expr::app(rt_fn(&["i64", op_name]), vec![lhs, rhs]));
+                stack.push(function.call(vec![lhs, rhs]));
             }
             _ => {
                 return MalformedConstExprSnafu {
@@ -567,21 +568,23 @@ fn lower_const_expr(
 
 fn lower_memory_export(memory_index: u32) -> Expr {
     debug_assert_eq!(memory_index, 0);
-    nix!(merge(rt.mem, { get = st: st.mem; }))
+    nix!(merge(#{RuntimeNamespace::Mem.expr()}, { get = st: st.mem; }))
 }
 
 fn lower_table_export(table_index: u32) -> Expr {
     let table_key = table_index.to_string();
-    nix!(merge(rt.table, { get = st: st.tables.(table_key); }))
+    nix!(merge(#{RuntimeNamespace::Table.expr()}, { get = st: st.tables.(table_key); }))
 }
 
 fn lower_global_export(global_index: u32, ty: WasmValType) -> Result<Expr> {
-    let get = types::global_get_expr(ty)?;
-    let set = types::global_set_expr(ty)?;
+    let get = types::global_get_function(ty)?;
+    let set = types::global_set_function(ty)?;
     let index = i64::from(global_index);
+    let get_call = get.call(vec![Expr::int(index), nix!(st)]);
+    let set_call = set.call(vec![Expr::int(index), nix!(value), nix!(st)]);
     Ok(nix!({
-        get = st: #{get}(#{index}, st);
-        set = value: st: #{set}(#{index}, value, st);
+        get = st: #{get_call};
+        set = value: st: #{set_call};
     }))
 }
 
@@ -590,14 +593,6 @@ fn lambda_chain(params: &[String], body: Expr) -> Expr {
         .iter()
         .rev()
         .fold(body, |acc, p| Expr::lambda(p.clone(), acc))
-}
-
-fn rt_fn(path: &[&str]) -> Expr {
-    let mut e = Expr::ident("rt");
-    for p in path {
-        e = Expr::select(e, AttrKey::ident(*p));
-    }
-    e
 }
 
 #[cfg(test)]
@@ -632,13 +627,24 @@ mod tests {
         lower_wasm(&wasm)
     }
 
-    fn assert_contains_all(haystack: &str, needles: &[&str]) {
+    fn assert_contains_all<I, S>(haystack: &str, needles: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>, {
         for needle in needles {
+            let needle = needle.as_ref();
             assert!(
                 haystack.contains(needle),
                 "expected generated Nix to contain {needle}"
             );
         }
+    }
+
+    fn runtime_exprs(functions: impl IntoIterator<Item = RuntimeFunction>) -> Vec<String> {
+        functions
+            .into_iter()
+            .map(|function| function.expr().render())
+            .collect()
     }
 
     #[test]
@@ -653,7 +659,10 @@ mod tests {
             "#,
         );
 
-        assert!(nix.contains("rt.i32.add 40 2"));
+        let expected = RuntimeFunction::I32Add
+            .call(vec![Expr::int(40), Expr::int(2)])
+            .render();
+        assert!(nix.contains(&expected));
         assert!(
             !nix.contains(" = 40;") && !nix.contains(" = 2;"),
             "single-use immediate should be inlined instead of bound"
@@ -690,7 +699,10 @@ mod tests {
 
         assert!(nix.contains("pageCount = 1;"));
         assert!(nix.contains("\"1\" = 67305985;"));
-        assert!(nix.contains("\"memory\" = rt.mem // {"));
+        assert!(nix.contains(&format!(
+            "\"memory\" = {} // {{",
+            RuntimeNamespace::Mem.expr().render()
+        )));
     }
 
     #[test]
@@ -706,7 +718,7 @@ mod tests {
         assert!(nix.contains("g0 = 0;"));
         assert!(nix.contains("\"0\" = g0;"));
         assert!(nix.contains("st = (funcs.f0 st0).st;"));
-        assert!(nix.contains("rt.global.set_i32"));
+        assert!(nix.contains(&RuntimeFunction::GlobalSetI32.expr().render()));
         assert!(nix.contains("\"g\" = {"));
     }
 
@@ -751,14 +763,14 @@ mod tests {
 
         assert_contains_all(
             &nix,
-            &[
-                "rt.mem.size",
-                "rt.mem.grow",
-                "rt.mem.copy",
-                "rt.mem.fill",
-                "rt.mem.init",
-                "rt.mem.data_drop",
-            ],
+            runtime_exprs([
+                RuntimeFunction::MemSize,
+                RuntimeFunction::MemGrow,
+                RuntimeFunction::MemCopy,
+                RuntimeFunction::MemFill,
+                RuntimeFunction::MemInit,
+                RuntimeFunction::MemDataDrop,
+            ]),
         );
     }
 
@@ -783,16 +795,16 @@ mod tests {
 
         assert_contains_all(
             &nix,
-            &[
-                "rt.table.size",
-                "rt.table.grow",
-                "rt.table.get",
-                "rt.table.set",
-                "rt.table.fill",
-                "rt.table.copy",
-                "rt.table.init",
-                "rt.table.elem_drop",
-            ],
+            runtime_exprs([
+                RuntimeFunction::TableSize,
+                RuntimeFunction::TableGrow,
+                RuntimeFunction::TableGet,
+                RuntimeFunction::TableSet,
+                RuntimeFunction::TableFill,
+                RuntimeFunction::TableCopy,
+                RuntimeFunction::TableInit,
+                RuntimeFunction::TableElemDrop,
+            ]),
         );
     }
 
@@ -815,16 +827,16 @@ mod tests {
 
         assert_contains_all(
             &nix,
-            &[
-                "rt.global.get_i32",
-                "rt.global.get_i64",
-                "rt.global.get_f32",
-                "rt.global.get_f64",
-                "rt.global.set_i32",
-                "rt.global.set_i64",
-                "rt.global.set_f32",
-                "rt.global.set_f64",
-            ],
+            runtime_exprs([
+                RuntimeFunction::GlobalGetI32,
+                RuntimeFunction::GlobalGetI64,
+                RuntimeFunction::GlobalGetF32,
+                RuntimeFunction::GlobalGetF64,
+                RuntimeFunction::GlobalSetI32,
+                RuntimeFunction::GlobalSetI64,
+                RuntimeFunction::GlobalSetF32,
+                RuntimeFunction::GlobalSetF64,
+            ]),
         );
     }
 
@@ -839,7 +851,10 @@ mod tests {
         ];
         let nix = lower_wasm(&wasm);
 
-        assert!(nix.contains("rt.table.call 0 \"(i32)->(i32)\" moduleId funcs funcRegistry"));
+        assert!(nix.contains(&format!(
+            "{} 0 \"(i32)->(i32)\" moduleId funcs funcRegistry",
+            RuntimeFunction::TableCall.expr().render()
+        )));
         assert!(nix.contains("tables = {"));
         assert!(nix.contains("module = moduleId;"));
         assert!(nix.contains("func = 0;"));

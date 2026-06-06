@@ -8,7 +8,8 @@ name = "wasm2nix"
 path = "src/main.rs"
 
 [dependencies]
-wasm2nix.path = "../lib"
+wasm2nix.path         = "../lib"
+wasm2nix-runtime.path = "../runtime"
 
 clap.workspace  = true
 snafu.workspace = true

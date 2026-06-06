@@ -778,6 +778,7 @@ dependencies = [
  "target-lexicon",
  "tracing",
  "wasm2nix-ast",
+ "wasm2nix-runtime",
  "wasmparser 0.217.1",
  "wast",
 ]
@@ -796,6 +797,20 @@ dependencies = [
  "clap",
  "snafu",
  "wasm2nix",
+ "wasm2nix-runtime",
+]
+
+[[package]]
+name = "wasm2nix-runtime"
+version = "0.1.0"
+dependencies = [
+ "cranelift-wasm",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "snafu",
+ "syn",
+ "wasm2nix-ast",
 ]
 
 [[package]]
@@ -808,6 +823,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "wasm2nix",
+ "wasm2nix-runtime",
  "wasmparser 0.217.1",
  "wast",
 ]

@@ -5,7 +5,8 @@ publish           = false
 version.workspace = true
 
 [dev-dependencies]
-wasm2nix.path = "../lib"
+wasm2nix.path         = "../lib"
+wasm2nix-runtime.path = "../runtime"
 
 cranelift-codegen.workspace = true
 cranelift-entity.workspace  = true

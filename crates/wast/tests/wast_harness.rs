@@ -1075,7 +1075,7 @@ fn eval_nix_json(ctx: &HarnessContext, expr: &Expr) -> Result<JsonValue, String>
 }
 
 fn rt_import_expr() -> Expr {
-    import_nix_file_expr(wasm2nix::runtime_nix_path())
+    import_nix_file_expr(wasm2nix_runtime::runtime_nix_path())
 }
 
 fn harness_import_expr() -> Result<Expr, String> {

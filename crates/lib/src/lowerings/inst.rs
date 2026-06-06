@@ -9,6 +9,7 @@ use cranelift_codegen::{
     },
 };
 use snafu::prelude::*;
+use wasm2nix_runtime::{RuntimeFunction, RuntimeResultKind, intrinsics as intr};
 
 use super::{
     error::{
@@ -16,10 +17,9 @@ use super::{
         UnknownExternalNamespaceSnafu, UnknownIntrinsicSnafu, UnsupportedExternalNameSnafu,
         UnsupportedOpcodeSnafu,
     },
-    lambda_chain, lower_table_entry, ops, rt_fn, signature_id, types,
+    lambda_chain, lower_table_entry, ops, signature_id, types,
 };
 use crate::{
-    intrinsics as intr,
     nix::{AttrBind, AttrKey, BinOp, Expr, LetBind, UnOp, nix},
     translator::NixModule,
 };
@@ -645,7 +645,7 @@ impl<'a> InstCtx<'a> {
             InstructionData::Unary { arg, .. } => self.lower_unary(*arg),
             InstructionData::Binary { args, .. } => self.lower_binary(*args),
             InstructionData::BinaryImm64 { arg, imm, .. } => {
-                self.lower_binary_imm(*arg, i64::from(*imm))
+                Ok(self.lower_binary_imm(*arg, i64::from(*imm)))
             }
             InstructionData::Ternary { args, .. }
                 if matches!(self.op, Opcode::Select | Opcode::SelectSpectreGuard) =>
@@ -702,7 +702,7 @@ impl<'a> InstCtx<'a> {
             Opcode::Uextend => Ok(self.lower_uextend(arg)),
             Opcode::Sextend => Ok(self.lower_sextend(arg)),
             Opcode::Ireduce => Ok(self.bind_result(Expr::app(
-                rt_fn(&["conv", "ireduce"]),
+                RuntimeFunction::ConvIreduce.expr(),
                 vec![self.value_expr(arg)],
             ))),
             Opcode::FcvtToSint
@@ -712,7 +712,7 @@ impl<'a> InstCtx<'a> {
             Opcode::FcvtFromSint | Opcode::FcvtFromUint => self.lower_int_to_float(arg),
             Opcode::Fpromote | Opcode::Fdemote => Ok(self.lower_float_resize(arg)),
             Opcode::Bnot => Ok(self.bind_result(Expr::app(
-                rt_fn(&["int", "bnot"]),
+                RuntimeFunction::IntBnot.expr(),
                 vec![self.value_expr(arg)],
             ))),
             Opcode::Ineg => Ok(self.bind_result(Expr::un(UnOp::Neg, self.value_expr(arg)))),
@@ -739,7 +739,7 @@ impl<'a> InstCtx<'a> {
         } else {
             // For now, rely on runtime for non-bool extensions.
             Expr::app(
-                rt_fn(&["conv", "uextend"]),
+                RuntimeFunction::ConvUextend.expr(),
                 vec![a, Expr::string(out_ty.to_string())],
             )
         };
@@ -752,12 +752,12 @@ impl<'a> InstCtx<'a> {
         let out_ty = self.func.dfg.value_type(out);
         let a = self.value_expr(arg);
         let e = match (in_ty, out_ty) {
-            (I8, I32) => Expr::app(rt_fn(&["conv", "sign_extend_8"]), vec![a]),
-            (I16, I32) => Expr::app(rt_fn(&["conv", "sign_extend_16"]), vec![a]),
-            (I8, I64) => Expr::app(rt_fn(&["conv", "sign_extend_8_i64"]), vec![a]),
-            (I16, I64) => Expr::app(rt_fn(&["conv", "sign_extend_16_i64"]), vec![a]),
-            (I32, I64) => Expr::app(rt_fn(&["conv", "sign_extend_32"]), vec![a]),
-            _ => Expr::app(rt_fn(&["conv", "sextend"]), vec![a]),
+            (I8, I32) => RuntimeFunction::ConvSignExtend8.call(vec![a]),
+            (I16, I32) => RuntimeFunction::ConvSignExtend16.call(vec![a]),
+            (I8, I64) => RuntimeFunction::ConvSignExtend8I64.call(vec![a]),
+            (I16, I64) => RuntimeFunction::ConvSignExtend16I64.call(vec![a]),
+            (I32, I64) => RuntimeFunction::ConvSignExtend32.call(vec![a]),
+            _ => RuntimeFunction::ConvSextend.call(vec![a]),
         };
         self.pure_bind(out, e)
     }
@@ -766,15 +766,10 @@ impl<'a> InstCtx<'a> {
         let out = self.results[0];
         let in_ty = self.func.dfg.value_type(arg);
         let out_ty = self.func.dfg.value_type(out);
-        let float_key = types::float_type_key(in_ty, "float-to-int input")?;
-        let int_key = types::int_type_key(out_ty, "float-to-int output")?;
-        let Some(conv_name) = ops::float_to_int_conv_name(self.op) else {
+        let Some(function) = ops::float_to_int_conv_function(self.op, in_ty, out_ty) else {
             return self.unsupported_opcode();
         };
-        let e = Expr::app(
-            rt_fn(&["conv", conv_name, float_key, int_key]),
-            vec![self.value_expr(arg)],
-        );
+        let e = function.call(vec![self.value_expr(arg)]);
         Ok(self.pure_bind(out, e))
     }
 
@@ -782,48 +777,38 @@ impl<'a> InstCtx<'a> {
         let out = self.results[0];
         let in_ty = self.func.dfg.value_type(arg);
         let out_ty = self.func.dfg.value_type(out);
-        let int_key = types::int_type_key(in_ty, "int-to-float input")?;
-        let float_key = types::float_type_key(out_ty, "int-to-float output")?;
-        let Some(conv_name) = ops::int_to_float_conv_name(self.op) else {
+        let Some(function) = ops::int_to_float_conv_function(self.op, in_ty, out_ty) else {
             return self.unsupported_opcode();
         };
-        let e = Expr::app(
-            rt_fn(&["conv", conv_name, int_key, float_key]),
-            vec![self.value_expr(arg)],
-        );
+        let e = function.call(vec![self.value_expr(arg)]);
         Ok(self.pure_bind(out, e))
     }
 
     fn lower_float_resize(&self, arg: ir::Value) -> LoweredInst {
-        let (ty_key, op_name) = if self.op == Opcode::Fpromote {
-            ("f64", "promote_f32")
+        let function = if self.op == Opcode::Fpromote {
+            RuntimeFunction::F64PromoteF32
         } else {
-            ("f32", "demote_f64")
+            RuntimeFunction::F32DemoteF64
         };
-        let path: [&str; 2] = (ty_key, op_name).into();
-        self.bind_result(Expr::app(rt_fn(&path), vec![self.value_expr(arg)]))
+        self.bind_result(function.call(vec![self.value_expr(arg)]))
     }
 
     fn lower_int_unary(&self, arg: ir::Value) -> Result<LoweredInst> {
         let out = self.results[0];
         let out_ty = self.func.dfg.value_type(out);
-        let ty_key = types::int_type_key(out_ty, "integer unary output")?;
-        let Some(op_name) = ops::int_unary_name(self.op) else {
+        let Some(function) = ops::int_unary_function(self.op, out_ty) else {
             return self.unsupported_opcode();
         };
-        let path = [ty_key, op_name];
-        Ok(self.pure_bind(out, Expr::app(rt_fn(&path), vec![self.value_expr(arg)])))
+        Ok(self.pure_bind(out, function.call(vec![self.value_expr(arg)])))
     }
 
     fn lower_float_unary(&self, arg: ir::Value) -> Result<LoweredInst> {
         let out = self.results[0];
         let out_ty = self.func.dfg.value_type(out);
-        let ty_key = types::float_type_key(out_ty, "float unary output")?;
-        let Some(op_name) = ops::float_unary_name(self.op) else {
+        let Some(function) = ops::float_unary_function(self.op, out_ty) else {
             return self.unsupported_opcode();
         };
-        let path = [ty_key, op_name];
-        Ok(self.pure_bind(out, Expr::app(rt_fn(&path), vec![self.value_expr(arg)])))
+        Ok(self.pure_bind(out, function.call(vec![self.value_expr(arg)])))
     }
 
     fn lower_binary(&self, args: [ir::Value; 2]) -> Result<LoweredInst> {
@@ -841,15 +826,13 @@ impl<'a> InstCtx<'a> {
             return Ok(self.pure_bind(out, e));
         }
 
-        let ty_key = types::numeric_type_key(out_ty, "binary output")?;
-        let Some(op_name) = ops::binary_name(self.op) else {
+        let Some(function) = ops::binary_function(self.op, out_ty) else {
             return self.unsupported_opcode();
         };
-        let path = [ty_key, op_name];
-        Ok(self.pure_bind(out, Expr::app(rt_fn(&path), vec![a, b])))
+        Ok(self.pure_bind(out, function.call(vec![a, b])))
     }
 
-    fn lower_binary_imm(&self, arg: ir::Value, imm64: i64) -> Result<LoweredInst> {
+    fn lower_binary_imm(&self, arg: ir::Value, imm64: i64) -> LoweredInst {
         let out = self.results[0];
         let out_ty = self.func.dfg.value_type(out);
         let imm_expr = if out_ty == I32 {
@@ -858,17 +841,10 @@ impl<'a> InstCtx<'a> {
             Expr::int(imm64)
         };
 
-        let ty_key = types::int_type_key(out_ty, "binary immediate output")?;
-        let Some(op_name) = ops::binary_imm_name(self.op) else {
-            return Ok(
-                self.unsupported(format!("wasm2nix: unimplemented binary-imm op {}", self.op))
-            );
+        let Some(function) = ops::binary_imm_function(self.op, out_ty) else {
+            return self.unsupported(format!("wasm2nix: unimplemented binary-imm op {}", self.op));
         };
-        let path = [ty_key, op_name];
-        Ok(self.pure_bind(
-            out,
-            Expr::app(rt_fn(&path), vec![self.value_expr(arg), imm_expr]),
-        ))
+        self.pure_bind(out, function.call(vec![self.value_expr(arg), imm_expr]))
     }
 
     fn lower_select(&self, args: [ir::Value; 3]) -> LoweredInst {
@@ -879,13 +855,9 @@ impl<'a> InstCtx<'a> {
     }
 
     fn lower_int_compare(&self, args: [ir::Value; 2], cond: IntCC) -> LoweredInst {
-        let cmp_ns = if self.func.dfg.value_type(args[0]) == I64 {
-            "cmp_i64"
-        } else {
-            "cmp"
-        };
+        let function = int_compare_function(self.func.dfg.value_type(args[0]) == I64, cond);
         self.bind_result(Expr::app(
-            rt_fn(&[cmp_ns, intcc_name(cond)]),
+            function.expr(),
             vec![self.value_expr(args[0]), self.value_expr(args[1])],
         ))
     }
@@ -897,18 +869,20 @@ impl<'a> InstCtx<'a> {
         } else {
             Expr::int(imm64)
         };
-        let cmp_ns = if ty == I64 { "cmp_i64" } else { "cmp" };
+        let function = int_compare_function(ty == I64, cond);
         self.bind_result(Expr::app(
-            rt_fn(&[cmp_ns, intcc_name(cond)]),
+            function.expr(),
             vec![self.value_expr(arg), imm_expr],
         ))
     }
 
     fn lower_float_compare(&self, args: [ir::Value; 2], cond: FloatCC) -> Result<LoweredInst> {
         let ty = self.func.dfg.value_type(args[0]);
-        let float_ns = types::float_type_key(ty, "float comparison input")?;
+        let Some(function) = float_compare_function(ty, cond) else {
+            return self.unsupported_opcode();
+        };
         Ok(self.bind_result(Expr::app(
-            rt_fn(&["fcmp", float_ns, floatcc_name(cond)]),
+            function.expr(),
             vec![self.value_expr(args[0]), self.value_expr(args[1])],
         )))
     }
@@ -918,7 +892,7 @@ impl<'a> InstCtx<'a> {
         let out_ty = self.func.dfg.value_type(out);
         let addr = self.addr_with_offset(arg, offset);
         let e = Expr::app(
-            rt_fn(&["mem", types::load_fn_name(self.op, out_ty)?]),
+            types::load_function(self.op, out_ty)?.expr(),
             vec![addr, Expr::ident(self.st_name)],
         );
         Ok(self.pure_bind(out, e))
@@ -928,10 +902,7 @@ impl<'a> InstCtx<'a> {
         let val = self.value_expr(args[0]);
         let addr = self.addr_with_offset(args[1], offset);
         let e = Expr::app(
-            rt_fn(&[
-                "mem",
-                types::store_fn_name(self.op, self.func.dfg.value_type(args[0]))?,
-            ]),
+            types::store_function(self.op, self.func.dfg.value_type(args[0]))?.expr(),
             vec![val, addr, Expr::ident(self.st_name)],
         );
         Ok(self.stateful_state_step(e))
@@ -1294,142 +1265,6 @@ enum CallKind {
     Indirect { table_index: u32, type_id: String },
 }
 
-#[derive(Debug, Clone, Copy)]
-enum FixedCallKind {
-    Pure,
-    StatefulRecord,
-    StatefulState,
-}
-
-impl FixedCallKind {
-    const fn into_call_kind(self) -> CallKind {
-        match self {
-            Self::Pure => CallKind::Pure,
-            Self::StatefulRecord => CallKind::StatefulRecord,
-            Self::StatefulState => CallKind::StatefulState,
-        }
-    }
-}
-
-struct RuntimeIntrinsic {
-    intrinsic: intr::Intrinsic,
-    path: [&'static str; 2],
-    kind: FixedCallKind,
-}
-
-const FIXED_INTRINSICS: &[RuntimeIntrinsic] = &[
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::MemGrow,
-        path: ["mem", "grow"],
-        kind: FixedCallKind::StatefulRecord,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::MemSize,
-        path: ["mem", "size"],
-        kind: FixedCallKind::Pure,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::MemCopy,
-        path: ["mem", "copy"],
-        kind: FixedCallKind::StatefulState,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::MemFill,
-        path: ["mem", "fill"],
-        kind: FixedCallKind::StatefulState,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::MemInit,
-        path: ["mem", "init"],
-        kind: FixedCallKind::StatefulState,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::DataDrop,
-        path: ["mem", "data_drop"],
-        kind: FixedCallKind::StatefulState,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::TableCopy,
-        path: ["table", "copy"],
-        kind: FixedCallKind::StatefulState,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::TableInit,
-        path: ["table", "init"],
-        kind: FixedCallKind::StatefulState,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::ElemDrop,
-        path: ["table", "elem_drop"],
-        kind: FixedCallKind::StatefulState,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::TableGet,
-        path: ["table", "get"],
-        kind: FixedCallKind::Pure,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::TableSet,
-        path: ["table", "set"],
-        kind: FixedCallKind::StatefulState,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::TableFill,
-        path: ["table", "fill"],
-        kind: FixedCallKind::StatefulState,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::TableSize,
-        path: ["table", "size"],
-        kind: FixedCallKind::Pure,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::TableGrow,
-        path: ["table", "grow"],
-        kind: FixedCallKind::StatefulRecord,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::GlobalGetI32,
-        path: ["global", "get_i32"],
-        kind: FixedCallKind::Pure,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::GlobalGetI64,
-        path: ["global", "get_i64"],
-        kind: FixedCallKind::Pure,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::GlobalGetF32,
-        path: ["global", "get_f32"],
-        kind: FixedCallKind::Pure,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::GlobalGetF64,
-        path: ["global", "get_f64"],
-        kind: FixedCallKind::Pure,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::GlobalSetI32,
-        path: ["global", "set_i32"],
-        kind: FixedCallKind::StatefulState,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::GlobalSetI64,
-        path: ["global", "set_i64"],
-        kind: FixedCallKind::StatefulState,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::GlobalSetF32,
-        path: ["global", "set_f32"],
-        kind: FixedCallKind::StatefulState,
-    },
-    RuntimeIntrinsic {
-        intrinsic: intr::Intrinsic::GlobalSetF64,
-        path: ["global", "set_f64"],
-        kind: FixedCallKind::StatefulState,
-    },
-];
-
 fn resolve_callee(
     module: &NixModule, func: &ir::Function, name: ir::ExternalName,
 ) -> Result<(Expr, CallKind)> {
@@ -1465,11 +1300,11 @@ fn resolve_callee(
 fn resolve_intrinsic_callee(
     module: &NixModule, intrinsic: intr::Intrinsic, encoded_index: u32,
 ) -> Result<(Expr, CallKind)> {
-    if let Some(desc) = FIXED_INTRINSICS
-        .iter()
-        .find(|desc| desc.intrinsic == intrinsic)
-    {
-        return Ok((rt_fn(&desc.path), desc.kind.into_call_kind()));
+    if let Some(function) = intrinsic.runtime_function() {
+        let kind = intrinsic
+            .runtime_result_kind()
+            .expect("fixed runtime intrinsic has result kind");
+        return Ok((function.expr(), runtime_result_to_call_kind(kind)));
     }
 
     match intrinsic {
@@ -1485,7 +1320,7 @@ fn resolve_intrinsic_callee(
                 return MissingTypeSnafu { type_index }.fail();
             };
             Ok((
-                rt_fn(&["table", "call"]),
+                RuntimeFunction::TableCall.expr(),
                 CallKind::Indirect {
                     table_index,
                     type_id: signature_id(sig),
@@ -1499,37 +1334,112 @@ fn resolve_intrinsic_callee(
     }
 }
 
-const fn intcc_name(cc: IntCC) -> &'static str {
-    match cc {
-        IntCC::Equal => "eq",
-        IntCC::NotEqual => "ne",
-        IntCC::SignedLessThan => "lt_s",
-        IntCC::SignedGreaterThanOrEqual => "ge_s",
-        IntCC::SignedGreaterThan => "gt_s",
-        IntCC::SignedLessThanOrEqual => "le_s",
-        IntCC::UnsignedLessThan => "lt_u",
-        IntCC::UnsignedGreaterThanOrEqual => "ge_u",
-        IntCC::UnsignedGreaterThan => "gt_u",
-        IntCC::UnsignedLessThanOrEqual => "le_u",
+const fn runtime_result_to_call_kind(kind: RuntimeResultKind) -> CallKind {
+    match kind {
+        RuntimeResultKind::Value => CallKind::Pure,
+        RuntimeResultKind::State => CallKind::StatefulState,
+        RuntimeResultKind::Record => CallKind::StatefulRecord,
     }
 }
 
-const fn floatcc_name(cc: FloatCC) -> &'static str {
-    match cc {
-        FloatCC::Ordered => "ord",
-        FloatCC::Unordered => "uno",
-        FloatCC::Equal => "eq",
-        FloatCC::NotEqual => "ne",
-        FloatCC::OrderedNotEqual => "one",
-        FloatCC::UnorderedOrEqual => "ueq",
-        FloatCC::LessThan => "lt",
-        FloatCC::LessThanOrEqual => "le",
-        FloatCC::GreaterThan => "gt",
-        FloatCC::GreaterThanOrEqual => "ge",
-        FloatCC::UnorderedOrLessThan => "ult",
-        FloatCC::UnorderedOrLessThanOrEqual => "ule",
-        FloatCC::UnorderedOrGreaterThan => "ugt",
-        FloatCC::UnorderedOrGreaterThanOrEqual => "uge",
+const fn int_compare_function(is_i64: bool, cc: IntCC) -> RuntimeFunction {
+    match (is_i64, cc) {
+        (false, IntCC::Equal) => RuntimeFunction::CmpEq,
+        (false, IntCC::NotEqual) => RuntimeFunction::CmpNe,
+        (false, IntCC::SignedLessThan) => RuntimeFunction::CmpLtS,
+        (false, IntCC::SignedGreaterThanOrEqual) => RuntimeFunction::CmpGeS,
+        (false, IntCC::SignedGreaterThan) => RuntimeFunction::CmpGtS,
+        (false, IntCC::SignedLessThanOrEqual) => RuntimeFunction::CmpLeS,
+        (false, IntCC::UnsignedLessThan) => RuntimeFunction::CmpLtU,
+        (false, IntCC::UnsignedGreaterThanOrEqual) => RuntimeFunction::CmpGeU,
+        (false, IntCC::UnsignedGreaterThan) => RuntimeFunction::CmpGtU,
+        (false, IntCC::UnsignedLessThanOrEqual) => RuntimeFunction::CmpLeU,
+        (true, IntCC::Equal) => RuntimeFunction::CmpI64Eq,
+        (true, IntCC::NotEqual) => RuntimeFunction::CmpI64Ne,
+        (true, IntCC::SignedLessThan) => RuntimeFunction::CmpI64LtS,
+        (true, IntCC::SignedGreaterThanOrEqual) => RuntimeFunction::CmpI64GeS,
+        (true, IntCC::SignedGreaterThan) => RuntimeFunction::CmpI64GtS,
+        (true, IntCC::SignedLessThanOrEqual) => RuntimeFunction::CmpI64LeS,
+        (true, IntCC::UnsignedLessThan) => RuntimeFunction::CmpI64LtU,
+        (true, IntCC::UnsignedGreaterThanOrEqual) => RuntimeFunction::CmpI64GeU,
+        (true, IntCC::UnsignedGreaterThan) => RuntimeFunction::CmpI64GtU,
+        (true, IntCC::UnsignedLessThanOrEqual) => RuntimeFunction::CmpI64LeU,
+    }
+}
+
+const fn float_compare_function(
+    ty: cranelift_codegen::ir::Type, cc: FloatCC,
+) -> Option<RuntimeFunction> {
+    match (ty, cc) {
+        (cranelift_codegen::ir::types::F32, FloatCC::Ordered) => Some(RuntimeFunction::FcmpF32Ord),
+        (cranelift_codegen::ir::types::F32, FloatCC::Unordered) => {
+            Some(RuntimeFunction::FcmpF32Uno)
+        }
+        (cranelift_codegen::ir::types::F32, FloatCC::Equal) => Some(RuntimeFunction::FcmpF32Eq),
+        (cranelift_codegen::ir::types::F32, FloatCC::NotEqual) => Some(RuntimeFunction::FcmpF32Ne),
+        (cranelift_codegen::ir::types::F32, FloatCC::OrderedNotEqual) => {
+            Some(RuntimeFunction::FcmpF32One)
+        }
+        (cranelift_codegen::ir::types::F32, FloatCC::UnorderedOrEqual) => {
+            Some(RuntimeFunction::FcmpF32Ueq)
+        }
+        (cranelift_codegen::ir::types::F32, FloatCC::LessThan) => Some(RuntimeFunction::FcmpF32Lt),
+        (cranelift_codegen::ir::types::F32, FloatCC::LessThanOrEqual) => {
+            Some(RuntimeFunction::FcmpF32Le)
+        }
+        (cranelift_codegen::ir::types::F32, FloatCC::GreaterThan) => {
+            Some(RuntimeFunction::FcmpF32Gt)
+        }
+        (cranelift_codegen::ir::types::F32, FloatCC::GreaterThanOrEqual) => {
+            Some(RuntimeFunction::FcmpF32Ge)
+        }
+        (cranelift_codegen::ir::types::F32, FloatCC::UnorderedOrLessThan) => {
+            Some(RuntimeFunction::FcmpF32Ult)
+        }
+        (cranelift_codegen::ir::types::F32, FloatCC::UnorderedOrLessThanOrEqual) => {
+            Some(RuntimeFunction::FcmpF32Ule)
+        }
+        (cranelift_codegen::ir::types::F32, FloatCC::UnorderedOrGreaterThan) => {
+            Some(RuntimeFunction::FcmpF32Ugt)
+        }
+        (cranelift_codegen::ir::types::F32, FloatCC::UnorderedOrGreaterThanOrEqual) => {
+            Some(RuntimeFunction::FcmpF32Uge)
+        }
+        (cranelift_codegen::ir::types::F64, FloatCC::Ordered) => Some(RuntimeFunction::FcmpF64Ord),
+        (cranelift_codegen::ir::types::F64, FloatCC::Unordered) => {
+            Some(RuntimeFunction::FcmpF64Uno)
+        }
+        (cranelift_codegen::ir::types::F64, FloatCC::Equal) => Some(RuntimeFunction::FcmpF64Eq),
+        (cranelift_codegen::ir::types::F64, FloatCC::NotEqual) => Some(RuntimeFunction::FcmpF64Ne),
+        (cranelift_codegen::ir::types::F64, FloatCC::OrderedNotEqual) => {
+            Some(RuntimeFunction::FcmpF64One)
+        }
+        (cranelift_codegen::ir::types::F64, FloatCC::UnorderedOrEqual) => {
+            Some(RuntimeFunction::FcmpF64Ueq)
+        }
+        (cranelift_codegen::ir::types::F64, FloatCC::LessThan) => Some(RuntimeFunction::FcmpF64Lt),
+        (cranelift_codegen::ir::types::F64, FloatCC::LessThanOrEqual) => {
+            Some(RuntimeFunction::FcmpF64Le)
+        }
+        (cranelift_codegen::ir::types::F64, FloatCC::GreaterThan) => {
+            Some(RuntimeFunction::FcmpF64Gt)
+        }
+        (cranelift_codegen::ir::types::F64, FloatCC::GreaterThanOrEqual) => {
+            Some(RuntimeFunction::FcmpF64Ge)
+        }
+        (cranelift_codegen::ir::types::F64, FloatCC::UnorderedOrLessThan) => {
+            Some(RuntimeFunction::FcmpF64Ult)
+        }
+        (cranelift_codegen::ir::types::F64, FloatCC::UnorderedOrLessThanOrEqual) => {
+            Some(RuntimeFunction::FcmpF64Ule)
+        }
+        (cranelift_codegen::ir::types::F64, FloatCC::UnorderedOrGreaterThan) => {
+            Some(RuntimeFunction::FcmpF64Ugt)
+        }
+        (cranelift_codegen::ir::types::F64, FloatCC::UnorderedOrGreaterThanOrEqual) => {
+            Some(RuntimeFunction::FcmpF64Uge)
+        }
+        _ => None,
     }
 }
 

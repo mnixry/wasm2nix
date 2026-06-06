@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use snafu::prelude::*;
-use wasm2nix::{error, lower_wasm_to_nix, runtime_nix};
+use wasm2nix::{error, lower_wasm_to_nix};
+use wasm2nix_runtime::runtime_nix;
 
 #[derive(Debug, Clone, Parser)]
 struct Args {
