@@ -27,9 +27,7 @@ version  = "0.217.1"
 [profile.release]
 codegen-units = 1
 lto           = true
-opt-level     = "z"
-panic         = "abort"
-strip         = true
+opt-level     = 3
 
 [workspace.lints.rust]
 unsafe_code = "deny"

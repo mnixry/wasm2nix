@@ -39,28 +39,12 @@ fn wast_harness_i32_assert_return_smoke() {
 
 fn run_wast_file_path(path: &str) {
     let path = PathBuf::from(path);
-    run_with_large_stack(move || {
-        let script = match fs::read_to_string(&path) {
-            Ok(script) => script,
-            Err(err) => panic!("failed to read WAST file: {err}"),
-        };
-        let label = path.display().to_string();
-        run_wast_script(&script).unwrap_or_else(|err| panic!("{label}: {err}"));
-    });
-}
-
-fn run_with_large_stack(f: impl FnOnce() + Send + 'static) {
-    let handle = match std::thread::Builder::new()
-        .name("wast-large-stack".into())
-        .stack_size(256 * 1024 * 1024)
-        .spawn(f)
-    {
-        Ok(handle) => handle,
-        Err(err) => panic!("failed to spawn WAST harness thread: {err}"),
+    let script = match fs::read_to_string(&path) {
+        Ok(script) => script,
+        Err(err) => panic!("failed to read WAST file: {err}"),
     };
-    if let Err(payload) = handle.join() {
-        std::panic::resume_unwind(payload);
-    }
+    let label = path.display().to_string();
+    run_wast_script(&script).unwrap_or_else(|err| panic!("{label}: {err}"));
 }
 
 struct HarnessContext {

@@ -304,11 +304,25 @@ fn string_doc(s: &str) -> Doc {
 }
 
 fn join(docs: impl IntoIterator<Item = Doc>, sep: &Doc) -> Doc {
-    let mut docs = docs.into_iter();
-    let Some(first) = docs.next() else {
+    let mut docs = docs.into_iter().collect::<Vec<_>>();
+    if docs.is_empty() {
         return Doc::nil();
-    };
-    docs.fold(first, |acc, doc| acc.append(sep.clone()).append(doc))
+    }
+
+    while docs.len() > 1 {
+        let mut next = Vec::with_capacity(docs.len().div_ceil(2));
+        let mut pairs = docs.into_iter();
+        while let Some(left) = pairs.next() {
+            if let Some(right) = pairs.next() {
+                next.push(left.append(sep.clone()).append(right));
+            } else {
+                next.push(left);
+            }
+        }
+        docs = next;
+    }
+
+    docs.pop().expect("non-empty docs")
 }
 
 fn escape_string(s: &str) -> String {
@@ -329,7 +343,7 @@ fn escape_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AttrKey, Expr};
+    use crate::{AttrKey, Expr, LetBind};
 
     #[test]
     fn renders_attrset_and_let() {
@@ -405,5 +419,28 @@ mod tests {
         );
 
         assert_eq!(e.render(), "builtins.elemAt.nested xs 0");
+    }
+
+    #[test]
+    fn renders_large_flat_let_without_recursive_doc_chain() {
+        const BIND_COUNT: usize = 50_000;
+
+        let binds = (0..BIND_COUNT)
+            .map(|i| {
+                LetBind::new(
+                    format!("v{i}"),
+                    Expr::int(i64::try_from(i).expect("test bind index fits in i64")),
+                )
+            })
+            .collect();
+        let last_name = format!("v{}", BIND_COUNT - 1);
+        let e = Expr::let_binds(binds, Expr::ident(last_name.clone()));
+
+        let rendered = e.render();
+        let rendered = rendered.trim();
+
+        assert!(rendered.starts_with("let"));
+        assert!(rendered.contains(&format!("{last_name} = {};", BIND_COUNT - 1)));
+        assert!(rendered.ends_with(&last_name));
     }
 }

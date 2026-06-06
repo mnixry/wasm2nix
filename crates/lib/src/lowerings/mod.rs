@@ -642,6 +642,25 @@ mod tests {
     }
 
     #[test]
+    fn generated_module_inlines_single_use_immediates_into_bindings() {
+        let nix = lower_wat(
+            r#"
+            (module
+              (func (export "add_consts") (result i32)
+                i32.const 40
+                i32.const 2
+                i32.add))
+            "#,
+        );
+
+        assert!(nix.contains("rt.i32.add 40 2"));
+        assert!(
+            !nix.contains(" = 40;") && !nix.contains(" = 2;"),
+            "single-use immediate should be inlined instead of bound"
+        );
+    }
+
+    #[test]
     fn generated_module_keeps_compat_exports_and_instantiate() {
         let wasm = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x60, 0x02, 0x7F,

@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     intrinsics as intr,
-    nix::{AttrKey, Expr, UnOp, nix},
+    nix::{AttrBind, AttrKey, BinOp, Expr, LetBind, UnOp, nix},
     translator::NixModule,
 };
 
@@ -290,17 +290,296 @@ fn lower_block_body(
         }
     }
 
-    let mut expr = lower_terminator(func, term, &st_name, vmctx, free_values)?;
-    for step in steps.into_iter().rev() {
-        let body = if let Some(force) = step.force {
-            nix!(builtins.seq(#{force}, #{expr}))
-        } else {
-            expr
-        };
-        expr = Expr::let_in(step.binds, body);
+    let expr = lower_terminator(func, term, &st_name, vmctx, free_values)?;
+    let lowered = inline_single_use_values(steps, expr);
+
+    let mut expr = lowered.body;
+    if !lowered.forces.is_empty() {
+        let force_list = Expr::list(lowered.forces);
+        let seq = || Expr::select(nix!(builtins), AttrKey::ident("seq"));
+        let force_step = Expr::lambda(
+            "acc",
+            Expr::lambda(
+                "force",
+                Expr::app(
+                    seq(),
+                    vec![nix!(acc), Expr::app(seq(), vec![nix!(force), nix!(force)])],
+                ),
+            ),
+        );
+        let force_steps = Expr::app(
+            Expr::select(nix!(builtins), AttrKey::string("foldl'")),
+            vec![force_step, Expr::int(0), force_list],
+        );
+        expr = Expr::app(seq(), vec![force_steps, expr]);
     }
 
-    Ok(expr)
+    Ok(Expr::let_binds(lowered.binds, expr))
+}
+
+struct LoweredBlockBody {
+    binds: Vec<LetBind>,
+    forces: Vec<Expr>,
+    body: Expr,
+}
+
+fn inline_single_use_values(steps: Vec<Step>, body: Expr) -> LoweredBlockBody {
+    let mut binds = Vec::new();
+    let mut forces = Vec::new();
+
+    for step in steps {
+        binds.extend(step.binds.into_iter().map(LetBind::from));
+        if let Some(force) = step.force {
+            forces.push(force);
+        }
+    }
+
+    let mut body = body;
+    let mut index = 0;
+    while index < binds.len() {
+        let name = binds[index].name.clone();
+        let value = binds[index].value.clone();
+
+        if !is_inline_candidate(&value) || count_ident_uses_in_binds(&binds[..index], &name) != 0 {
+            index += 1;
+            continue;
+        }
+
+        let force_uses = count_ident_uses_in_exprs(&forces, &name);
+        let removable_force_count = forces
+            .iter()
+            .filter(|force| is_ident_named(force, &name))
+            .count();
+        if force_uses != removable_force_count || removable_force_count > 1 {
+            index += 1;
+            continue;
+        }
+
+        let use_count =
+            count_ident_uses_in_binds(&binds[index + 1..], &name) + count_ident_uses(&body, &name);
+        if use_count > 1 {
+            index += 1;
+            continue;
+        }
+
+        if use_count == 1 {
+            for bind in &mut binds[index + 1..] {
+                substitute_ident(&mut bind.value, &name, &value);
+            }
+            substitute_ident(&mut body, &name, &value);
+        }
+        if removable_force_count == 1 {
+            remove_ident_force(&mut forces, &name);
+        }
+        binds.remove(index);
+    }
+
+    LoweredBlockBody {
+        binds,
+        forces,
+        body,
+    }
+}
+
+fn is_inline_candidate(expr: &Expr) -> bool {
+    match expr {
+        Expr::Int(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Null => true,
+        Expr::IfThenElse {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            is_inline_candidate(cond)
+                && is_inline_candidate(then_expr)
+                && is_inline_candidate(else_expr)
+        }
+        Expr::BinOp { op, lhs, rhs } => {
+            is_safe_inline_binop(*op) && is_inline_candidate(lhs) && is_inline_candidate(rhs)
+        }
+        Expr::UnOp { expr, .. } => is_inline_candidate(expr),
+        Expr::Ident(_)
+        | Expr::Raw(_)
+        | Expr::Path(_)
+        | Expr::List(_)
+        | Expr::AttrSet { .. }
+        | Expr::Select { .. }
+        | Expr::Lambda { .. }
+        | Expr::LetIn { .. }
+        | Expr::Apply { .. } => false,
+    }
+}
+
+const fn is_safe_inline_binop(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Eq
+            | BinOp::Neq
+            | BinOp::Lt
+            | BinOp::Le
+            | BinOp::Gt
+            | BinOp::Ge
+            | BinOp::And
+            | BinOp::Or
+    )
+}
+
+fn count_ident_uses_in_binds(binds: &[LetBind], name: &str) -> usize {
+    binds
+        .iter()
+        .map(|bind| count_ident_uses(&bind.value, name))
+        .sum()
+}
+
+fn count_ident_uses_in_exprs(exprs: &[Expr], name: &str) -> usize {
+    exprs.iter().map(|expr| count_ident_uses(expr, name)).sum()
+}
+
+fn count_ident_uses(expr: &Expr, name: &str) -> usize {
+    match expr {
+        Expr::Ident(ident) => usize::from(ident == name),
+        Expr::Raw(_) | Expr::Path(_) | Expr::Int(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Null => {
+            0
+        }
+        Expr::List(items) => items.iter().map(|item| count_ident_uses(item, name)).sum(),
+        Expr::AttrSet { recursive, binds } => {
+            if *recursive && attr_binds_shadow(binds, name) {
+                return 0;
+            }
+            binds
+                .iter()
+                .map(|bind| count_ident_uses(&bind.value, name))
+                .sum()
+        }
+        Expr::Select { expr, .. } | Expr::UnOp { expr, .. } => count_ident_uses(expr, name),
+        Expr::Lambda { param, body } => {
+            if param == name {
+                0
+            } else {
+                count_ident_uses(body, name)
+            }
+        }
+        Expr::LetIn { binds, body } => {
+            if binds.iter().any(|bind| bind.name == name) {
+                return 0;
+            }
+            count_ident_uses_in_binds(binds, name) + count_ident_uses(body, name)
+        }
+        Expr::IfThenElse {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            count_ident_uses(cond, name)
+                + count_ident_uses(then_expr, name)
+                + count_ident_uses(else_expr, name)
+        }
+        Expr::Apply { func, args } => {
+            count_ident_uses(func, name)
+                + args
+                    .iter()
+                    .map(|arg| count_ident_uses(arg, name))
+                    .sum::<usize>()
+        }
+        Expr::BinOp { lhs, rhs, .. } => count_ident_uses(lhs, name) + count_ident_uses(rhs, name),
+    }
+}
+
+fn substitute_ident(expr: &mut Expr, name: &str, replacement: &Expr) {
+    match expr {
+        Expr::Ident(ident) if ident == name => {
+            *expr = replacement.clone();
+        }
+        Expr::Ident(_)
+        | Expr::Raw(_)
+        | Expr::Path(_)
+        | Expr::Int(_)
+        | Expr::Bool(_)
+        | Expr::Str(_)
+        | Expr::Null => {}
+        Expr::List(items) => {
+            for item in items {
+                substitute_ident(item, name, replacement);
+            }
+        }
+        Expr::AttrSet { recursive, binds } => {
+            if *recursive && attr_binds_shadow(binds, name) {
+                return;
+            }
+            for bind in binds {
+                substitute_ident(&mut bind.value, name, replacement);
+            }
+        }
+        Expr::Select { expr, .. } | Expr::UnOp { expr, .. } => {
+            substitute_ident(expr, name, replacement);
+        }
+        Expr::Lambda { param, body } => {
+            if param != name {
+                substitute_ident(body, name, replacement);
+            }
+        }
+        Expr::LetIn { binds, body } => {
+            if binds.iter().any(|bind| bind.name == name) {
+                return;
+            }
+            for bind in binds {
+                substitute_ident(&mut bind.value, name, replacement);
+            }
+            substitute_ident(body, name, replacement);
+        }
+        Expr::IfThenElse {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            substitute_ident(cond, name, replacement);
+            substitute_ident(then_expr, name, replacement);
+            substitute_ident(else_expr, name, replacement);
+        }
+        Expr::Apply { func, args } => {
+            substitute_ident(func, name, replacement);
+            for arg in args {
+                substitute_ident(arg, name, replacement);
+            }
+        }
+        Expr::BinOp { lhs, rhs, .. } => {
+            substitute_ident(lhs, name, replacement);
+            substitute_ident(rhs, name, replacement);
+        }
+    }
+}
+
+fn attr_binds_shadow(binds: &[AttrBind], name: &str) -> bool {
+    binds.iter().any(|bind| {
+        bind.path
+            .iter()
+            .next()
+            .is_some_and(|key| attr_key_matches(key, name))
+    })
+}
+
+fn attr_key_matches(key: &AttrKey, name: &str) -> bool {
+    match key {
+        AttrKey::Ident(ident) | AttrKey::Str(ident) => ident == name,
+    }
+}
+
+fn is_ident_named(expr: &Expr, name: &str) -> bool {
+    matches!(expr, Expr::Ident(ident) if ident == name)
+}
+
+fn remove_ident_force(forces: &mut Vec<Expr>, name: &str) {
+    let mut removed = false;
+    forces.retain(|force| {
+        if !removed && is_ident_named(force, name) {
+            removed = true;
+            false
+        } else {
+            true
+        }
+    });
 }
 
 fn lower_inst(
@@ -888,22 +1167,7 @@ fn lower_terminator(
         }
 
         (Opcode::BrTable, InstructionData::BranchTable { arg, table, .. }) => {
-            let index = value_expr(func, *arg, st_name, vmctx);
-            let table_data = &func.dfg.jump_tables[*table];
-            let mut expr = lower_block_call(
-                func,
-                table_data.default_block(),
-                st_name,
-                vmctx,
-                free_values,
-            );
-            for (i, branch) in table_data.as_slice().iter().copied().enumerate().rev() {
-                let branch_index = i64::try_from(i).expect("branch index fits in i64");
-                expr = nix!(if #{index.clone()} == #{branch_index}
-                    then #{lower_block_call(func, branch, st_name, vmctx, free_values)}
-                    else #{expr});
-            }
-            expr
+            lower_branch_table(func, inst, *arg, *table, st_name, vmctx, free_values)
         }
 
         (Opcode::Trap, _) => {
@@ -935,6 +1199,48 @@ fn lower_terminator(
             .fail();
         }
     })
+}
+
+fn lower_branch_table(
+    func: &ir::Function, inst: Inst, arg: ir::Value, table: ir::JumpTable, st_name: &str,
+    vmctx: ir::Value, free_values: &BTreeMap<Block, Vec<ir::Value>>,
+) -> Expr {
+    let index_name = format!("br_table_index_{}", inst.as_u32());
+    let targets_name = format!("br_table_targets_{}", inst.as_u32());
+    let table_data = &func.dfg.jump_tables[table];
+    let targets = table_data
+        .as_slice()
+        .iter()
+        .copied()
+        .map(|branch| lower_block_call(func, branch, st_name, vmctx, free_values))
+        .collect::<Vec<_>>();
+    let target_count = i64::try_from(targets.len()).expect("branch table target count fits in i64");
+    let default = lower_block_call(
+        func,
+        table_data.default_block(),
+        st_name,
+        vmctx,
+        free_values,
+    );
+    let selected = Expr::app(
+        Expr::select(nix!(builtins), AttrKey::ident("elemAt")),
+        vec![
+            Expr::ident(targets_name.clone()),
+            Expr::ident(index_name.clone()),
+        ],
+    );
+    let in_range = nix!(
+        #{Expr::ident(index_name.clone())} >= 0
+            && #{Expr::ident(index_name.clone())} < #{target_count}
+    );
+
+    Expr::let_in(
+        vec![
+            (index_name, value_expr(func, arg, st_name, vmctx)),
+            (targets_name, Expr::list(targets)),
+        ],
+        nix!(if #{in_range} then #{selected} else #{default}),
+    )
 }
 
 fn lower_block_call(
