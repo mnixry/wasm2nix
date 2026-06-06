@@ -147,7 +147,8 @@ pub fn eval_nix_json(ctx: &HarnessContext, expr: &Expr) -> Result<JsonValue> {
     let rendered = expr.render();
     let path = ctx.write_temp_nix_file("eval", &rendered)?;
     let output = Command::new("nix")
-        .args(["eval", "--raw", "--impure", "-f"])
+        .args(["--extra-experimental-features", "nix-command flakes"])
+        .args(["eval", "--store", "dummy://", "--raw", "--impure", "-f"])
         .arg(&path)
         .output()
         .context(EvalNixSnafu)?;
