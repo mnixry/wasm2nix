@@ -3,5 +3,8 @@ edition.workspace = true
 name              = "wasm2nix-ast"
 version.workspace = true
 
+[dependencies]
+pretty.workspace = true
+
 [lints]
 workspace = true

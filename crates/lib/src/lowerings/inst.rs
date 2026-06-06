@@ -11,8 +11,6 @@ use cranelift_codegen::{
 use snafu::prelude::*;
 
 use super::{
-    builtin_deep_seq, builtin_elem_at, builtin_foldl_strict, builtin_generic_closure,
-    builtin_get_attr, builtin_length, builtin_seq, builtin_throw,
     error::{
         EmptyBlockSnafu, MissingEntryBlockSnafu, MissingTypeSnafu, MissingVmContextSnafu, Result,
         UnknownExternalNamespaceSnafu, UnknownIntrinsicSnafu, UnsupportedExternalNameSnafu,
@@ -22,7 +20,7 @@ use super::{
 };
 use crate::{
     intrinsics as intr,
-    nix::{AttrKey, BinOp, Expr, UnOp},
+    nix::{AttrKey, Expr, UnOp, nix},
     translator::NixModule,
 };
 
@@ -78,153 +76,36 @@ pub(super) fn lower_function(
             .map(|v| Expr::ident(value_name(*v))),
     );
 
-    let entry_with_key = lower_jump_record_with_key(entry, entry_args, Expr::ident("st"), 0);
-    let apply_args = Expr::lambda(
-        "fn",
-        Expr::lambda(
-            "args",
-            Expr::app(
-                builtin_foldl_strict(),
-                vec![
-                    Expr::lambda(
-                        "f",
-                        Expr::lambda("arg", Expr::app(Expr::ident("f"), vec![Expr::ident("arg")])),
-                    ),
-                    Expr::ident("fn"),
-                    Expr::ident("args"),
-                ],
-            ),
-        ),
+    let entry_with_key = lower_jump_record_with_key(entry, entry_args, nix!(st), 0);
+    let apply_args = nix!(func: args: builtins."foldl'"(f: arg: f(arg), func, args));
+    let apply_block = nix!(block: args: blockSt:
+        (applyArgs(builtins.getAttr(block, blocks), args))(blockSt)
     );
-    let apply_block = Expr::lambda(
-        "block",
-        Expr::lambda(
-            "args",
-            Expr::lambda(
-                "blockSt",
-                Expr::app(
-                    Expr::app(
-                        Expr::ident("applyArgs"),
-                        vec![
-                            Expr::app(
-                                builtin_get_attr(),
-                                vec![Expr::ident("block"), Expr::ident("blocks")],
-                            ),
-                            Expr::ident("args"),
-                        ],
-                    ),
-                    vec![Expr::ident("blockSt")],
-                ),
-            ),
-        ),
-    );
-    let step_item = Expr::lambda(
-        "current",
-        Expr::if_then_else(
-            Expr::bin(
-                BinOp::Eq,
-                Expr::select(Expr::ident("current"), AttrKey::ident("tag")),
-                Expr::string("done"),
-            ),
-            Expr::list(vec![]),
-            Expr::list(vec![Expr::let_in(
-                vec![
-                    (
-                        "next".into(),
-                        Expr::app(
-                            Expr::ident("applyBlock"),
-                            vec![
-                                Expr::select(Expr::ident("current"), AttrKey::ident("block")),
-                                Expr::select(Expr::ident("current"), AttrKey::ident("args")),
-                                Expr::select(Expr::ident("current"), AttrKey::ident("st")),
-                            ],
-                        ),
-                    ),
-                    (
-                        "nextKey".into(),
-                        Expr::bin(
-                            BinOp::Add,
-                            Expr::select(Expr::ident("current"), AttrKey::ident("key")),
-                            Expr::int(1),
-                        ),
-                    ),
-                    (
-                        "nextKeyed".into(),
-                        Expr::bin(
-                            BinOp::Update,
-                            Expr::ident("next"),
-                            Expr::attrset(
-                                false,
-                                vec![(AttrKey::ident("key"), Expr::ident("nextKey"))],
-                            ),
-                        ),
-                    ),
-                    (
-                        "forceStep".into(),
-                        Expr::bin(
-                            BinOp::Eq,
-                            Expr::ident("nextKey"),
-                            Expr::bin(
-                                BinOp::Mul,
-                                Expr::bin(BinOp::Div, Expr::ident("nextKey"), Expr::int(1024)),
-                                Expr::int(1024),
-                            ),
-                        ),
-                    ),
-                ],
-                Expr::if_then_else(
-                    Expr::ident("forceStep"),
-                    Expr::app(
-                        builtin_deep_seq(),
-                        vec![Expr::ident("nextKeyed"), Expr::ident("nextKeyed")],
-                    ),
-                    Expr::ident("nextKeyed"),
-                ),
-            )]),
-        ),
-    );
-    let trace_expr = Expr::app(
-        builtin_generic_closure(),
-        vec![Expr::attrset(
-            false,
-            vec![
-                (AttrKey::ident("startSet"), Expr::list(vec![entry_with_key])),
-                (AttrKey::ident("operator"), Expr::ident("stepItem")),
-            ],
-        )],
-    );
-    let result_index = Expr::bin(
-        BinOp::Sub,
-        Expr::app(builtin_length(), vec![Expr::ident("trace")]),
-        Expr::int(1),
-    );
-    let return_result = Expr::attrset(
-        false,
-        vec![
-            (
-                AttrKey::ident("st"),
-                Expr::select(Expr::ident("result"), AttrKey::ident("st")),
-            ),
-            (
-                AttrKey::ident("results"),
-                Expr::select(Expr::ident("result"), AttrKey::ident("results")),
-            ),
-        ],
-    );
-    let body = Expr::let_in(
-        vec![
-            ("blocks".into(), blocks_attrset),
-            ("applyArgs".into(), apply_args),
-            ("applyBlock".into(), apply_block),
-            ("stepItem".into(), step_item),
-            ("trace".into(), trace_expr),
-            (
-                "result".into(),
-                Expr::app(builtin_elem_at(), vec![Expr::ident("trace"), result_index]),
-            ),
-        ],
-        return_result,
-    );
+    let force_step = nix!(nextKey == #{nix!(nextKey / 1024)} * 1024);
+    let step_next = nix!(let
+        next = applyBlock(current.block, current.args, current.st);
+        nextKey = current.key + 1;
+        nextKeyed = merge(next, { key = nextKey; });
+        forceStep = #{force_step};
+    in if forceStep then builtins.deepSeq(nextKeyed, nextKeyed) else nextKeyed);
+    let step_item =
+        nix!(current: if current.tag == "done" then [] else #{Expr::list(vec![step_next])});
+    let trace_expr = nix!(builtins.genericClosure({
+        startSet = [#{entry_with_key}];
+        operator = stepItem;
+    }));
+    let result_index = nix!(builtins.length(trace) - 1);
+    let body = nix!(let
+        blocks = #{blocks_attrset};
+        applyArgs = #{apply_args};
+        applyBlock = #{apply_block};
+        stepItem = #{step_item};
+        trace = #{trace_expr};
+        result = builtins.elemAt(trace, #{result_index});
+    in {
+        st = result.st;
+        results = result.results;
+    });
     Ok(lambda_chain(&params, body))
 }
 
@@ -391,7 +272,7 @@ fn lower_block_body(
     let mut expr = lower_terminator(func, term, &st_name, vmctx, free_values)?;
     for step in steps.into_iter().rev() {
         let body = if let Some(force) = step.force {
-            Expr::app(builtin_seq(), vec![force, expr])
+            nix!(builtins.seq(#{force}, #{expr}))
         } else {
             expr
         };
@@ -476,7 +357,7 @@ fn lower_inst(
                     let a = value_expr(func, *arg, st_name, vmctx);
 
                     let e = if in_ty == I8 && out_ty == I32 {
-                        Expr::if_then_else(a, Expr::int(1), Expr::int(0))
+                        nix!(if #{a} then 1 else 0)
                     } else {
                         // For now, rely on runtime for non-bool extensions.
                         Expr::app(
@@ -665,9 +546,9 @@ fn lower_inst(
             let out_ty = func.dfg.value_type(out);
             if out_ty == I8 {
                 let e = match op {
-                    Opcode::Band => Expr::bin(BinOp::And, a, b),
-                    Opcode::Bor => Expr::bin(BinOp::Or, a, b),
-                    Opcode::Bxor => Expr::bin(BinOp::Neq, a, b),
+                    Opcode::Band => nix!(#{a} && #{b}),
+                    Opcode::Bor => nix!(#{a} || #{b}),
+                    Opcode::Bxor => nix!(#{a} != #{b}),
                     _ => {
                         return UnsupportedOpcodeSnafu {
                             opcode: op.to_string(),
@@ -760,7 +641,7 @@ fn lower_inst(
             let else_value = value_expr(func, args[2], st_name, vmctx);
             let binds = vec![(
                 value_name(out),
-                Expr::if_then_else(cond, then_value, else_value),
+                nix!(if #{cond} then #{then_value} else #{else_value}),
             )];
             (seq_on_result(binds), None)
         }
@@ -814,7 +695,7 @@ fn lower_inst(
             let addr = if off == 0 {
                 base
             } else {
-                Expr::bin(BinOp::Add, base, Expr::int(i64::from(off)))
+                nix!(#{base} + #{i64::from(off)})
             };
             let st = Expr::ident(st_name);
             let e = Expr::app(
@@ -833,7 +714,7 @@ fn lower_inst(
             let addr = if off == 0 {
                 base
             } else {
-                Expr::bin(BinOp::Add, base, Expr::int(i64::from(off)))
+                nix!(#{base} + #{i64::from(off)})
             };
 
             let new_st = format!("st_{}", inst.as_u32());
@@ -859,14 +740,11 @@ fn lower_inst(
         {
             let trap_name = format!("trap_{}", inst.as_u32());
             let c = truthy_value_expr(func, *arg, st_name, vmctx);
-            let trap_expr = Expr::app(
-                builtin_throw(),
-                vec![Expr::string(format!("wasm2nix: trap {code}"))],
-            );
+            let trap_expr = nix!(throw(#{format!("wasm2nix: trap {code}")}));
             let trap = if op == Opcode::Trapz {
-                Expr::if_then_else(c, Expr::int(0), trap_expr)
+                nix!(if #{c} then 0 else #{trap_expr})
             } else {
-                Expr::if_then_else(c, trap_expr, Expr::int(0))
+                nix!(if #{c} then #{trap_expr} else 0)
             };
             (
                 Some(Step {
@@ -883,10 +761,7 @@ fn lower_inst(
                 Some(Step {
                     binds: vec![(
                         trap_name.clone(),
-                        Expr::app(
-                            builtin_throw(),
-                            vec![Expr::string(format!("wasm2nix: trap {code}"))],
-                        ),
+                        nix!(throw(#{format!("wasm2nix: trap {code}")})),
                     )],
                     force: Some(Expr::ident(trap_name)),
                 }),
@@ -951,15 +826,12 @@ fn lower_inst(
 
                     let mut binds: Vec<(String, Expr)> = Vec::new();
                     binds.push((tmp.clone(), indirect_call));
-                    binds.push((
-                        new_st.clone(),
-                        Expr::select(Expr::ident(&tmp), AttrKey::ident("st")),
-                    ));
+                    binds.push((new_st.clone(), nix!(#{Expr::ident(tmp.as_str())}.st)));
 
-                    let results_list = Expr::select(Expr::ident(&tmp), AttrKey::ident("results"));
+                    let results_list = nix!(#{Expr::ident(tmp.as_str())}.results);
                     for (i, &rv) in results.iter().enumerate() {
                         let idx = Expr::int(i64::try_from(i).expect("result index fits in i64"));
-                        let v = Expr::app(builtin_elem_at(), vec![results_list.clone(), idx]);
+                        let v = nix!(builtins.elemAt(#{results_list.clone()}, #{idx}));
                         binds.push((value_name(rv), v));
                     }
 
@@ -984,16 +856,13 @@ fn lower_inst(
 
                     let mut binds: Vec<(String, Expr)> = Vec::new();
                     binds.push((tmp.clone(), stateful_call));
-                    binds.push((
-                        new_st.clone(),
-                        Expr::select(Expr::ident(&tmp), AttrKey::ident("st")),
-                    ));
+                    binds.push((new_st.clone(), nix!(#{Expr::ident(tmp.as_str())}.st)));
 
                     // results are in `tmp.results` as a list
-                    let results_list = Expr::select(Expr::ident(&tmp), AttrKey::ident("results"));
+                    let results_list = nix!(#{Expr::ident(tmp.as_str())}.results);
                     for (i, &rv) in results.iter().enumerate() {
                         let idx = Expr::int(i64::try_from(i).expect("result index fits in i64"));
-                        let v = Expr::app(builtin_elem_at(), vec![results_list.clone(), idx]);
+                        let v = nix!(builtins.elemAt(#{results_list.clone()}, #{idx}));
                         binds.push((value_name(rv), v));
                     }
 
@@ -1041,7 +910,7 @@ fn unsupported_binds(
     inst: Inst, results: &[ir::Value], message: impl Into<String>,
 ) -> Vec<(String, Expr)> {
     let message = message.into();
-    let throw_expr = || Expr::app(builtin_throw(), vec![Expr::string(message.clone())]);
+    let throw_expr = || nix!(throw(#{message.clone()}));
     if results.is_empty() {
         vec![(format!("unsupported_{}", inst.as_u32()), throw_expr())]
     } else {
@@ -1081,7 +950,7 @@ fn lower_terminator(
             let then_call = lower_block_call(func, blocks[0], st_name, vmctx, free_values);
             let else_call = lower_block_call(func, blocks[1], st_name, vmctx, free_values);
 
-            Expr::if_then_else(cond, then_call, else_call)
+            nix!(if #{cond} then #{then_call} else #{else_call})
         }
 
         (Opcode::BrTable, InstructionData::BranchTable { arg, table, .. }) => {
@@ -1095,15 +964,10 @@ fn lower_terminator(
                 free_values,
             );
             for (i, branch) in table_data.as_slice().iter().copied().enumerate().rev() {
-                expr = Expr::if_then_else(
-                    Expr::bin(
-                        BinOp::Eq,
-                        index.clone(),
-                        Expr::int(i64::try_from(i).expect("branch index fits in i64")),
-                    ),
-                    lower_block_call(func, branch, st_name, vmctx, free_values),
-                    expr,
-                );
+                let branch_index = i64::try_from(i).expect("branch index fits in i64");
+                expr = nix!(if #{index.clone()} == #{branch_index}
+                    then #{lower_block_call(func, branch, st_name, vmctx, free_values)}
+                    else #{expr});
             }
             expr
         }
@@ -1112,37 +976,22 @@ fn lower_terminator(
             let trap_code = data
                 .trap_code()
                 .map_or_else(|| "?".into(), |code| code.to_string());
-            Expr::app(
-                builtin_throw(),
-                vec![Expr::string(format!("wasm2nix: trap {trap_code}"))],
-            )
+            nix!(throw(#{format!("wasm2nix: trap {trap_code}")}))
         }
 
         (Opcode::Trapz, InstructionData::CondTrap { arg, code, .. }) => {
             let c = truthy_value_expr(func, *arg, st_name, vmctx);
             // trapz: if c is false then trap.
-            Expr::if_then_else(
-                c,
-                lower_done_record(Expr::ident(st_name), vec![]),
-                Expr::app(
-                    builtin_throw(),
-                    vec![Expr::string(format!("wasm2nix: trapz {code}"))],
-                ),
-            )
+            nix!(if #{c}
+                then #{lower_done_record(Expr::ident(st_name), vec![])}
+                else throw(#{format!("wasm2nix: trapz {code}")}))
         }
 
         (Opcode::Trapnz, InstructionData::CondTrap { arg, code, .. }) => {
             let c = truthy_value_expr(func, *arg, st_name, vmctx);
             let ok = lower_done_record(Expr::ident(st_name), vec![]);
             // trapnz: if c is true then trap.
-            Expr::if_then_else(
-                c,
-                Expr::app(
-                    builtin_throw(),
-                    vec![Expr::string(format!("wasm2nix: trapnz {code}"))],
-                ),
-                ok,
-            )
+            nix!(if #{c} then throw(#{format!("wasm2nix: trapnz {code}")}) else #{ok})
         }
 
         _ => {
@@ -1184,27 +1033,17 @@ fn lower_jump_record_with_key(target: Block, args: Vec<Expr>, st: Expr, key: i64
 }
 
 fn lower_jump_record_binds(target: Block, args: Vec<Expr>, st: Expr, key: Option<i64>) -> Expr {
-    let mut binds = vec![
-        (AttrKey::ident("tag"), Expr::string("jump")),
-        (AttrKey::ident("block"), Expr::string(block_name(target))),
-        (AttrKey::ident("args"), Expr::list(args)),
-        (AttrKey::ident("st"), st),
-    ];
+    let block = block_name(target);
+    let args = Expr::list(args);
     if let Some(key) = key {
-        binds.push((AttrKey::ident("key"), Expr::int(key)));
+        nix!({ tag = "jump"; block = #{block}; args = #{args}; st = #{st}; key = #{key}; })
+    } else {
+        nix!({ tag = "jump"; block = #{block}; args = #{args}; st = #{st}; })
     }
-    Expr::attrset(false, binds)
 }
 
 fn lower_done_record(st: Expr, results: Vec<Expr>) -> Expr {
-    Expr::attrset(
-        false,
-        vec![
-            (AttrKey::ident("tag"), Expr::string("done")),
-            (AttrKey::ident("st"), st),
-            (AttrKey::ident("results"), Expr::list(results)),
-        ],
-    )
+    nix!({ tag = "done"; st = #{st}; results = #{Expr::list(results)}; })
 }
 
 #[derive(Debug, Clone)]
@@ -1383,6 +1222,6 @@ fn truthy_value_expr(func: &ir::Function, v: ir::Value, st_name: &str, vmctx: ir
     if func.dfg.value_type(v) == I8 {
         value
     } else {
-        Expr::bin(BinOp::Neq, value, Expr::int(0))
+        nix!(#{value} != 0)
     }
 }

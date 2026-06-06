@@ -11,7 +11,7 @@ use serde_json::Value as JsonValue;
 use tempfile::{Builder as TempFileBuilder, TempDir};
 use wasm2nix::{
     instantiation::ActiveInitializerResolver,
-    nix::{AttrKey, BinOp, Expr},
+    nix::{AttrKey, Expr, nix},
     translator::NixModule,
 };
 use wast::{
@@ -774,41 +774,23 @@ fn spectest_import(field_name: &str) -> Option<ImportType> {
 fn dynamic_memory_limits(
     ctx: &HarnessContext, state: &str, _index: u32, static_limits: Limits,
 ) -> Result<Limits, String> {
-    let expr = Expr::app(
-        harness_attr("dynamicMemoryLimits"),
-        vec![Expr::attrset(
-            false,
-            vec![
-                (AttrKey::ident("st"), state_expr(state)),
-                (AttrKey::ident("staticMin"), nix_u64(static_limits.min)?),
-                (
-                    AttrKey::ident("staticMax"),
-                    nix_optional_u64(static_limits.max)?,
-                ),
-            ],
-        )],
-    );
+    let expr = nix!(harness.dynamicMemoryLimits({
+        st = #{state_expr(state)};
+        staticMin = #{nix_u64(static_limits.min)?};
+        staticMax = #{nix_optional_u64(static_limits.max)?};
+    }));
     limits_from_json(eval_nix_json(ctx, &expr)?, static_limits)
 }
 
 fn dynamic_table_limits(
     ctx: &HarnessContext, state: &str, index: u32, static_limits: Limits,
 ) -> Result<Limits, String> {
-    let expr = Expr::app(
-        harness_attr("dynamicTableLimits"),
-        vec![Expr::attrset(
-            false,
-            vec![
-                (AttrKey::ident("st"), state_expr(state)),
-                (AttrKey::ident("tableIndex"), Expr::int(i64::from(index))),
-                (AttrKey::ident("staticMin"), nix_u64(static_limits.min)?),
-                (
-                    AttrKey::ident("staticMax"),
-                    nix_optional_u64(static_limits.max)?,
-                ),
-            ],
-        )],
-    );
+    let expr = nix!(harness.dynamicTableLimits({
+        st = #{state_expr(state)};
+        tableIndex = #{i64::from(index)};
+        staticMin = #{nix_u64(static_limits.min)?};
+        staticMax = #{nix_optional_u64(static_limits.max)?};
+    }));
     limits_from_json(eval_nix_json(ctx, &expr)?, static_limits)
 }
 
@@ -988,16 +970,7 @@ fn eval_instantiate(
             world,
             vec![("m_new".into(), import_module_expr(module, imports))],
         ),
-        Expr::let_in(
-            vec![(
-                "i".into(),
-                Expr::app(
-                    Expr::select(Expr::ident("m_new"), AttrKey::ident("instantiate")),
-                    vec![empty_attrset()],
-                ),
-            )],
-            Expr::select(Expr::ident("i"), AttrKey::ident("st")),
-        ),
+        nix!(let i = m_new.instantiate({}); in i.st),
     );
     let value = eval_nix_json(ctx, &expr)?;
     json_to_nix_expr(&value)
@@ -1014,7 +987,7 @@ fn eval_initial_state(
             world,
             vec![("m_new".into(), import_module_expr(module, imports))],
         ),
-        select_string_path(Expr::ident("m_new"), &["__wasm2nix", "st0"]),
+        nix!(m_new."__wasm2nix"."st0"),
     );
     let value = eval_nix_json(ctx, &expr)?;
     json_to_nix_expr(&value)
@@ -1031,51 +1004,32 @@ fn eval_invoke(
         .into_iter()
         .chain(std::iter::once(Expr::ident("st_in")))
         .collect::<Vec<_>>();
-    let state_expr = state.map_or_else(
-        || Expr::select(Expr::ident("i"), AttrKey::ident("st")),
-        state_expr,
-    );
+    let state_expr = state.map_or_else(|| nix!(i.st), state_expr);
     let world = EvalWorld::new(modules, aliases);
     let module_var = world
         .module_vars
         .get(module_key)
         .ok_or_else(|| format!("unknown module {module_key}"))?
         .clone();
-    let export = Expr::select(
-        select_string_path(
-            Expr::ident(module_var.as_str()),
-            &["__wasm2nix", "exportsByName"],
-        ),
-        AttrKey::string(encoded_export_key(name)),
-    );
+    let export_key = encoded_export_key(name);
+    let export =
+        nix!(#{Expr::ident(module_var.as_str())}."__wasm2nix"."exportsByName".(export_key));
     let expr = Expr::let_in(
         eval_binds(
             world,
             vec![
                 (
                     "i".into(),
-                    Expr::app(
-                        Expr::select(Expr::ident(module_var), AttrKey::ident("instantiate")),
-                        vec![empty_attrset()],
-                    ),
+                    nix!(#{Expr::ident(module_var.as_str())}.instantiate({})),
                 ),
                 ("st_in".into(), state_expr),
                 ("call".into(), Expr::app(export, args)),
             ],
         ),
-        Expr::attrset(
-            false,
-            vec![
-                (
-                    AttrKey::ident("results"),
-                    Expr::select(Expr::ident("call"), AttrKey::ident("results")),
-                ),
-                (
-                    AttrKey::ident("st"),
-                    Expr::select(Expr::ident("call"), AttrKey::ident("st")),
-                ),
-            ],
-        ),
+        nix!({
+            results = call.results;
+            st = call.st;
+        }),
     );
     let value = eval_nix_json(ctx, &expr)?;
     let results = value["results"].clone();
@@ -1087,54 +1041,32 @@ fn eval_get(
     ctx: &HarnessContext, module_key: &str, modules: &HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>, name: &str, state: Option<&str>,
 ) -> Result<InvokeResult, String> {
-    let state_expr = state.map_or_else(
-        || Expr::select(Expr::ident("i"), AttrKey::ident("st")),
-        state_expr,
-    );
+    let state_expr = state.map_or_else(|| nix!(i.st), state_expr);
     let world = EvalWorld::new(modules, aliases);
     let module_var = world
         .module_vars
         .get(module_key)
         .ok_or_else(|| format!("unknown module {module_key}"))?
         .clone();
-    let export = Expr::select(
-        select_string_path(
-            Expr::ident(module_var.as_str()),
-            &["__wasm2nix", "exportsByName"],
-        ),
-        AttrKey::string(encoded_export_key(name)),
-    );
+    let export_key = encoded_export_key(name);
+    let export =
+        nix!(#{Expr::ident(module_var.as_str())}."__wasm2nix"."exportsByName".(export_key));
     let expr = Expr::let_in(
         eval_binds(
             world,
             vec![
                 (
                     "i".into(),
-                    Expr::app(
-                        Expr::select(Expr::ident(module_var), AttrKey::ident("instantiate")),
-                        vec![empty_attrset()],
-                    ),
+                    nix!(#{Expr::ident(module_var.as_str())}.instantiate({})),
                 ),
                 ("st_in".into(), state_expr),
-                (
-                    "value".into(),
-                    Expr::app(
-                        Expr::select(export, AttrKey::ident("get")),
-                        vec![Expr::ident("st_in")],
-                    ),
-                ),
+                ("value".into(), nix!(#{export}.get(st_in))),
             ],
         ),
-        Expr::attrset(
-            false,
-            vec![
-                (
-                    AttrKey::ident("results"),
-                    Expr::list(vec![Expr::ident("value")]),
-                ),
-                (AttrKey::ident("st"), Expr::ident("st_in")),
-            ],
-        ),
+        nix!({
+            results = [value];
+            st = st_in;
+        }),
     );
     let value = eval_nix_json(ctx, &expr)?;
     let results = value["results"].clone();
@@ -1143,10 +1075,7 @@ fn eval_get(
 }
 
 fn eval_nix_json(ctx: &HarnessContext, expr: &Expr) -> Result<JsonValue, String> {
-    let expr = Expr::let_in(
-        vec![("harness".into(), harness_import_expr()?)],
-        Expr::app(harness_attr("toJSON"), vec![expr.clone()]),
-    );
+    let expr = nix!(let harness = #{harness_import_expr()?}; in harness.toJSON(#{expr}));
     let rendered = expr.render();
     let path = ctx.write_temp_nix_file("eval", &rendered)?;
     let output = Command::new("nix")
@@ -1181,32 +1110,15 @@ fn eval_binds(world: EvalWorld, extra: Vec<(String, Expr)>) -> Vec<(String, Expr
 }
 
 fn import_nix_file_expr(path: &Path) -> Expr {
-    Expr::app(
-        Expr::ident("import"),
-        vec![
-            Expr::path(path.display().to_string()),
-            Expr::attrset(false, vec![]),
-        ],
-    )
+    nix!(import(#{Expr::path(path.display().to_string())}, {}))
 }
 
 fn import_module_expr(path: &Path, imports: Expr) -> Expr {
-    Expr::app(
-        Expr::ident("import"),
-        vec![
-            Expr::path(path.display().to_string()),
-            Expr::ident("rt"),
-            imports,
-        ],
-    )
-}
-
-const fn empty_attrset() -> Expr {
-    Expr::attrset(false, vec![])
+    nix!(import(#{Expr::path(path.display().to_string())}, rt, #{imports}))
 }
 
 fn harness_attr(name: &str) -> Expr {
-    Expr::select(Expr::ident("harness"), AttrKey::ident(name))
+    nix!(harness.(name))
 }
 
 fn select_string_path(mut expr: Expr, attrs: &[&str]) -> Expr {
@@ -1263,34 +1175,15 @@ impl EvalWorld {
             let imports = imports_expr(key, aliases, &module_vars);
             binds.push((raw_var.clone(), import_module_expr(&module.path, imports)));
             let module_state_expr = module.state.as_deref().map_or_else(
-                || {
-                    Expr::select(
-                        Expr::app(
-                            Expr::select(
-                                Expr::ident(raw_var.as_str()),
-                                AttrKey::ident("instantiate"),
-                            ),
-                            vec![empty_attrset()],
-                        ),
-                        AttrKey::ident("st"),
-                    )
-                },
+                || nix!((#{Expr::ident(raw_var.as_str())}.instantiate({})).st),
                 state_expr,
             );
             binds.push((state_var.clone(), module_state_expr));
             binds.push((
                 import_var.clone(),
-                Expr::bin(
-                    BinOp::Update,
-                    Expr::ident(raw_var.as_str()),
-                    Expr::attrset(
-                        false,
-                        vec![(
-                            AttrKey::string("__wasm2nixState"),
-                            Expr::ident(state_var.as_str()),
-                        )],
-                    ),
-                ),
+                nix!(merge(#{Expr::ident(raw_var.as_str())}, {
+                    "__wasm2nixState" = #{Expr::ident(state_var.as_str())};
+                })),
             ));
         }
 
@@ -1441,26 +1334,14 @@ fn merge_table_entries_expr(
     target_state: &str, target_table_index: u32, source_state: &str, source_table_index: u32,
     offset: u32, len: u32,
 ) -> String {
-    Expr::app(
-        harness_attr("mergeTableEntries"),
-        vec![Expr::attrset(
-            false,
-            vec![
-                (AttrKey::ident("dstSt"), state_expr(target_state)),
-                (
-                    AttrKey::ident("targetTableIndex"),
-                    Expr::int(i64::from(target_table_index)),
-                ),
-                (AttrKey::ident("srcSt"), state_expr(source_state)),
-                (
-                    AttrKey::ident("sourceTableIndex"),
-                    Expr::int(i64::from(source_table_index)),
-                ),
-                (AttrKey::ident("offset"), Expr::int(i64::from(offset))),
-                (AttrKey::ident("len"), Expr::int(i64::from(len))),
-            ],
-        )],
-    )
+    nix!(harness.mergeTableEntries({
+        dstSt = #{state_expr(target_state)};
+        targetTableIndex = #{i64::from(target_table_index)};
+        srcSt = #{state_expr(source_state)};
+        sourceTableIndex = #{i64::from(source_table_index)};
+        offset = #{i64::from(offset)};
+        len = #{i64::from(len)};
+    }))
     .render()
 }
 
@@ -1507,24 +1388,14 @@ fn apply_trapping_memory_side_effects(
 fn merge_memory_words_expr(
     target_state: &str, source_state: &str, offset: u64, len: usize,
 ) -> String {
-    Expr::app(
-        harness_attr("mergeMemoryWords"),
-        vec![Expr::attrset(
-            false,
-            vec![
-                (AttrKey::ident("dstSt"), state_expr(target_state)),
-                (AttrKey::ident("srcSt"), state_expr(source_state)),
-                (
-                    AttrKey::ident("offset"),
-                    nix_u64(offset).unwrap_or_else(|_| Expr::raw(offset.to_string())),
-                ),
-                (
-                    AttrKey::ident("len"),
-                    nix_u64(len as u64).unwrap_or_else(|_| Expr::raw(len.to_string())),
-                ),
-            ],
-        )],
-    )
+    let offset = nix_u64(offset).unwrap_or_else(|_| Expr::raw(offset.to_string()));
+    let len = nix_u64(len as u64).unwrap_or_else(|_| Expr::raw(len.to_string()));
+    nix!(harness.mergeMemoryWords({
+        dstSt = #{state_expr(target_state)};
+        srcSt = #{state_expr(source_state)};
+        offset = #{offset};
+        len = #{len};
+    }))
     .render()
 }
 
@@ -1614,24 +1485,12 @@ fn sync_global_imports_to_targets(
 fn sync_global_state_expr(
     dst_state: &str, dst_global_index: u32, src_state: &str, src_global_index: u32,
 ) -> String {
-    Expr::app(
-        harness_attr("syncGlobalState"),
-        vec![Expr::attrset(
-            false,
-            vec![
-                (AttrKey::ident("dstSt"), state_expr(dst_state)),
-                (
-                    AttrKey::ident("dstGlobalIndex"),
-                    Expr::int(i64::from(dst_global_index)),
-                ),
-                (AttrKey::ident("srcSt"), state_expr(src_state)),
-                (
-                    AttrKey::ident("srcGlobalIndex"),
-                    Expr::int(i64::from(src_global_index)),
-                ),
-            ],
-        )],
-    )
+    nix!(harness.syncGlobalState({
+        dstSt = #{state_expr(dst_state)};
+        dstGlobalIndex = #{i64::from(dst_global_index)};
+        srcSt = #{state_expr(src_state)};
+        srcGlobalIndex = #{i64::from(src_global_index)};
+    }))
     .render()
 }
 
@@ -1670,20 +1529,11 @@ fn sync_memory_imports_to_targets(
 }
 
 fn sync_memory_state_expr(dst_state: &str, src_state: &str, src_memory_index: u32) -> String {
-    Expr::app(
-        harness_attr("syncMemoryState"),
-        vec![Expr::attrset(
-            false,
-            vec![
-                (AttrKey::ident("dstSt"), state_expr(dst_state)),
-                (AttrKey::ident("srcSt"), state_expr(src_state)),
-                (
-                    AttrKey::ident("srcMemoryIndex"),
-                    Expr::int(i64::from(src_memory_index)),
-                ),
-            ],
-        )],
-    )
+    nix!(harness.syncMemoryState({
+        dstSt = #{state_expr(dst_state)};
+        srcSt = #{state_expr(src_state)};
+        srcMemoryIndex = #{i64::from(src_memory_index)};
+    }))
     .render()
 }
 
@@ -1740,24 +1590,12 @@ fn merge_imported_table_initializers(
 fn merge_table_state_expr(
     target_state: &str, target_table_index: u32, source_state: &str, source_table_index: u32,
 ) -> String {
-    Expr::app(
-        harness_attr("mergeTableState"),
-        vec![Expr::attrset(
-            false,
-            vec![
-                (AttrKey::ident("dstSt"), state_expr(target_state)),
-                (
-                    AttrKey::ident("targetTableIndex"),
-                    Expr::int(i64::from(target_table_index)),
-                ),
-                (AttrKey::ident("srcSt"), state_expr(source_state)),
-                (
-                    AttrKey::ident("sourceTableIndex"),
-                    Expr::int(i64::from(source_table_index)),
-                ),
-            ],
-        )],
-    )
+    nix!(harness.mergeTableState({
+        dstSt = #{state_expr(target_state)};
+        targetTableIndex = #{i64::from(target_table_index)};
+        srcSt = #{state_expr(source_state)};
+        sourceTableIndex = #{i64::from(source_table_index)};
+    }))
     .render()
 }
 
@@ -1781,10 +1619,9 @@ fn wast_arg_to_nix(arg: &WastArg<'_>) -> Result<Expr, String> {
         WastArg::Core(WastArgCore::I64(value)) => Ok(Expr::int(*value)),
         WastArg::Core(WastArgCore::F32(value)) => Ok(Expr::int(i64::from(value.bits))),
         WastArg::Core(WastArgCore::F64(value)) => Ok(Expr::int(value.bits.cast_signed())),
-        WastArg::Core(WastArgCore::RefExtern(value)) => Ok(Expr::attrset(
-            false,
-            vec![(AttrKey::ident("extern"), Expr::int(i64::from(*value)))],
-        )),
+        WastArg::Core(WastArgCore::RefExtern(value)) => {
+            Ok(nix!({ extern = #{i64::from(*value)}; }))
+        }
         WastArg::Core(WastArgCore::RefNull(_)) => Ok(Expr::int(0)),
         _ => Err("unsupported invoke argument for this harness slice".into()),
     }
@@ -1792,7 +1629,7 @@ fn wast_arg_to_nix(arg: &WastArg<'_>) -> Result<Expr, String> {
 
 fn json_to_nix_expr(value: &JsonValue) -> Result<String, String> {
     let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
-    Ok(Expr::app(harness_attr("fromJSON"), vec![Expr::string(json)]).render())
+    Ok(nix!(harness.fromJSON(#{json})).render())
 }
 
 fn expected_results_json(results: &[WastRet<'_>]) -> Result<String, String> {

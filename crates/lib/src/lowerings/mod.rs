@@ -12,7 +12,7 @@ pub use error::{LowerError, Result};
 use snafu::prelude::*;
 
 use crate::{
-    nix::{AttrKey, BinOp, Expr},
+    nix::{AttrKey, Expr, nix},
     translator::NixModule,
 };
 
@@ -32,109 +32,46 @@ pub fn lower_module(module: &NixModule) -> Result<Expr> {
     let exports_expr = lower_exports_attrset(module, ExportKeyMode::Public)?;
     let exports_by_name_expr = lower_exports_attrset(module, ExportKeyMode::Encoded)?;
     let st0_expr = lower_initial_state(module)?;
-    let instantiate_expr = Expr::lambda(
-        "args",
-        Expr::attrset(
-            false,
-            vec![
-                (AttrKey::ident("st"), Expr::ident("st")),
-                (AttrKey::ident("exports"), Expr::ident("exports")),
-            ],
-        ),
-    );
-    let body = Expr::bin(
-        BinOp::Update,
-        Expr::ident("exports"),
-        Expr::attrset(
-            false,
-            vec![
-                (AttrKey::ident("instantiate"), instantiate_expr),
-                (
-                    AttrKey::ident("__wasm2nix"),
-                    Expr::attrset(
-                        false,
-                        vec![
-                            (AttrKey::ident("funcs"), Expr::ident("funcs")),
-                            (AttrKey::ident("moduleId"), Expr::ident("moduleId")),
-                            (AttrKey::ident("st0"), Expr::ident("st0")),
-                            (
-                                AttrKey::ident("exportsByName"),
-                                Expr::ident("exportsByName"),
-                            ),
-                        ],
-                    ),
-                ),
-            ],
-        ),
-    );
+    let instantiate_expr = nix!(args: { st = st; exports = exports; });
+    let body = nix!(merge(exports, {
+        instantiate = #{instantiate_expr};
+        __wasm2nix = {
+            funcs = funcs;
+            moduleId = moduleId;
+            st0 = st0;
+            exportsByName = exportsByName;
+        };
+    }));
 
-    Ok(Expr::lambda(
-        "rt",
-        Expr::lambda(
-            "imports",
-            Expr::let_in(
-                vec![
-                    ("moduleId".into(), lower_module_id()),
-                    ("funcs".into(), funcs_expr),
-                    ("funcRegistry".into(), lower_func_registry()),
-                    ("st0".into(), st0_expr),
-                    ("st".into(), lower_start_state(module)),
-                    ("exports".into(), exports_expr),
-                    ("exportsByName".into(), exports_by_name_expr),
-                ],
-                body,
-            ),
-        ),
-    ))
+    Ok(nix!(rt: imports: let
+        moduleId = #{lower_module_id()};
+        funcs = #{funcs_expr};
+        funcRegistry = #{lower_func_registry()};
+        st0 = #{st0_expr};
+        st = #{lower_start_state(module)};
+        exports = #{exports_expr};
+        exportsByName = #{exports_by_name_expr};
+    in #{body}))
 }
 
 fn lower_module_id() -> Expr {
-    Expr::if_then_else(
-        Expr::app(
-            Expr::select(Expr::ident("builtins"), AttrKey::ident("hasAttr")),
-            vec![Expr::string("__moduleId"), Expr::ident("imports")],
-        ),
-        Expr::select(Expr::ident("imports"), AttrKey::string("__moduleId")),
-        Expr::string("__self"),
-    )
+    nix!(if builtins.hasAttr("__moduleId", imports) then imports."__moduleId" else "__self")
 }
 
 fn lower_func_registry() -> Expr {
-    Expr::bin(
-        BinOp::Update,
-        Expr::if_then_else(
-            Expr::app(
-                Expr::select(Expr::ident("builtins"), AttrKey::ident("hasAttr")),
-                vec![Expr::string("__funcRegistry"), Expr::ident("imports")],
-            ),
-            Expr::select(Expr::ident("imports"), AttrKey::string("__funcRegistry")),
-            Expr::attrset(false, vec![]),
-        ),
-        Expr::app(
-            Expr::select(Expr::ident("builtins"), AttrKey::ident("listToAttrs")),
-            vec![Expr::list(vec![Expr::attrset(
-                false,
-                vec![
-                    (AttrKey::ident("name"), Expr::ident("moduleId")),
-                    (AttrKey::ident("value"), Expr::ident("funcs")),
-                ],
-            )])],
-        ),
-    )
+    nix!(merge(
+        (if builtins.hasAttr("__funcRegistry", imports) then imports."__funcRegistry" else {}),
+        builtins.listToAttrs([{ name = moduleId; value = funcs; }])
+    ))
 }
 
 fn lower_start_state(module: &NixModule) -> Expr {
     module.info.start_func.map_or_else(
-        || Expr::ident("st0"),
+        || nix!(st0),
         |start| {
-            let start_func = Expr::select(
-                Expr::ident("funcs"),
-                AttrKey::ident(format!("f{}", start.as_u32())),
-            );
-            Expr::select(
-                Expr::app(start_func, vec![Expr::ident("st0")]),
-                AttrKey::ident("st"),
-            )
+            let start_func =
+                Expr::select(nix!(funcs), AttrKey::ident(format!("f{}", start.as_u32())));
+            nix!((#{start_func}(st0)).st)
         },
     )
 }
@@ -161,11 +98,8 @@ fn lower_funcs_rec_attrset(module: &NixModule) -> Result<Expr> {
 }
 
 fn lower_imported_func(module_name: &str, field_name: &str, sig: &ir::Signature) -> Expr {
-    let module = Expr::select(
-        Expr::ident("imports"),
-        AttrKey::string(module_name.to_string()),
-    );
-    let imported = Expr::select(module.clone(), AttrKey::string(field_name.to_string()));
+    let module = nix!(imports.(module_name));
+    let imported = nix!(#{module.clone()}.(field_name));
     let mut params = (0..sig.params.len())
         .map(|idx| format!("arg{idx}"))
         .collect::<Vec<_>>();
@@ -179,19 +113,7 @@ fn lower_imported_func(module_name: &str, field_name: &str, sig: &ir::Signature)
         .collect::<Vec<_>>();
     call_args.push(lower_imported_extern_state(module));
     let call = Expr::app(imported, call_args);
-    let body = Expr::let_in(
-        vec![("call".into(), call)],
-        Expr::attrset(
-            false,
-            vec![
-                (
-                    AttrKey::ident("results"),
-                    Expr::select(Expr::ident("call"), AttrKey::ident("results")),
-                ),
-                (AttrKey::ident("st"), Expr::ident("st")),
-            ],
-        ),
-    );
+    let body = nix!(let call = #{call}; in { results = call.results; st = st; });
     lambda_chain(&params, body)
 }
 
@@ -209,7 +131,7 @@ fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> Result<Expr
             continue;
         }
         let f_name = format!("f{}", func_index.as_u32());
-        let f_expr = Expr::select(Expr::ident("funcs"), AttrKey::ident(f_name));
+        let f_expr = Expr::select(nix!(funcs), AttrKey::ident(f_name));
         for export_name in &func_decl.export_names {
             let Some(key) = export_attr_key(export_name, mode) else {
                 continue;
@@ -285,31 +207,22 @@ fn push_hex_byte(out: &mut String, byte: u8) {
 }
 
 fn lower_initial_state(module: &NixModule) -> Result<Expr> {
-    Ok(Expr::attrset(
-        false,
-        vec![
-            (AttrKey::ident("mem"), lower_initial_memory(module)),
-            (AttrKey::ident("globals"), lower_initial_globals(module)?),
-            (AttrKey::ident("tables"), lower_initial_tables(module)),
-            (AttrKey::ident("data"), lower_data_segments(module)),
-            (
-                AttrKey::ident("elemSegments"),
-                lower_element_segments(module),
-            ),
-        ],
-    ))
+    Ok(nix!({
+        mem = #{lower_initial_memory(module)};
+        globals = #{lower_initial_globals(module)?};
+        tables = #{lower_initial_tables(module)};
+        data = #{lower_data_segments(module)};
+        elemSegments = #{lower_element_segments(module)};
+    }))
 }
 
 fn lower_initial_memory(module: &NixModule) -> Expr {
     let Some((memory_index, memory)) = module.info.memories.iter().next() else {
-        return Expr::attrset(
-            false,
-            vec![
-                (AttrKey::ident("pageCount"), Expr::int(0)),
-                (AttrKey::ident("maxPageCount"), Expr::int(0)),
-                (AttrKey::ident("pages"), Expr::attrset(false, vec![])),
-            ],
-        );
+        return nix!({
+            pageCount = 0;
+            maxPageCount = 0;
+            pages = {};
+        });
     };
 
     let declared_min =
@@ -322,43 +235,19 @@ fn lower_initial_memory(module: &NixModule) -> Expr {
     if let Some((module_name, field_name)) = module.info.imported_memories.get(memory_index.index())
     {
         let imported = lower_imported_memory(module_name, field_name);
-        Expr::let_in(
-            vec![("importedMem".into(), imported)],
-            Expr::attrset(
-                false,
-                vec![
-                    (
-                        AttrKey::ident("pageCount"),
-                        lower_attr_or(Expr::ident("importedMem"), "pageCount", declared_min),
-                    ),
-                    (
-                        AttrKey::ident("maxPageCount"),
-                        lower_attr_or(Expr::ident("importedMem"), "maxPageCount", declared_max),
-                    ),
-                    (
-                        AttrKey::ident("pages"),
-                        Expr::bin(
-                            BinOp::Update,
-                            lower_attr_or(
-                                Expr::ident("importedMem"),
-                                "pages",
-                                Expr::attrset(false, vec![]),
-                            ),
-                            overlay_pages,
-                        ),
-                    ),
-                ],
-            ),
-        )
+        nix!(let
+            importedMem = #{imported};
+        in {
+            pageCount = #{lower_attr_or(nix!(importedMem), "pageCount", declared_min)};
+            maxPageCount = #{lower_attr_or(nix!(importedMem), "maxPageCount", declared_max)};
+            pages = merge(#{lower_attr_or(nix!(importedMem), "pages", nix!({}))}, #{overlay_pages});
+        })
     } else {
-        Expr::attrset(
-            false,
-            vec![
-                (AttrKey::ident("pageCount"), declared_min),
-                (AttrKey::ident("maxPageCount"), declared_max),
-                (AttrKey::ident("pages"), overlay_pages),
-            ],
-        )
+        nix!({
+            pageCount = #{declared_min};
+            maxPageCount = #{declared_max};
+            pages = #{overlay_pages};
+        })
     }
 }
 
@@ -391,26 +280,11 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
 }
 
 fn lower_imported_memory(module_name: &str, field_name: &str) -> Expr {
-    let module = Expr::select(
-        Expr::ident("imports"),
-        AttrKey::string(module_name.to_string()),
-    );
-    let imported = Expr::select(module.clone(), AttrKey::string(field_name.to_string()));
-    Expr::if_then_else(
-        Expr::bin(
-            BinOp::And,
-            Expr::app(builtin_is_attrs(), vec![imported.clone()]),
-            Expr::app(
-                builtin_has_attr(),
-                vec![Expr::string("get"), imported.clone()],
-            ),
-        ),
-        Expr::app(
-            Expr::select(imported.clone(), AttrKey::ident("get")),
-            vec![lower_imported_extern_state(module)],
-        ),
-        imported,
-    )
+    let module = nix!(imports.(module_name));
+    let imported = nix!(#{module.clone()}.(field_name));
+    nix!(if builtins.isAttrs(#{imported.clone()}) && builtins.hasAttr("get", #{imported.clone()})
+        then #{imported.clone()}.get(#{lower_imported_extern_state(module)})
+        else #{imported})
 }
 
 fn lower_data_segments(module: &NixModule) -> Expr {
@@ -453,10 +327,7 @@ fn lower_initial_globals(module: &NixModule) -> Result<Expr> {
         {
             lower_const_expr(module, init, global.entity.wasm_ty)?
         } else {
-            Expr::app(
-                builtin_throw(),
-                vec![Expr::string("wasm2nix: global has no initializer")],
-            )
+            nix!(throw("wasm2nix: global has no initializer"))
         };
 
         binds.push((bind_name.clone(), value));
@@ -497,57 +368,27 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
             module.info.imported_tables.get(table_index.index())
         {
             let imported = lower_imported_table(module_name, field_name);
-            Expr::let_in(
-                vec![("importedTable".into(), imported)],
-                Expr::attrset(
-                    false,
-                    vec![
-                        (
-                            AttrKey::ident("size"),
-                            lower_attr_or(
-                                Expr::ident("importedTable"),
-                                "size",
-                                Expr::int(i64::from(table_decl.entity.minimum)),
-                            ),
-                        ),
-                        (
-                            AttrKey::ident("maxSize"),
-                            lower_attr_or(
-                                Expr::ident("importedTable"),
-                                "maxSize",
-                                Expr::int(i64::from(table_decl.entity.maximum.unwrap_or(u32::MAX))),
-                            ),
-                        ),
-                        (
-                            AttrKey::ident("elems"),
-                            Expr::bin(
-                                BinOp::Update,
-                                lower_attr_or(
-                                    Expr::ident("importedTable"),
-                                    "elems",
-                                    Expr::attrset(false, vec![]),
-                                ),
-                                elems_expr,
-                            ),
-                        ),
-                    ],
-                ),
-            )
+            nix!(let
+                importedTable = #{imported};
+            in {
+                size = #{lower_attr_or(
+                    nix!(importedTable),
+                    "size",
+                    nix!(#{i64::from(table_decl.entity.minimum)}),
+                )};
+                maxSize = #{lower_attr_or(
+                    nix!(importedTable),
+                    "maxSize",
+                    nix!(#{i64::from(table_decl.entity.maximum.unwrap_or(u32::MAX))}),
+                )};
+                elems = merge(#{lower_attr_or(nix!(importedTable), "elems", nix!({}))}, #{elems_expr});
+            })
         } else {
-            Expr::attrset(
-                false,
-                vec![
-                    (
-                        AttrKey::ident("size"),
-                        Expr::int(i64::from(table_decl.entity.minimum)),
-                    ),
-                    (
-                        AttrKey::ident("maxSize"),
-                        Expr::int(i64::from(table_decl.entity.maximum.unwrap_or(u32::MAX))),
-                    ),
-                    (AttrKey::ident("elems"), elems_expr),
-                ],
-            )
+            nix!({
+                size = #{i64::from(table_decl.entity.minimum)};
+                maxSize = #{i64::from(table_decl.entity.maximum.unwrap_or(u32::MAX))};
+                elems = #{elems_expr};
+            })
         };
 
         table_binds.push((
@@ -560,26 +401,11 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
 }
 
 fn lower_imported_table(module_name: &str, field_name: &str) -> Expr {
-    let module = Expr::select(
-        Expr::ident("imports"),
-        AttrKey::string(module_name.to_string()),
-    );
-    let imported = Expr::select(module.clone(), AttrKey::string(field_name.to_string()));
-    Expr::if_then_else(
-        Expr::bin(
-            BinOp::And,
-            Expr::app(builtin_is_attrs(), vec![imported.clone()]),
-            Expr::app(
-                builtin_has_attr(),
-                vec![Expr::string("get"), imported.clone()],
-            ),
-        ),
-        Expr::app(
-            Expr::select(imported.clone(), AttrKey::ident("get")),
-            vec![lower_imported_extern_state(module)],
-        ),
-        imported,
-    )
+    let module = nix!(imports.(module_name));
+    let imported = nix!(#{module.clone()}.(field_name));
+    nix!(if builtins.isAttrs(#{imported.clone()}) && builtins.hasAttr("get", #{imported.clone()})
+        then #{imported.clone()}.get(#{lower_imported_extern_state(module)})
+        else #{imported})
 }
 
 fn lower_element_segments(module: &NixModule) -> Expr {
@@ -607,22 +433,13 @@ fn lower_element_segments(module: &NixModule) -> Expr {
 
 fn lower_table_entry(module: &NixModule, func_index: cranelift_wasm::FuncIndex) -> Expr {
     let Some(function) = module.info.functions.get(func_index) else {
-        return Expr::ident("null");
+        return nix!(null);
     };
-    Expr::attrset(
-        false,
-        vec![
-            (AttrKey::ident("module"), Expr::ident("moduleId")),
-            (
-                AttrKey::ident("func"),
-                Expr::int(i64::from(func_index.as_u32())),
-            ),
-            (
-                AttrKey::ident("type"),
-                lower_signature_id(module, function.entity),
-            ),
-        ],
-    )
+    nix!({
+        module = moduleId;
+        func = #{i64::from(func_index.as_u32())};
+        type = #{lower_signature_id(module, function.entity)};
+    })
 }
 
 fn lower_signature_id(module: &NixModule, sig_index: cranelift_wasm::TypeIndex) -> Expr {
@@ -646,73 +463,25 @@ fn signature_id(sig: &ir::Signature) -> String {
 }
 
 fn lower_imported_global(module_name: &str, field_name: &str) -> Expr {
-    let module = Expr::select(
-        Expr::ident("imports"),
-        AttrKey::string(module_name.to_string()),
-    );
-    let imported = Expr::select(module.clone(), AttrKey::string(field_name.to_string()));
-    Expr::if_then_else(
-        Expr::bin(
-            BinOp::And,
-            Expr::app(builtin_is_attrs(), vec![imported.clone()]),
-            Expr::app(
-                builtin_has_attr(),
-                vec![Expr::string("get"), imported.clone()],
-            ),
-        ),
-        Expr::app(
-            Expr::select(imported.clone(), AttrKey::ident("get")),
-            vec![lower_imported_extern_state(module)],
-        ),
-        imported,
-    )
+    let module = nix!(imports.(module_name));
+    let imported = nix!(#{module.clone()}.(field_name));
+    nix!(if builtins.isAttrs(#{imported.clone()}) && builtins.hasAttr("get", #{imported.clone()})
+        then #{imported.clone()}.get(#{lower_imported_extern_state(module)})
+        else #{imported})
 }
 
 fn lower_imported_extern_state(module: Expr) -> Expr {
-    Expr::if_then_else(
-        Expr::bin(
-            BinOp::And,
-            Expr::app(builtin_is_attrs(), vec![module.clone()]),
-            Expr::app(
-                builtin_has_attr(),
-                vec![Expr::string("__wasm2nixState"), module.clone()],
-            ),
-        ),
-        Expr::select(module.clone(), AttrKey::string("__wasm2nixState")),
-        Expr::if_then_else(
-            Expr::bin(
-                BinOp::And,
-                Expr::app(builtin_is_attrs(), vec![module.clone()]),
-                Expr::app(
-                    builtin_has_attr(),
-                    vec![Expr::string("instantiate"), module.clone()],
-                ),
-            ),
-            Expr::select(
-                Expr::app(
-                    Expr::select(module, AttrKey::ident("instantiate")),
-                    vec![Expr::attrset(false, vec![])],
-                ),
-                AttrKey::ident("st"),
-            ),
-            Expr::attrset(false, vec![]),
-        ),
-    )
+    nix!(if builtins.isAttrs(#{module.clone()}) && builtins.hasAttr("__wasm2nixState", #{module.clone()})
+        then #{module.clone()}."__wasm2nixState"
+        else if builtins.isAttrs(#{module.clone()}) && builtins.hasAttr("instantiate", #{module.clone()})
+            then (#{module}.instantiate({})).st
+            else {})
 }
 
 fn lower_attr_or(expr: Expr, attr: &str, default: Expr) -> Expr {
-    Expr::if_then_else(
-        Expr::bin(
-            BinOp::And,
-            Expr::app(builtin_is_attrs(), vec![expr.clone()]),
-            Expr::app(
-                builtin_has_attr(),
-                vec![Expr::string(attr.to_string()), expr.clone()],
-            ),
-        ),
-        Expr::select(expr, AttrKey::ident(attr.to_string())),
-        default,
-    )
+    nix!(if builtins.isAttrs(#{expr.clone()}) && builtins.hasAttr(#{attr}, #{expr.clone()})
+        then #{expr}.(attr)
+        else #{default})
 }
 
 fn global_bind_name(idx: cranelift_wasm::GlobalIndex) -> String {
@@ -797,66 +566,22 @@ fn lower_const_expr(
 
 fn lower_memory_export(memory_index: u32) -> Expr {
     debug_assert_eq!(memory_index, 0);
-    Expr::bin(
-        BinOp::Update,
-        Expr::select(Expr::ident("rt"), AttrKey::ident("mem")),
-        Expr::attrset(
-            false,
-            vec![(
-                AttrKey::ident("get"),
-                Expr::lambda("st", Expr::select(Expr::ident("st"), AttrKey::ident("mem"))),
-            )],
-        ),
-    )
+    nix!(merge(rt.mem, { get = st: st.mem; }))
 }
 
 fn lower_table_export(table_index: u32) -> Expr {
-    Expr::bin(
-        BinOp::Update,
-        Expr::select(Expr::ident("rt"), AttrKey::ident("table")),
-        Expr::attrset(
-            false,
-            vec![(
-                AttrKey::ident("get"),
-                Expr::lambda(
-                    "st",
-                    Expr::select(
-                        Expr::select(Expr::ident("st"), AttrKey::ident("tables")),
-                        AttrKey::string(table_index.to_string()),
-                    ),
-                ),
-            )],
-        ),
-    )
+    let table_key = table_index.to_string();
+    nix!(merge(rt.table, { get = st: st.tables.(table_key); }))
 }
 
 fn lower_global_export(global_index: u32, ty: WasmValType) -> Result<Expr> {
-    let get = Expr::lambda(
-        "st",
-        Expr::app(
-            types::global_get_expr(ty)?,
-            vec![Expr::int(i64::from(global_index)), Expr::ident("st")],
-        ),
-    );
-    let set = Expr::lambda(
-        "value",
-        Expr::lambda(
-            "st",
-            Expr::app(
-                types::global_set_expr(ty)?,
-                vec![
-                    Expr::int(i64::from(global_index)),
-                    Expr::ident("value"),
-                    Expr::ident("st"),
-                ],
-            ),
-        ),
-    );
-
-    Ok(Expr::attrset(
-        false,
-        vec![(AttrKey::ident("get"), get), (AttrKey::ident("set"), set)],
-    ))
+    let get = types::global_get_expr(ty)?;
+    let set = types::global_set_expr(ty)?;
+    let index = i64::from(global_index);
+    Ok(nix!({
+        get = st: #{get}(#{index}, st);
+        set = value: st: #{set}(#{index}, value, st);
+    }))
 }
 
 fn lambda_chain(params: &[String], body: Expr) -> Expr {
@@ -864,46 +589,6 @@ fn lambda_chain(params: &[String], body: Expr) -> Expr {
         .iter()
         .rev()
         .fold(body, |acc, p| Expr::lambda(p.clone(), acc))
-}
-
-fn builtin_seq() -> Expr {
-    Expr::select(Expr::ident("builtins"), AttrKey::ident("seq"))
-}
-
-fn builtin_deep_seq() -> Expr {
-    Expr::select(Expr::ident("builtins"), AttrKey::ident("deepSeq"))
-}
-
-fn builtin_elem_at() -> Expr {
-    Expr::select(Expr::ident("builtins"), AttrKey::ident("elemAt"))
-}
-
-fn builtin_foldl_strict() -> Expr {
-    Expr::select(Expr::ident("builtins"), AttrKey::string("foldl'"))
-}
-
-fn builtin_generic_closure() -> Expr {
-    Expr::select(Expr::ident("builtins"), AttrKey::ident("genericClosure"))
-}
-
-fn builtin_get_attr() -> Expr {
-    Expr::select(Expr::ident("builtins"), AttrKey::ident("getAttr"))
-}
-
-fn builtin_has_attr() -> Expr {
-    Expr::select(Expr::ident("builtins"), AttrKey::ident("hasAttr"))
-}
-
-fn builtin_is_attrs() -> Expr {
-    Expr::select(Expr::ident("builtins"), AttrKey::ident("isAttrs"))
-}
-
-fn builtin_length() -> Expr {
-    Expr::select(Expr::ident("builtins"), AttrKey::ident("length"))
-}
-
-fn builtin_throw() -> Expr {
-    Expr::ident("throw")
 }
 
 fn rt_fn(path: &[&str]) -> Expr {
@@ -1009,7 +694,8 @@ mod tests {
             "#,
         );
 
-        assert!(nix.contains("g0 = if builtins.isAttrs imports.\"spectest\".\"global_i32\""));
+        assert!(nix.contains("g0 = if"));
+        assert!(nix.contains("builtins.isAttrs imports.\"spectest\".\"global_i32\""));
         assert!(nix.contains("g1 = g0;"));
         assert!(nix.contains("g2 = 0;"));
         assert!(nix.contains("\"0\" = g0;"));
