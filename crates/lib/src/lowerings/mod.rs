@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 mod error;
 mod inst;
+mod inst_lower;
 mod ops;
 mod types;
 

@@ -1,4 +1,5 @@
 pub mod error;
+mod func_env;
 pub mod instantiation;
 pub mod lowerings;
 pub mod translator;
