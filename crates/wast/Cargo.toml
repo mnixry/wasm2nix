@@ -4,7 +4,7 @@ name              = "wasm2nix-wast"
 publish           = false
 version.workspace = true
 
-[dev-dependencies]
+[dependencies]
 wasm2nix.path         = "../lib"
 wasm2nix-runtime.path = "../runtime"
 
@@ -12,9 +12,15 @@ cranelift-codegen.workspace = true
 cranelift-entity.workspace  = true
 cranelift-wasm.workspace    = true
 serde_json.workspace        = true
+snafu.workspace             = true
 tempfile.workspace          = true
 wasmparser.workspace        = true
 wast.workspace              = true
+
+[build-dependencies]
+proc-macro2.workspace = true
+quote.workspace       = true
+snafu.workspace       = true
 
 [lints]
 workspace = true

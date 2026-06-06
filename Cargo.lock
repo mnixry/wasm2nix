@@ -573,6 +573,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -795,6 +796,8 @@ name = "wasm2nix-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "serde",
+ "serde_json",
  "snafu",
  "wasm2nix",
  "wasm2nix-runtime",
@@ -820,7 +823,10 @@ dependencies = [
  "cranelift-codegen",
  "cranelift-entity",
  "cranelift-wasm",
+ "proc-macro2",
+ "quote",
  "serde_json",
+ "snafu",
  "tempfile",
  "wasm2nix",
  "wasm2nix-runtime",
