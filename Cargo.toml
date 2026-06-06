@@ -1,5 +1,6 @@
 [workspace]
 members  = ["crates/*", "example"]
+metadata = { crane.name = "wasm2nix" }
 resolver = "3"
 
 [workspace.package]

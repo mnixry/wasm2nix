@@ -1,7 +1,7 @@
 {
   # spell-checker: disable
   inputs = {
-    # self.submodules = true;
+    self.submodules = true;
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts = {
       url = "github:hercules-ci/flake-parts";
@@ -13,6 +13,10 @@
     };
     treefmt-nix = {
       url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    determinate = {
+      url = "github:DeterminateSystems/nix-src";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "github:ipetkov/crane";
@@ -46,8 +50,9 @@
           };
           rustfmt = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.rustfmt);
           craneLib = (inputs.crane.mkLib pkgs).overrideToolchain (_: rust);
-          craneCommonArgs = craneLib.crateNameFromCargoToml { cargoToml = ./crates/lib/Cargo.toml; } // rec {
+          craneCommonArgs = rec {
             src = ./.;
+            inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
             strictDeps = true;
             cargoVendorDir = craneLib.vendorMultipleCargoDeps {
               inherit (craneLib.findCargoFiles src) cargoConfigs;
@@ -100,16 +105,43 @@
             );
             env = lib.optionalAttrs pkgs.stdenv.isDarwin { SDKROOT = pkgs.apple-sdk.sdkroot; };
           };
-          checks = {
-            clippy = craneLib.cargoClippy (
-              craneCommonArgs
-              // {
-                inherit cargoArtifacts;
-                cargoClippyExtraArgs = "--all-targets --all-features";
-              }
-            );
-            test = craneLib.cargoNextest (craneCommonArgs // { inherit cargoArtifacts; });
-          };
+          checks = (
+            {
+              clippy = craneLib.cargoClippy (
+                craneCommonArgs
+                // {
+                  inherit cargoArtifacts;
+                  cargoClippyExtraArgs = "--all-targets --all-features";
+                }
+              );
+            }
+            //
+              lib.mapAttrs'
+                (
+                  name: nixImpl:
+                  lib.nameValuePair "tests@${name}" (
+                    craneLib.cargoNextest (
+                      craneCommonArgs
+                      // {
+                        inherit cargoArtifacts;
+                        nativeBuildInputs = [ nixImpl ];
+                      }
+                    )
+                  )
+                )
+                {
+                  "NixOS/nix" = pkgs.nix;
+                  "lix-project/lix" = pkgs.lix;
+                  "DeterminateSystems/nix-src" = inputs.determinate.packages.${system}.default;
+                }
+          );
+          packages.default = craneLib.buildPackage (
+            craneCommonArgs
+            // {
+              inherit cargoArtifacts;
+              doCheck = false;
+            }
+          );
         };
     };
 }
