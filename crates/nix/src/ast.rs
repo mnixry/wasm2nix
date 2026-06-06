@@ -508,6 +508,13 @@ impl IntoNixExpr for isize {
 pub struct RenderOptions {
     pub width: usize,
     pub indent: usize,
+    pub style: RenderStyle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderStyle {
+    Pretty,
+    Compact,
 }
 
 impl Default for RenderOptions {
@@ -515,6 +522,7 @@ impl Default for RenderOptions {
         Self {
             width: 100,
             indent: 2,
+            style: RenderStyle::Pretty,
         }
     }
 }

@@ -1,6 +1,6 @@
 use pretty::BoxDoc;
 
-use crate::{AttrBind, AttrKey, BinOp, Expr, RenderOptions};
+use crate::{AttrBind, AttrKey, BinOp, Expr, RenderOptions, RenderStyle};
 
 type Doc = BoxDoc<'static, ()>;
 
@@ -100,7 +100,11 @@ impl<'a> Printer<'a> {
     pub fn finish(self) -> String {
         let doc = self.doc.unwrap_or_else(Doc::nil);
         let mut out = Vec::new();
-        doc.render(self.options.width, &mut out)
+        let width = match self.options.style {
+            RenderStyle::Pretty => self.options.width,
+            RenderStyle::Compact => usize::MAX,
+        };
+        doc.render(width, &mut out)
             .expect("rendering to Vec cannot fail");
         String::from_utf8(out).expect("Nix formatter only emits UTF-8")
     }
@@ -343,7 +347,7 @@ fn escape_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AttrKey, Expr, LetBind};
+    use crate::{AttrKey, Expr, LetBind, RenderStyle};
 
     #[test]
     fn renders_attrset_and_let() {
@@ -380,9 +384,30 @@ mod tests {
         assert_eq!(
             e.render_with(&RenderOptions {
                 width: 10,
-                indent: 2
+                indent: 2,
+                style: RenderStyle::Pretty,
             }),
             "{\n  alpha = 1;\n  beta = 2;\n}"
+        );
+    }
+
+    #[test]
+    fn compact_style_does_not_wrap_with_width() {
+        let e = Expr::attrset(
+            false,
+            vec![
+                (AttrKey::ident("alpha"), Expr::int(1)),
+                (AttrKey::ident("beta"), Expr::int(2)),
+            ],
+        );
+
+        assert_eq!(
+            e.render_with(&RenderOptions {
+                width: 10,
+                indent: 2,
+                style: RenderStyle::Compact,
+            }),
+            "{ alpha = 1; beta = 2; }"
         );
     }
 
