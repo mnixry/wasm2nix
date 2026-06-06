@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 mod error;
 mod inst;
+mod ops;
 mod types;
 
 use cranelift_codegen::ir;
@@ -631,6 +632,15 @@ mod tests {
         lower_wasm(&wasm)
     }
 
+    fn assert_contains_all(haystack: &str, needles: &[&str]) {
+        for needle in needles {
+            assert!(
+                haystack.contains(needle),
+                "expected generated Nix to contain {needle}"
+            );
+        }
+    }
+
     #[test]
     fn generated_module_keeps_compat_exports_and_instantiate() {
         let wasm = [
@@ -701,6 +711,102 @@ mod tests {
         assert!(nix.contains("\"0\" = g0;"));
         assert!(nix.contains("\"1\" = g1;"));
         assert!(nix.contains("\"2\" = g2;"));
+    }
+
+    #[test]
+    fn generated_module_lowers_memory_intrinsics_to_runtime_calls() {
+        let nix = lower_wat(
+            r#"
+            (module
+              (memory 1)
+              (data $d "abc")
+              (func (export "m")
+                (drop (memory.size))
+                (drop (memory.grow (i32.const 0)))
+                (memory.copy (i32.const 0) (i32.const 1) (i32.const 1))
+                (memory.fill (i32.const 0) (i32.const 0) (i32.const 1))
+                (memory.init $d (i32.const 0) (i32.const 0) (i32.const 1))
+                (data.drop $d)))
+            "#,
+        );
+
+        assert_contains_all(
+            &nix,
+            &[
+                "rt.mem.size",
+                "rt.mem.grow",
+                "rt.mem.copy",
+                "rt.mem.fill",
+                "rt.mem.init",
+                "rt.mem.data_drop",
+            ],
+        );
+    }
+
+    #[test]
+    fn generated_module_lowers_table_intrinsics_to_runtime_calls() {
+        let nix = lower_wat(
+            r#"
+            (module
+              (table $t 2 funcref)
+              (elem $e funcref (ref.null func))
+              (func (export "t")
+                (drop (table.size $t))
+                (drop (table.grow $t (ref.null func) (i32.const 0)))
+                (drop (table.get $t (i32.const 0)))
+                (table.set $t (i32.const 0) (ref.null func))
+                (table.fill $t (i32.const 0) (ref.null func) (i32.const 1))
+                (table.copy $t $t (i32.const 0) (i32.const 1) (i32.const 1))
+                (table.init $t $e (i32.const 0) (i32.const 0) (i32.const 1))
+                (elem.drop $e)))
+            "#,
+        );
+
+        assert_contains_all(
+            &nix,
+            &[
+                "rt.table.size",
+                "rt.table.grow",
+                "rt.table.get",
+                "rt.table.set",
+                "rt.table.fill",
+                "rt.table.copy",
+                "rt.table.init",
+                "rt.table.elem_drop",
+            ],
+        );
+    }
+
+    #[test]
+    fn generated_module_lowers_typed_global_intrinsics_to_runtime_calls() {
+        let nix = lower_wat(
+            r#"
+            (module
+              (global $i32 (mut i32) (i32.const 0))
+              (global $i64 (mut i64) (i64.const 0))
+              (global $f32 (mut f32) (f32.const 0))
+              (global $f64 (mut f64) (f64.const 0))
+              (func (export "g")
+                (global.set $i32 (global.get $i32))
+                (global.set $i64 (global.get $i64))
+                (global.set $f32 (global.get $f32))
+                (global.set $f64 (global.get $f64))))
+            "#,
+        );
+
+        assert_contains_all(
+            &nix,
+            &[
+                "rt.global.get_i32",
+                "rt.global.get_i64",
+                "rt.global.get_f32",
+                "rt.global.get_f64",
+                "rt.global.set_i32",
+                "rt.global.set_i64",
+                "rt.global.set_f32",
+                "rt.global.set_f64",
+            ],
+        );
     }
 
     #[test]

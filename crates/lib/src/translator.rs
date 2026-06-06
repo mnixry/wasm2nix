@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use cranelift_codegen::{
     cursor::FuncCursor,
     ir,
@@ -508,32 +510,36 @@ fn validate_global_type(global: Global) -> WasmResult<()> {
     }
 }
 
+macro_rules! intrinsic_abi_param {
+    ($env:expr; vmctx) => {
+        ir::AbiParam::special($env.pointer_type(), ir::ArgumentPurpose::VMContext)
+    };
+    ($env:expr; $ty:expr) => {
+        ir::AbiParam::new($ty)
+    };
+}
+
+macro_rules! intrinsic_sig {
+    ($env:expr; [$($param:tt),* $(,)?] -> [$($ret:tt),* $(,)?]) => {{
+        let mut sig = ir::Signature::new(CallConv::Fast);
+        $(sig.params.push(intrinsic_abi_param!($env; $param));)*
+        $(sig.returns.push(intrinsic_abi_param!($env; $ret));)*
+        sig
+    }};
+}
+
+macro_rules! cached_intrinsic_method {
+    ($method:ident, $intrinsic:path, [$($param:tt),* $(,)?] -> [$($ret:tt),* $(,)?]) => {
+        fn $method(&mut self, func: &mut ir::Function) -> ir::FuncRef {
+            let sig = intrinsic_sig!(self; [$($param),*] -> [$($ret),*]);
+            self.cached_intrinsic(func, $intrinsic, sig)
+        }
+    };
+}
+
 #[derive(Debug, Default, Clone)]
 struct Intrinsics {
-    mem_grow: Option<ir::FuncRef>,
-    mem_size: Option<ir::FuncRef>,
-    mem_copy: Option<ir::FuncRef>,
-    mem_fill: Option<ir::FuncRef>,
-    mem_init: Option<ir::FuncRef>,
-    data_drop: Option<ir::FuncRef>,
-    table_copy: Option<ir::FuncRef>,
-    table_init: Option<ir::FuncRef>,
-    elem_drop: Option<ir::FuncRef>,
-    table_get: Option<ir::FuncRef>,
-    table_set: Option<ir::FuncRef>,
-    table_fill: Option<ir::FuncRef>,
-    table_size: Option<ir::FuncRef>,
-    table_grow: Option<ir::FuncRef>,
-
-    global_get_i32: Option<ir::FuncRef>,
-    global_get_i64: Option<ir::FuncRef>,
-    global_get_f32: Option<ir::FuncRef>,
-    global_get_f64: Option<ir::FuncRef>,
-
-    global_set_i32: Option<ir::FuncRef>,
-    global_set_i64: Option<ir::FuncRef>,
-    global_set_f32: Option<ir::FuncRef>,
-    global_set_f64: Option<ir::FuncRef>,
+    refs: BTreeMap<u32, ir::FuncRef>,
 }
 
 pub struct NixFuncEnvironment<'m> {
@@ -578,232 +584,131 @@ impl<'m> NixFuncEnvironment<'m> {
         })
     }
 
-    fn intrinsic_mem_grow(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.mem_grow {
-            return f;
+    fn cached_intrinsic(
+        &mut self, func: &mut ir::Function, intrinsic: intr::Intrinsic, sig: ir::Signature,
+    ) -> ir::FuncRef {
+        let key = u32::from(intrinsic);
+        if let Some(fref) = self.intrinsics.refs.get(&key).copied() {
+            return fref;
         }
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::special(
-            self.pointer_type(),
-            ir::ArgumentPurpose::VMContext,
-        ));
-        sig.returns.push(ir::AbiParam::new(I32));
 
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::MemGrow, sig);
-        self.intrinsics.mem_grow = Some(fref);
+        let fref = Self::import_intrinsic(func, intrinsic, sig);
+        self.intrinsics.refs.insert(key, fref);
         fref
     }
 
-    fn intrinsic_mem_size(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.mem_size {
-            return f;
-        }
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::special(
-            self.pointer_type(),
-            ir::ArgumentPurpose::VMContext,
-        ));
-        sig.returns.push(ir::AbiParam::new(I32));
+    cached_intrinsic_method!(
+        intrinsic_mem_grow,
+        intr::Intrinsic::MemGrow,
+        [I32, vmctx] -> [I32]
+    );
+    cached_intrinsic_method!(
+        intrinsic_mem_size,
+        intr::Intrinsic::MemSize,
+        [vmctx] -> [I32]
+    );
+    cached_intrinsic_method!(
+        intrinsic_mem_copy,
+        intr::Intrinsic::MemCopy,
+        [I32, I32, I32, vmctx] -> []
+    );
+    cached_intrinsic_method!(
+        intrinsic_mem_fill,
+        intr::Intrinsic::MemFill,
+        [I32, I32, I32, vmctx] -> []
+    );
+    cached_intrinsic_method!(
+        intrinsic_mem_init,
+        intr::Intrinsic::MemInit,
+        [I32, I32, I32, I32, vmctx] -> []
+    );
+    cached_intrinsic_method!(
+        intrinsic_data_drop,
+        intr::Intrinsic::DataDrop,
+        [I32, vmctx] -> []
+    );
+    cached_intrinsic_method!(
+        intrinsic_table_copy,
+        intr::Intrinsic::TableCopy,
+        [I32, I32, I32, I32, I32, vmctx] -> []
+    );
+    cached_intrinsic_method!(
+        intrinsic_table_init,
+        intr::Intrinsic::TableInit,
+        [I32, I32, I32, I32, I32, vmctx] -> []
+    );
+    cached_intrinsic_method!(
+        intrinsic_elem_drop,
+        intr::Intrinsic::ElemDrop,
+        [I32, vmctx] -> []
+    );
+    cached_intrinsic_method!(
+        intrinsic_table_get,
+        intr::Intrinsic::TableGet,
+        [I32, I32, vmctx] -> [I32]
+    );
+    cached_intrinsic_method!(
+        intrinsic_table_set,
+        intr::Intrinsic::TableSet,
+        [I32, I32, I32, vmctx] -> []
+    );
+    cached_intrinsic_method!(
+        intrinsic_table_fill,
+        intr::Intrinsic::TableFill,
+        [I32, I32, I32, I32, vmctx] -> []
+    );
+    cached_intrinsic_method!(
+        intrinsic_table_size,
+        intr::Intrinsic::TableSize,
+        [I32, vmctx] -> [I32]
+    );
+    cached_intrinsic_method!(
+        intrinsic_table_grow,
+        intr::Intrinsic::TableGrow,
+        [I32, I32, I32, vmctx] -> [I32]
+    );
 
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::MemSize, sig);
-        self.intrinsics.mem_size = Some(fref);
-        fref
-    }
+    cached_intrinsic_method!(
+        intrinsic_global_get_i32,
+        intr::Intrinsic::GlobalGetI32,
+        [I32, vmctx] -> [I32]
+    );
+    cached_intrinsic_method!(
+        intrinsic_global_get_i64,
+        intr::Intrinsic::GlobalGetI64,
+        [I32, vmctx] -> [I64]
+    );
+    cached_intrinsic_method!(
+        intrinsic_global_get_f32,
+        intr::Intrinsic::GlobalGetF32,
+        [I32, vmctx] -> [F32]
+    );
+    cached_intrinsic_method!(
+        intrinsic_global_get_f64,
+        intr::Intrinsic::GlobalGetF64,
+        [I32, vmctx] -> [F64]
+    );
 
-    fn intrinsic_mem_copy(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.mem_copy {
-            return f;
-        }
-        let ptr = self.pointer_type();
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params
-            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::MemCopy, sig);
-        self.intrinsics.mem_copy = Some(fref);
-        fref
-    }
-
-    fn intrinsic_mem_fill(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.mem_fill {
-            return f;
-        }
-        let ptr = self.pointer_type();
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params
-            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::MemFill, sig);
-        self.intrinsics.mem_fill = Some(fref);
-        fref
-    }
-
-    fn intrinsic_mem_init(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.mem_init {
-            return f;
-        }
-        let ptr = self.pointer_type();
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params
-            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::MemInit, sig);
-        self.intrinsics.mem_init = Some(fref);
-        fref
-    }
-
-    fn intrinsic_data_drop(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.data_drop {
-            return f;
-        }
-        let ptr = self.pointer_type();
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params
-            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::DataDrop, sig);
-        self.intrinsics.data_drop = Some(fref);
-        fref
-    }
-
-    fn intrinsic_table_copy(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.table_copy {
-            return f;
-        }
-        let ptr = self.pointer_type();
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params
-            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::TableCopy, sig);
-        self.intrinsics.table_copy = Some(fref);
-        fref
-    }
-
-    fn intrinsic_table_init(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.table_init {
-            return f;
-        }
-        let ptr = self.pointer_type();
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params
-            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::TableInit, sig);
-        self.intrinsics.table_init = Some(fref);
-        fref
-    }
-
-    fn intrinsic_elem_drop(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.elem_drop {
-            return f;
-        }
-        let ptr = self.pointer_type();
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params
-            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::ElemDrop, sig);
-        self.intrinsics.elem_drop = Some(fref);
-        fref
-    }
-
-    fn intrinsic_table_get(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.table_get {
-            return f;
-        }
-        let ptr = self.pointer_type();
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params
-            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        sig.returns.push(ir::AbiParam::new(I32));
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::TableGet, sig);
-        self.intrinsics.table_get = Some(fref);
-        fref
-    }
-
-    fn intrinsic_table_set(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.table_set {
-            return f;
-        }
-        let ptr = self.pointer_type();
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params
-            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::TableSet, sig);
-        self.intrinsics.table_set = Some(fref);
-        fref
-    }
-
-    fn intrinsic_table_fill(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.table_fill {
-            return f;
-        }
-        let ptr = self.pointer_type();
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params
-            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::TableFill, sig);
-        self.intrinsics.table_fill = Some(fref);
-        fref
-    }
-
-    fn intrinsic_table_size(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.table_size {
-            return f;
-        }
-        let ptr = self.pointer_type();
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params
-            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        sig.returns.push(ir::AbiParam::new(I32));
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::TableSize, sig);
-        self.intrinsics.table_size = Some(fref);
-        fref
-    }
-
-    fn intrinsic_table_grow(&mut self, func: &mut ir::Function) -> ir::FuncRef {
-        if let Some(f) = self.intrinsics.table_grow {
-            return f;
-        }
-        let ptr = self.pointer_type();
-        let mut sig = ir::Signature::new(CallConv::Fast);
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params.push(ir::AbiParam::new(I32));
-        sig.params
-            .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-        sig.returns.push(ir::AbiParam::new(I32));
-        let fref = Self::import_intrinsic(func, intr::Intrinsic::TableGrow, sig);
-        self.intrinsics.table_grow = Some(fref);
-        fref
-    }
+    cached_intrinsic_method!(
+        intrinsic_global_set_i32,
+        intr::Intrinsic::GlobalSetI32,
+        [I32, I32, vmctx] -> []
+    );
+    cached_intrinsic_method!(
+        intrinsic_global_set_i64,
+        intr::Intrinsic::GlobalSetI64,
+        [I32, I64, vmctx] -> []
+    );
+    cached_intrinsic_method!(
+        intrinsic_global_set_f32,
+        intr::Intrinsic::GlobalSetF32,
+        [I32, F32, vmctx] -> []
+    );
+    cached_intrinsic_method!(
+        intrinsic_global_set_f64,
+        intr::Intrinsic::GlobalSetF64,
+        [I32, F64, vmctx] -> []
+    );
 
     fn intrinsic_ref_func(func: &mut ir::Function, func_index: FuncIndex) -> ir::FuncRef {
         let mut sig = ir::Signature::new(CallConv::Fast);
@@ -813,124 +718,20 @@ impl<'m> NixFuncEnvironment<'m> {
 
     fn intrinsic_global_get(&mut self, func: &mut ir::Function, ty: ir::Type) -> ir::FuncRef {
         match ty {
-            I32 => {
-                if let Some(f) = self.intrinsics.global_get_i32 {
-                    return f;
-                }
-                let ptr = self.pointer_type();
-                let mut sig = ir::Signature::new(CallConv::Fast);
-                sig.params.push(ir::AbiParam::new(I32));
-                sig.params
-                    .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                sig.returns.push(ir::AbiParam::new(I32));
-                let fref = Self::import_intrinsic(func, intr::Intrinsic::GlobalGetI32, sig);
-                self.intrinsics.global_get_i32 = Some(fref);
-                fref
-            }
-            I64 => {
-                if let Some(f) = self.intrinsics.global_get_i64 {
-                    return f;
-                }
-                let ptr = self.pointer_type();
-                let mut sig = ir::Signature::new(CallConv::Fast);
-                sig.params.push(ir::AbiParam::new(I32));
-                sig.params
-                    .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                sig.returns.push(ir::AbiParam::new(I64));
-                let fref = Self::import_intrinsic(func, intr::Intrinsic::GlobalGetI64, sig);
-                self.intrinsics.global_get_i64 = Some(fref);
-                fref
-            }
-            F32 => {
-                if let Some(f) = self.intrinsics.global_get_f32 {
-                    return f;
-                }
-                let ptr = self.pointer_type();
-                let mut sig = ir::Signature::new(CallConv::Fast);
-                sig.params.push(ir::AbiParam::new(I32));
-                sig.params
-                    .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                sig.returns.push(ir::AbiParam::new(F32));
-                let fref = Self::import_intrinsic(func, intr::Intrinsic::GlobalGetF32, sig);
-                self.intrinsics.global_get_f32 = Some(fref);
-                fref
-            }
-            F64 => {
-                if let Some(f) = self.intrinsics.global_get_f64 {
-                    return f;
-                }
-                let ptr = self.pointer_type();
-                let mut sig = ir::Signature::new(CallConv::Fast);
-                sig.params.push(ir::AbiParam::new(I32));
-                sig.params
-                    .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                sig.returns.push(ir::AbiParam::new(F64));
-                let fref = Self::import_intrinsic(func, intr::Intrinsic::GlobalGetF64, sig);
-                self.intrinsics.global_get_f64 = Some(fref);
-                fref
-            }
+            I32 => self.intrinsic_global_get_i32(func),
+            I64 => self.intrinsic_global_get_i64(func),
+            F32 => self.intrinsic_global_get_f32(func),
+            F64 => self.intrinsic_global_get_f64(func),
             _ => unreachable!("unsupported global type {ty}"),
         }
     }
 
     fn intrinsic_global_set(&mut self, func: &mut ir::Function, ty: ir::Type) -> ir::FuncRef {
         match ty {
-            I32 => {
-                if let Some(f) = self.intrinsics.global_set_i32 {
-                    return f;
-                }
-                let ptr = self.pointer_type();
-                let mut sig = ir::Signature::new(CallConv::Fast);
-                sig.params.push(ir::AbiParam::new(I32));
-                sig.params.push(ir::AbiParam::new(I32));
-                sig.params
-                    .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                let fref = Self::import_intrinsic(func, intr::Intrinsic::GlobalSetI32, sig);
-                self.intrinsics.global_set_i32 = Some(fref);
-                fref
-            }
-            I64 => {
-                if let Some(f) = self.intrinsics.global_set_i64 {
-                    return f;
-                }
-                let ptr = self.pointer_type();
-                let mut sig = ir::Signature::new(CallConv::Fast);
-                sig.params.push(ir::AbiParam::new(I32));
-                sig.params.push(ir::AbiParam::new(I64));
-                sig.params
-                    .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                let fref = Self::import_intrinsic(func, intr::Intrinsic::GlobalSetI64, sig);
-                self.intrinsics.global_set_i64 = Some(fref);
-                fref
-            }
-            F32 => {
-                if let Some(f) = self.intrinsics.global_set_f32 {
-                    return f;
-                }
-                let ptr = self.pointer_type();
-                let mut sig = ir::Signature::new(CallConv::Fast);
-                sig.params.push(ir::AbiParam::new(I32));
-                sig.params.push(ir::AbiParam::new(F32));
-                sig.params
-                    .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                let fref = Self::import_intrinsic(func, intr::Intrinsic::GlobalSetF32, sig);
-                self.intrinsics.global_set_f32 = Some(fref);
-                fref
-            }
-            F64 => {
-                if let Some(f) = self.intrinsics.global_set_f64 {
-                    return f;
-                }
-                let ptr = self.pointer_type();
-                let mut sig = ir::Signature::new(CallConv::Fast);
-                sig.params.push(ir::AbiParam::new(I32));
-                sig.params.push(ir::AbiParam::new(F64));
-                sig.params
-                    .push(ir::AbiParam::special(ptr, ir::ArgumentPurpose::VMContext));
-                let fref = Self::import_intrinsic(func, intr::Intrinsic::GlobalSetF64, sig);
-                self.intrinsics.global_set_f64 = Some(fref);
-                fref
-            }
+            I32 => self.intrinsic_global_set_i32(func),
+            I64 => self.intrinsic_global_set_i64(func),
+            F32 => self.intrinsic_global_set_f32(func),
+            F64 => self.intrinsic_global_set_f64(func),
             _ => unreachable!("unsupported global type {ty}"),
         }
     }
