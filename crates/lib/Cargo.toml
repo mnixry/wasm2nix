@@ -4,6 +4,8 @@ name              = "wasm2nix"
 version.workspace = true
 
 [dependencies]
+wasm2nix-ast.path = "../nix"
+
 cranelift-codegen.workspace  = true
 cranelift-entity.workspace   = true
 cranelift-frontend.workspace = true
@@ -11,7 +13,6 @@ cranelift-wasm.workspace     = true
 snafu.workspace              = true
 target-lexicon.workspace     = true
 tracing.workspace            = true
-wasm2nix-ast.workspace       = true
 wasmparser.workspace         = true
 
 [dev-dependencies]

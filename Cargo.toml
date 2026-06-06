@@ -7,19 +7,17 @@ edition = "2024"
 version = "0.1.0"
 
 [workspace.dependencies]
-clap               = { version = "4.5.54", features = ["derive"] }
-cranelift-codegen  = "*"
-cranelift-entity   = "*"
-cranelift-frontend = "*"
+clap               = { version = "4.6.1", features = ["derive"] }
+cranelift-codegen  = "0.112.3"
+cranelift-entity   = "0.112.3"
+cranelift-frontend = "0.112.3"
 cranelift-wasm     = "0.112.3"
 serde_json         = "1.0"
-snafu              = "0.8.9"
+snafu              = "0.9.1"
 target-lexicon     = "0.12.16"
-tempfile           = "3.14.0"
+tempfile           = "3.27.0"
 tracing            = "0.1.44"
-wasm2nix           = { path = "crates/lib" }
-wasm2nix-ast       = { path = "crates/nix" }
-wast               = "250.0.0"
+wast               = "251.0.0"
 
 [workspace.dependencies.wasmparser]
 features = ["features"]

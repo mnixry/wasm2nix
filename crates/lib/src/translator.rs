@@ -473,14 +473,14 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         Ok(())
     }
 
-    fn wasm_features(&self) -> cranelift_wasm::wasmparser::WasmFeatures {
-        cranelift_wasm::wasmparser::WasmFeatures::WASM1
-            .union(cranelift_wasm::wasmparser::WasmFeatures::MUTABLE_GLOBAL)
-            .union(cranelift_wasm::wasmparser::WasmFeatures::SIGN_EXTENSION)
-            .union(cranelift_wasm::wasmparser::WasmFeatures::MULTI_VALUE)
-            .union(cranelift_wasm::wasmparser::WasmFeatures::REFERENCE_TYPES)
-            .union(cranelift_wasm::wasmparser::WasmFeatures::SATURATING_FLOAT_TO_INT)
-            .union(cranelift_wasm::wasmparser::WasmFeatures::BULK_MEMORY)
+    fn wasm_features(&self) -> wasmparser::WasmFeatures {
+        wasmparser::WasmFeatures::WASM1
+            .union(wasmparser::WasmFeatures::MUTABLE_GLOBAL)
+            .union(wasmparser::WasmFeatures::SIGN_EXTENSION)
+            .union(wasmparser::WasmFeatures::MULTI_VALUE)
+            .union(wasmparser::WasmFeatures::REFERENCE_TYPES)
+            .union(wasmparser::WasmFeatures::SATURATING_FLOAT_TO_INT)
+            .union(wasmparser::WasmFeatures::BULK_MEMORY)
     }
 }
 

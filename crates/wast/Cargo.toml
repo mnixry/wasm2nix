@@ -5,12 +5,13 @@ publish           = false
 version.workspace = true
 
 [dev-dependencies]
+wasm2nix.path = "../lib"
+
 cranelift-codegen.workspace = true
 cranelift-entity.workspace  = true
 cranelift-wasm.workspace    = true
 serde_json.workspace        = true
 tempfile.workspace          = true
-wasm2nix.workspace          = true
 wasmparser.workspace        = true
 wast.workspace              = true
 
