@@ -16,7 +16,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     determinate = {
-      url = "github:DeterminateSystems/nix-src";
+      url = "https://flakehub.com/f/DeterminateSystems/nix-src/3.*";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "github:ipetkov/crane";
