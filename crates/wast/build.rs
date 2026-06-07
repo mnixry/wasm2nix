@@ -114,8 +114,9 @@ fn wast_test_tokens(path: &Path) -> Result<TokenStream> {
 
     Ok(quote! {
         #[test]
-        fn #test_name() {
-            run_wast_file_path(#path);
+        #[snafu::report]
+        fn #test_name() -> Result<()> {
+            run_wast_script(include_str!(#path))
         }
     })
 }

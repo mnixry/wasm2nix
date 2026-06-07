@@ -6,7 +6,7 @@ mod support_eval;
 mod support_state;
 
 pub use error::{Error, Result};
-pub use support_core::{WastHarness, WastHarnessOptions, run_wast_file_path, run_wast_script};
+pub use support_core::{WastHarness, WastHarnessOptions, run_wast_script};
 
 #[must_use]
 pub const fn harness_nix() -> &'static str {

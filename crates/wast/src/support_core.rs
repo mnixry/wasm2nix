@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, path::PathBuf};
 
 use cranelift_entity::EntityRef;
 use serde_json::Value as JsonValue;
@@ -26,7 +22,7 @@ use crate::{
         Error, ExpectedAtLeastOneResultSnafu, ExpectedResultArraySnafu, HarnessResolverError,
         IncompatibleImportTypeSnafu, KeepTempFileSnafu, LimitsQueryNotObjectSnafu, LinkSnafu,
         LowerNixSnafu, MissingMemoryLimitsSnafu, MissingTableLimitsSnafu,
-        ModuleAccessBeforeModuleSnafu, ParseWastSnafu, ReadWastSnafu, Result, TranslateWasmSnafu,
+        ModuleAccessBeforeModuleSnafu, ParseWastSnafu, Result, TranslateWasmSnafu,
         UnknownImportModuleSnafu, UnknownImportSnafu, UnknownModuleSnafu, WriteTempFileSnafu,
     },
     support_eval::{
@@ -71,35 +67,6 @@ impl WastHarness {
     pub fn run_wast_script(&self, script: &str) -> Result<()> {
         run_wast_script_with_options(script, self.options)
     }
-
-    /// Reads and runs a WAST file.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the file cannot be read or when the script fails.
-    pub fn run_wast_file_path(&self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        let script = fs::read_to_string(path).context(ReadWastSnafu {
-            path: path.to_path_buf(),
-        })?;
-        self.run_wast_script(&script)
-            .map_err(|source| Error::Directive {
-                directive_index: 0,
-                source: Box::new(source),
-            })
-    }
-}
-
-/// Runs a WAST file and panics on failure.
-///
-/// # Panics
-///
-/// Panics when the file cannot be read or when the script fails.
-pub fn run_wast_file_path(path: &str) {
-    let path = PathBuf::from(path);
-    WastHarness::default()
-        .run_wast_file_path(&path)
-        .unwrap_or_else(|err| panic!("{err}"));
 }
 
 pub struct HarnessContext {

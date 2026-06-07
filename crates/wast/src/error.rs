@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use snafu::Snafu;
 
 #[derive(Debug, Snafu)]
@@ -20,12 +18,6 @@ impl From<Error> for HarnessResolverError {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
-    #[snafu(display("failed to read WAST file {}", path.display()))]
-    ReadWast {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-
     #[snafu(display("failed to create temporary directory"))]
     CreateTempDir { source: std::io::Error },
 
