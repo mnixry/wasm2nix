@@ -10,6 +10,7 @@ wasm2nix-runtime.path = "../runtime"
 
 cranelift-entity.workspace = true
 cranelift-wasm.workspace   = true
+hex.workspace              = true
 serde_json.workspace       = true
 snafu.workspace            = true
 tempfile.workspace         = true

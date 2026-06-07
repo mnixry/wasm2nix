@@ -13,6 +13,7 @@ cranelift-codegen  = "0.112.3"
 cranelift-entity   = "0.112.3"
 cranelift-frontend = "0.112.3"
 cranelift-wasm     = "0.112.3"
+hex                = { version = "0.4.3", features = ["alloc"] }
 pretty             = "0.12.5"
 proc-macro2        = "1.0.106"
 quote              = "1.0.45"

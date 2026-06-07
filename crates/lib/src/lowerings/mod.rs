@@ -186,27 +186,13 @@ fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> Result<Expr
 
 fn export_attr_key(export_name: &str, mode: ExportKeyMode) -> Option<String> {
     match mode {
-        ExportKeyMode::Public => nix_source_string_safe(export_name).then(|| export_name.into()),
-        ExportKeyMode::Encoded => Some(encoded_export_key(export_name)),
+        ExportKeyMode::Public if export_name.contains('\0') => None,
+        ExportKeyMode::Public => Some(export_name.into()),
+        ExportKeyMode::Encoded => Some(format!(
+            "__wasm2nix_export_{}",
+            hex::encode(export_name.as_bytes())
+        )),
     }
-}
-
-fn nix_source_string_safe(s: &str) -> bool {
-    !s.contains('\0')
-}
-
-fn encoded_export_key(name: &str) -> String {
-    let mut encoded = String::from("__wasm2nix_export_");
-    for byte in name.as_bytes() {
-        push_hex_byte(&mut encoded, *byte);
-    }
-    encoded
-}
-
-fn push_hex_byte(out: &mut String, byte: u8) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    out.push(HEX[(byte >> 4) as usize] as char);
-    out.push(HEX[(byte & 0x0F) as usize] as char);
 }
 
 fn lower_initial_state(module: &NixModule) -> Result<Expr> {

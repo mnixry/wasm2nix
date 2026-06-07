@@ -15,7 +15,7 @@ use crate::{
         UnknownModuleSnafu,
     },
     support_core::{HarnessContext, HarnessModule},
-    support_state::{encoded_export_key, json_to_nix_expr, wast_arg_to_nix},
+    support_state::{json_to_nix_expr, wast_arg_to_nix},
 };
 
 pub struct InvokeResult {
@@ -77,7 +77,7 @@ pub fn eval_invoke(
             key: module_key.to_string(),
         })?
         .clone();
-    let export_key = encoded_export_key(name);
+    let export_key = format!("__wasm2nix_export_{}", hex::encode(name.as_bytes()));
     let export =
         nix!(#{Expr::ident(module_var.as_str())}."__wasm2nix"."exportsByName".(export_key));
     let expr = Expr::let_in(
@@ -116,7 +116,7 @@ pub fn eval_get(
             key: module_key.to_string(),
         })?
         .clone();
-    let export_key = encoded_export_key(name);
+    let export_key = format!("__wasm2nix_export_{}", hex::encode(name.as_bytes()));
     let export =
         nix!(#{Expr::ident(module_var.as_str())}."__wasm2nix"."exportsByName".(export_key));
     let expr = Expr::let_in(

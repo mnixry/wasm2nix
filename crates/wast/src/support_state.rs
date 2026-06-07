@@ -410,20 +410,6 @@ fn merge_table_state_expr(
     .render()
 }
 
-pub fn encoded_export_key(name: &str) -> String {
-    let mut encoded = String::from("__wasm2nix_export_");
-    for byte in name.as_bytes() {
-        push_hex_byte(&mut encoded, *byte);
-    }
-    encoded
-}
-
-fn push_hex_byte(out: &mut String, byte: u8) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    out.push(HEX[(byte >> 4) as usize] as char);
-    out.push(HEX[(byte & 0x0F) as usize] as char);
-}
-
 pub fn wast_arg_to_nix(arg: &WastArg<'_>) -> Result<Expr> {
     match arg {
         WastArg::Core(WastArgCore::I32(value)) => Ok(Expr::int(i64::from(value.cast_unsigned()))),

@@ -11,6 +11,7 @@ cranelift-codegen.workspace  = true
 cranelift-entity.workspace   = true
 cranelift-frontend.workspace = true
 cranelift-wasm.workspace     = true
+hex.workspace                = true
 snafu.workspace              = true
 target-lexicon.workspace     = true
 wasmparser.workspace         = true
