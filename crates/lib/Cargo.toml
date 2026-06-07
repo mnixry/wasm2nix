@@ -13,7 +13,6 @@ cranelift-frontend.workspace = true
 cranelift-wasm.workspace     = true
 snafu.workspace              = true
 target-lexicon.workspace     = true
-tracing.workspace            = true
 wasmparser.workspace         = true
 
 [dev-dependencies]

@@ -22,7 +22,6 @@ snafu              = "0.9.1"
 syn                = "2.0.117"
 target-lexicon     = "0.12.16"
 tempfile           = "3.27.0"
-tracing            = "0.1.44"
 wast               = "251.0.0"
 
 [workspace.dependencies.wasmparser]
@@ -35,8 +34,10 @@ lto           = true
 opt-level     = 3
 
 [workspace.lints.rust]
-unsafe_code = "deny"
-warnings    = "warn"
+warnings = "warn"
+
+unsafe_code          = "deny"
+unused_extern_crates = "warn"
 
 [workspace.lints.clippy]
 all      = { level = "warn", priority = -1 }
