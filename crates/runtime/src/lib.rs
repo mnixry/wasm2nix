@@ -4,6 +4,9 @@ use std::path::Path;
 
 pub const DEFAULT_RUNTIME_FILE_NAME: &str = "wasm2nix-rt.nix";
 
+/// Number of u32 words per memory chunk; must match `chunkWords` in `rt.nix`.
+pub const MEMORY_CHUNK_WORDS: u64 = 128;
+
 #[must_use]
 pub const fn runtime_nix() -> &'static str {
     include_str!("../nix/rt.nix")
@@ -58,6 +61,11 @@ mod tests {
     fn runtime_source_is_runtime_crate_owned() {
         assert!(runtime_nix().contains("wasm2nix runtime"));
         assert!(runtime_nix_path().ends_with("nix/rt.nix"));
+    }
+
+    #[test]
+    fn memory_chunk_size_matches_runtime() {
+        assert!(runtime_nix().contains(&format!("chunkWords = {MEMORY_CHUNK_WORDS};")));
     }
 
     #[test]

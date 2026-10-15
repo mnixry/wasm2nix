@@ -12,7 +12,7 @@ use cranelift_wasm::{ConstOp, WasmValType};
 use error::MalformedConstExprSnafu;
 pub use error::{LowerError, Result};
 use snafu::prelude::*;
-use wasm2nix_runtime::{RuntimeFunction, RuntimeNamespace};
+use wasm2nix_runtime::{MEMORY_CHUNK_WORDS, RuntimeFunction, RuntimeNamespace};
 
 use crate::{
     nix::{AttrKey, Expr, nix},
@@ -229,7 +229,10 @@ fn lower_initial_memory(module: &NixModule) -> Expr {
         in {
             pageCount = #{lower_attr_or(nix!(importedMem), "pageCount", declared_min)};
             maxPageCount = #{lower_attr_or(nix!(importedMem), "maxPageCount", declared_max)};
-            pages = merge(#{lower_attr_or(nix!(importedMem), "pages", nix!({}))}, #{overlay_pages});
+            pages = #{RuntimeFunction::MemOverlayPages.call(vec![
+                lower_attr_or(nix!(importedMem), "pages", nix!({})),
+                overlay_pages,
+            ])};
         })
     } else {
         nix!({
@@ -240,6 +243,8 @@ fn lower_initial_memory(module: &NixModule) -> Expr {
     }
 }
 
+/// Lays out active data segments as the runtime's two-level page attrset:
+/// chunks of [`MEMORY_CHUNK_WORDS`] little-endian u32 words.
 fn lower_initial_memory_pages(module: &NixModule) -> Expr {
     let mut words: BTreeMap<u64, u32> = BTreeMap::new();
 
@@ -259,11 +264,23 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
         }
     }
 
+    let mut chunks: BTreeMap<u64, Vec<(AttrKey, Expr)>> = BTreeMap::new();
+    for (idx, word) in words {
+        chunks.entry(idx / MEMORY_CHUNK_WORDS).or_default().push((
+            AttrKey::string((idx % MEMORY_CHUNK_WORDS).to_string()),
+            Expr::int(i64::from(word)),
+        ));
+    }
     Expr::attrset(
         false,
-        words
+        chunks
             .into_iter()
-            .map(|(idx, word)| (AttrKey::string(idx.to_string()), Expr::int(i64::from(word))))
+            .map(|(chunk, slots)| {
+                (
+                    AttrKey::string(chunk.to_string()),
+                    Expr::attrset(false, slots),
+                )
+            })
             .collect(),
     )
 }
@@ -685,7 +702,7 @@ mod tests {
         let nix = lower_wasm(&wasm);
 
         assert!(nix.contains("pageCount = 1;"));
-        assert!(nix.contains("\"1\" = 67305985;"));
+        assert!(nix.contains("\"0\" = { \"1\" = 67305985; };"));
         assert!(nix.contains(&format!(
             "\"memory\" = {} // {{",
             RuntimeNamespace::Mem.expr().render()

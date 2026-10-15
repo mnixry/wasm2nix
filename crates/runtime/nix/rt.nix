@@ -27,7 +27,7 @@ let
     in
     if r < 0 then r + divisor else r;
 
-  u32 = value: floorMod value u32Mod;
+  u32 = value: builtins.bitAnd value u32Max;
 
   toI32 =
     value:
@@ -48,7 +48,7 @@ let
     let
       modulus = pow2 bits;
       sign = pow2 (bits - 1);
-      v = floorMod value modulus;
+      v = builtins.bitAnd value (modulus - 1);
     in
     if v >= sign then v - modulus else v;
 
@@ -57,21 +57,16 @@ let
   signedRem =
     lhs: rhs: if rhs == 0 then throw "wasm trap: integer divide by zero" else lhs - rhs * (lhs / rhs);
 
+  # a * b mod 2^32, split so that no intermediate product exceeds 2^48.
   mul32 =
     lhs: rhs:
     let
       a = u32 lhs;
       b = u32 rhs;
-      aLo = floorMod a 65536;
-      aHi = a / 65536;
-      bLo = floorMod b 65536;
-      bHi = b / 65536;
-      low = aLo * bLo;
-      mid = aLo * bHi + aHi * bLo;
     in
-    u32 (low + floorMod mid 65536 * 65536);
+    u32 (a * builtins.bitAnd b 65535 + builtins.bitAnd (a * (b / 65536)) 65535 * 65536);
 
-  shiftCount32 = n: floorMod n 32;
+  shiftCount32 = n: builtins.bitAnd n 31;
 
   unsignedShiftRight32 = value: amount: (u32 value) / pow2 (shiftCount32 amount);
 
@@ -86,7 +81,7 @@ let
 
   range = count: builtins.genList (i: i) count;
 
-  bitSetU32 = value: bit: floorMod ((u32 value) / pow2 bit) 2 == 1;
+  bitSetU32 = value: bit: builtins.bitAnd ((u32 value) / pow2 bit) 1 == 1;
 
   bitSetI64 = value: bit: i64BitSetParts (i64Parts value) bit;
 
@@ -172,7 +167,7 @@ let
     bor = lhs: rhs: u32 (builtins.bitOr (u32 lhs) (u32 rhs));
     bxor = lhs: rhs: u32 (builtins.bitXor (u32 lhs) (u32 rhs));
     bnot = value: u32Max - u32 value;
-    shl = lhs: rhs: mul32 lhs (pow2 (shiftCount32 rhs));
+    shl = lhs: rhs: u32 (u32 lhs * pow2 (shiftCount32 rhs));
     shr_u = unsignedShiftRight32;
     shr_s = signedShiftRight32;
     rotl =
@@ -210,12 +205,12 @@ let
           lower = v - i64Min;
         in
         {
-          lo = floorMod lower u32Mod;
+          lo = builtins.bitAnd lower u32Max;
           hi = i32Sign + lower / u32Mod;
         }
       else
         {
-          lo = floorMod v u32Mod;
+          lo = builtins.bitAnd v u32Max;
           hi = v / u32Mod;
         };
 
@@ -251,7 +246,7 @@ let
     lhs: rhs:
     let
       loSum = lhs.lo + rhs.lo;
-      lo = floorMod loSum u32Mod;
+      lo = builtins.bitAnd loSum u32Max;
       carry = loSum / u32Mod;
       hi = u32 (lhs.hi + rhs.hi + carry);
     in
@@ -264,7 +259,7 @@ let
     let
       loRaw = lhs.lo - rhs.lo;
       borrow = if loRaw < 0 then 1 else 0;
-      lo = floorMod loRaw u32Mod;
+      lo = builtins.bitAnd loRaw u32Max;
       hi = u32 (lhs.hi - rhs.hi - borrow);
     in
     {
@@ -295,7 +290,7 @@ let
   i64ShlParts =
     parts: amount:
     let
-      n = floorMod amount 64;
+      n = builtins.bitAnd amount 63;
     in
     if n == 0 then
       parts
@@ -317,13 +312,13 @@ let
   i64ShrUParts =
     parts: amount:
     let
-      n = floorMod amount 64;
+      n = builtins.bitAnd amount 63;
     in
     if n == 0 then
       parts
     else if n < 32 then
       let
-        lo = parts.lo / pow2 n + floorMod parts.hi (pow2 n) * pow2 (32 - n);
+        lo = parts.lo / pow2 n + builtins.bitAnd parts.hi (pow2 n - 1) * pow2 (32 - n);
         hi = parts.hi / pow2 n;
       in
       {
@@ -341,41 +336,41 @@ let
       acc: _:
       let
         sign = i64IsNegativeParts acc;
-        lo = acc.lo / 2 + (if floorMod acc.hi 2 == 1 then i32Sign else 0);
+        lo = acc.lo / 2 + (if builtins.bitAnd acc.hi 1 == 1 then i32Sign else 0);
         hi = acc.hi / 2 + (if sign then i32Sign else 0);
       in
       {
         inherit lo hi;
       }
-    ) parts (range (floorMod amount 64));
+    ) parts (range (builtins.bitAnd amount 63));
 
   i64MulParts =
     lhs: rhs:
     let
       base = 65536;
-      a0 = floorMod lhs.lo base;
+      a0 = builtins.bitAnd lhs.lo (base - 1);
       a1 = lhs.lo / base;
-      a2 = floorMod lhs.hi base;
+      a2 = builtins.bitAnd lhs.hi (base - 1);
       a3 = lhs.hi / base;
-      b0 = floorMod rhs.lo base;
+      b0 = builtins.bitAnd rhs.lo (base - 1);
       b1 = rhs.lo / base;
-      b2 = floorMod rhs.hi base;
+      b2 = builtins.bitAnd rhs.hi (base - 1);
       b3 = rhs.hi / base;
 
       c0 = a0 * b0;
-      r0 = floorMod c0 base;
+      r0 = builtins.bitAnd c0 (base - 1);
       carry0 = c0 / base;
 
       c1 = a0 * b1 + a1 * b0 + carry0;
-      r1 = floorMod c1 base;
+      r1 = builtins.bitAnd c1 (base - 1);
       carry1 = c1 / base;
 
       c2 = a0 * b2 + a1 * b1 + a2 * b0 + carry1;
-      r2 = floorMod c2 base;
+      r2 = builtins.bitAnd c2 (base - 1);
       carry2 = c2 / base;
 
       c3 = a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0 + carry2;
-      r3 = floorMod c3 base;
+      r3 = builtins.bitAnd c3 (base - 1);
 
       lo = r0 + r1 * base;
       hi = r2 + r3 * base;
@@ -505,13 +500,13 @@ let
     rotl =
       lhs: rhs:
       let
-        n = floorMod rhs 64;
+        n = builtins.bitAnd rhs 63;
       in
       if n == 0 then lhs else bor (shl lhs n) (shr_u lhs (64 - n));
     rotr =
       lhs: rhs:
       let
-        n = floorMod rhs 64;
+        n = builtins.bitAnd rhs 63;
       in
       if n == 0 then lhs else bor (shr_u lhs n) (shl lhs (64 - n));
     clz = value: checkI64 (clzBy 64 bitSetI64 value);
@@ -617,7 +612,7 @@ let
       let
         divisor = pow2 amount;
         quotient = value / divisor;
-        remainder = floorMod value divisor;
+        remainder = builtins.bitAnd value (divisor - 1);
       in
       if remainder == 0 then quotient else builtins.bitOr quotient 1;
 
@@ -664,8 +659,8 @@ let
     value:
     let
       parts = i64Parts value;
-      exponent = floorMod (parts.hi / 1048576) 2048;
-      fracHi = floorMod parts.hi 1048576;
+      exponent = builtins.bitAnd (parts.hi / 1048576) 2047;
+      fracHi = builtins.bitAnd parts.hi 1048575;
     in
     exponent == 2047 && (fracHi != 0 || parts.lo != 0);
   f64IsZero =
@@ -773,8 +768,8 @@ let
         else
           { inherit exp sigExt; };
       quotient = shifted.sigExt / 8;
-      remainder = floorMod shifted.sigExt 8;
-      roundUp = remainder > 4 || (remainder == 4 && floorMod quotient 2 == 1);
+      remainder = builtins.bitAnd shifted.sigExt 7;
+      roundUp = remainder > 4 || (remainder == 4 && builtins.bitAnd quotient 1 == 1);
       rounded0 = quotient + (if roundUp then 1 else 0);
       carried = rounded0 >= 16777216;
       rounded = if carried then rounded0 / 2 else rounded0;
@@ -922,7 +917,7 @@ let
       let
         info0 = f32FiniteInfo value;
         info = if info0.sig < 8388608 then f32NormalizeFinite info0.sig info0.exp else info0;
-        oddExp = floorMod info.exp 2 != 0;
+        oddExp = builtins.bitAnd info.exp 1 != 0;
         resultExp = if oddExp then (info.exp - 1) / 2 else info.exp / 2;
         radicand = info.sig * pow2 (if oddExp then 30 else 29);
         root = isqrt radicand;
@@ -963,7 +958,7 @@ let
         let
           divisor = pow2 (23 - exp);
           int = sig / divisor;
-          frac = floorMod sig divisor;
+          frac = builtins.bitAnd sig (divisor - 1);
           half = divisor / 2;
           roundedInt =
             if mode == "floor" then
@@ -971,7 +966,7 @@ let
             else if mode == "ceil" then
               int + (if !sign && frac != 0 then 1 else 0)
             else if mode == "nearest" then
-              int + (if frac > half || (frac == half && floorMod int 2 == 1) then 1 else 0)
+              int + (if frac > half || (frac == half && builtins.bitAnd int 1 == 1) then 1 else 0)
             else
               int;
         in
@@ -1073,6 +1068,7 @@ let
         sig = 4503599627370496 + frac;
       };
   big26Base = 67108864;
+  big26Mask = 67108863;
   big26Limb =
     limbs: idx:
     if idx == 0 then
@@ -1117,7 +1113,7 @@ let
       top = big26Limb limbs (k - 1);
       topShift = 26 - excess;
       lowContribution = if excess == 0 then 0 else top / pow2 topShift;
-      topRemainder = if excess == 0 then top else floorMod top (pow2 topShift);
+      topRemainder = if excess == 0 then top else builtins.bitAnd top (pow2 topShift - 1);
       sticky = topRemainder != 0 || big26AnyBelow limbs (k - 1);
       quotient = high * pow2 excess + lowContribution;
     in
@@ -1126,31 +1122,31 @@ let
   f64MulSigLimbs =
     lhs: rhs:
     let
-      a0 = floorMod lhs big26Base;
-      a1 = floorMod (lhs / big26Base) big26Base;
+      a0 = builtins.bitAnd lhs big26Mask;
+      a1 = builtins.bitAnd (lhs / big26Base) big26Mask;
       a2 = lhs / (big26Base * big26Base);
-      b0 = floorMod rhs big26Base;
-      b1 = floorMod (rhs / big26Base) big26Base;
+      b0 = builtins.bitAnd rhs big26Mask;
+      b1 = builtins.bitAnd (rhs / big26Base) big26Mask;
       b2 = rhs / (big26Base * big26Base);
 
       t0 = a0 * b0;
-      l0 = floorMod t0 big26Base;
+      l0 = builtins.bitAnd t0 big26Mask;
       carry0 = t0 / big26Base;
 
       t1 = a0 * b1 + a1 * b0 + carry0;
-      l1 = floorMod t1 big26Base;
+      l1 = builtins.bitAnd t1 big26Mask;
       carry1 = t1 / big26Base;
 
       t2 = a0 * b2 + a1 * b1 + a2 * b0 + carry1;
-      l2 = floorMod t2 big26Base;
+      l2 = builtins.bitAnd t2 big26Mask;
       carry2 = t2 / big26Base;
 
       t3 = a1 * b2 + a2 * b1 + carry2;
-      l3 = floorMod t3 big26Base;
+      l3 = builtins.bitAnd t3 big26Mask;
       carry3 = t3 / big26Base;
 
       t4 = a2 * b2 + carry3;
-      l4 = floorMod t4 big26Base;
+      l4 = builtins.bitAnd t4 big26Mask;
     in
     {
       inherit
@@ -1180,20 +1176,20 @@ let
     value: shift:
     let
       bitShift = floorMod shift 26;
-      a0 = floorMod value big26Base;
-      a1 = floorMod (value / big26Base) big26Base;
+      a0 = builtins.bitAnd value big26Mask;
+      a1 = builtins.bitAnd (value / big26Base) big26Mask;
       a2 = value / (big26Base * big26Base);
 
       t2 = a0 * pow2 bitShift;
-      l2 = floorMod t2 big26Base;
+      l2 = builtins.bitAnd t2 big26Mask;
       carry2 = t2 / big26Base;
 
       t3 = a1 * pow2 bitShift + carry2;
-      l3 = floorMod t3 big26Base;
+      l3 = builtins.bitAnd t3 big26Mask;
       carry3 = t3 / big26Base;
 
       t4 = a2 * pow2 bitShift + carry3;
-      l4 = floorMod t4 big26Base;
+      l4 = builtins.bitAnd t4 big26Mask;
     in
     {
       l0 = 0;
@@ -1278,8 +1274,8 @@ let
         else
           { inherit exp sigExt; };
       quotient = shifted.sigExt / 8;
-      remainder = floorMod shifted.sigExt 8;
-      roundUp = remainder > 4 || (remainder == 4 && floorMod quotient 2 == 1);
+      remainder = builtins.bitAnd shifted.sigExt 7;
+      roundUp = remainder > 4 || (remainder == 4 && builtins.bitAnd quotient 1 == 1);
       rounded0 = quotient + (if roundUp then 1 else 0);
       carried = rounded0 >= 9007199254740992;
       rounded = if carried then rounded0 / 2 else rounded0;
@@ -1427,7 +1423,7 @@ let
       let
         info0 = f64FiniteInfo value;
         info = if info0.sig < 4503599627370496 then f64NormalizeFinite info0.sig info0.exp else info0;
-        oddExp = floorMod info.exp 2 != 0;
+        oddExp = builtins.bitAnd info.exp 1 != 0;
         resultExp = if oddExp then (info.exp - 1) / 2 else info.exp / 2;
         radicand = big26ShiftSmallForSqrt info.sig (if oddExp then 59 else 58);
         root = f64SqrtRoot radicand;
@@ -1470,7 +1466,7 @@ let
         let
           divisor = pow2 (52 - exp);
           int = sig / divisor;
-          frac = floorMod sig divisor;
+          frac = builtins.bitAnd sig (divisor - 1);
           half = divisor / 2;
           roundedInt =
             if mode == "floor" then
@@ -1478,7 +1474,7 @@ let
             else if mode == "ceil" then
               int + (if !sign && frac != 0 then 1 else 0)
             else if mode == "nearest" then
-              int + (if frac > half || (frac == half && floorMod int 2 == 1) then 1 else 0)
+              int + (if frac > half || (frac == half && builtins.bitAnd int 1 == 1) then 1 else 0)
             else
               int;
         in
@@ -1504,8 +1500,8 @@ let
     value:
     let
       bits = u32 value;
-      rawExp = floorMod (bits / 8388608) 256;
-      frac = floorMod bits 8388608;
+      rawExp = builtins.bitAnd (bits / 8388608) 255;
+      frac = builtins.bitAnd bits 8388607;
     in
     {
       sign = bits >= i32Sign;
@@ -1533,7 +1529,10 @@ let
           let
             divisor = pow2 (23 - exp);
           in
-          if floorMod sig divisor == 0 then sig / divisor else exactIntFloatError "f32" op "fractional value";
+          if builtins.bitAnd sig (divisor - 1) == 0 then
+            sig / divisor
+          else
+            exactIntFloatError "f32" op "fractional value";
     in
     if parts.sign then 0 - unsigned else unsigned;
 
@@ -1555,7 +1554,7 @@ let
           let
             divisor = pow2 (exp - 23);
           in
-          if floorMod magnitude divisor == 0 then
+          if builtins.bitAnd magnitude (divisor - 1) == 0 then
             magnitude / divisor - 8388608
           else
             exactIntFloatError "f32" op "rounded result";
@@ -1585,8 +1584,8 @@ let
     value:
     let
       parts = i64Parts value;
-      rawExp = floorMod (parts.hi / 1048576) 2048;
-      fracHi = floorMod parts.hi 1048576;
+      rawExp = builtins.bitAnd (parts.hi / 1048576) 2047;
+      fracHi = builtins.bitAnd parts.hi 1048575;
     in
     {
       sign = parts.hi >= i32Sign;
@@ -1614,7 +1613,10 @@ let
           let
             divisor = pow2 (52 - exp);
           in
-          if floorMod sig divisor == 0 then sig / divisor else exactIntFloatError "f64" op "fractional value";
+          if builtins.bitAnd sig (divisor - 1) == 0 then
+            sig / divisor
+          else
+            exactIntFloatError "f64" op "fractional value";
     in
     if parts.sign then 0 - unsigned else unsigned;
 
@@ -1636,7 +1638,7 @@ let
           exactIntFloatError "f64" op "outside host integer range";
       sign = if negative then i32Sign else 0;
       fracHi = frac / u32Mod;
-      fracLo = floorMod frac u32Mod;
+      fracLo = builtins.bitAnd frac u32Max;
     in
     if magnitude == 0 then
       i64FromParts {
@@ -1668,7 +1670,7 @@ let
       if q * b == a then f64FromExactInt "div" q else exactIntFloatError "f64" "div" "rounded result";
 
   u64PartsFromNonNegative = value: {
-    lo = floorMod value u32Mod;
+    lo = builtins.bitAnd value u32Max;
     hi = value / u32Mod;
   };
 
@@ -1828,11 +1830,11 @@ let
     if bits <= 0 then
       0
     else if bits < 32 then
-      floorMod parts.lo (pow2 bits)
+      builtins.bitAnd parts.lo (pow2 bits - 1)
     else if bits == 32 then
       parts.lo
     else
-      parts.lo + floorMod parts.hi (pow2 (bits - 32)) * u32Mod;
+      parts.lo + builtins.bitAnd parts.hi (pow2 (bits - 32) - 1) * u32Mod;
 
   u64PartsToSmall = parts: parts.hi * u32Mod + parts.lo;
 
@@ -1859,7 +1861,7 @@ let
               quotient = u64PartsToSmall (i64ShrUParts parts shift);
               remainder = u64LowBits parts shift;
               half = pow2 (shift - 1);
-              roundUp = remainder > half || (remainder == half && floorMod quotient 2 == 1);
+              roundUp = remainder > half || (remainder == half && builtins.bitAnd quotient 1 == 1);
             in
             quotient + (if roundUp then 1 else 0);
         carry = rounded == pow2 precision;
@@ -1886,7 +1888,7 @@ let
       signBit = if sign && !rounded.isZero then i32Sign else 0;
       frac = rounded.significand - 4503599627370496;
       fracHi = frac / u32Mod;
-      fracLo = floorMod frac u32Mod;
+      fracLo = builtins.bitAnd frac u32Max;
     in
     if rounded.isZero then
       i64FromParts {
@@ -1914,9 +1916,9 @@ let
       let
         divisor = pow2 shift;
         quotient = value / divisor;
-        remainder = floorMod value divisor;
+        remainder = builtins.bitAnd value (divisor - 1);
         half = pow2 (shift - 1);
-        roundUp = remainder > half || (remainder == half && floorMod quotient 2 == 1);
+        roundUp = remainder > half || (remainder == half && builtins.bitAnd quotient 1 == 1);
       in
       quotient + (if roundUp then 1 else 0);
 
@@ -1940,13 +1942,13 @@ let
           significand = parts.frac * pow2 (53 - bitLength);
           frac = significand - 4503599627370496;
         in
-        f64FromRaw sign (exponent + 1023) (frac / u32Mod) (floorMod frac u32Mod)
+        f64FromRaw sign (exponent + 1023) (frac / u32Mod) (builtins.bitAnd frac u32Max)
     else
       let
         exponent = parts.rawExp - 127;
         frac = parts.frac * pow2 29;
       in
-      f64FromRaw sign (exponent + 1023) (frac / u32Mod) (floorMod frac u32Mod);
+      f64FromRaw sign (exponent + 1023) (frac / u32Mod) (builtins.bitAnd frac u32Max);
 
   f32DemoteF64 =
     value:
@@ -2142,45 +2144,112 @@ let
     in
     if offset < 0 || end > length segment then throw "wasm trap: ${op} out of bounds" else true;
 
-  wordIndex = addr: addr / 4;
-  byteOffset = addr: floorMod addr 4;
+  # Memory holds little-endian u32 words in a two-level attrset: chunks of
+  # `chunkWords` words keyed by chunk index, each keyed by the word's slot
+  # within its chunk. Accesses work on whole words, and a store rewrites one
+  # chunk plus the chunk index instead of an attrset spanning all of memory.
+  # Nix layers small right operands of `//` and flattens them once the layer
+  # chain fills, so the flatten cost is what the chunking bounds.
+  chunkWords = 128;
+  slotMask = chunkWords - 1;
+  wordMask = u32Max;
+  byteShift = offset: pow2 (offset * 8);
 
-  getWord = pages: idx: pages.${toString idx} or 0;
+  getWord =
+    pages: idx:
+    (pages.${toString (idx / chunkWords)} or { }).${toString (builtins.bitAnd idx slotMask)} or 0;
 
+  # Words are forced before they are stored so that pages never hold thunks
+  # that retain older pages.
   setWord =
     pages: idx: value:
     let
-      key = toString idx;
-      v = u32 value;
+      key = toString (idx / chunkWords);
+      chunk = (pages.${key} or { }) // {
+        ${toString (builtins.bitAnd idx slotMask)} = value;
+      };
     in
-    if v == 0 then builtins.removeAttrs pages [ key ] else pages // { "${key}" = v; };
+    builtins.seq value (builtins.seq chunk (pages // { ${key} = chunk; }));
 
-  byteAt = word: offset: floorMod (word / pow2 (offset * 8)) 256;
+  # Merges a two-level overlay into `base` chunk by chunk.
+  overlayPages =
+    base: overlay: base // builtins.mapAttrs (key: chunk: (base.${key} or { }) // chunk) overlay;
 
-  setByte =
-    word: offset: byte:
+  # Reads `width` (1..4) bytes starting at `offset` within word `idx`, spilling
+  # into the next word when the access crosses a word boundary.
+  loadSpan =
+    pages: idx: offset: width:
     let
-      place = pow2 (offset * 8);
-      old = byteAt word offset;
+      lo = getWord pages idx;
+      shift = byteShift offset;
+      mask = pow2 (width * 8) - 1;
     in
-    u32 (word - old * place + floorMod byte 256 * place);
+    if offset + width <= 4 then
+      builtins.bitAnd (lo / shift) mask
+    else
+      builtins.bitAnd (lo / shift + getWord pages (idx + 1) * byteShift (4 - offset)) mask;
 
-  getByteUnchecked =
-    pages: addr:
+  # Writes the low `width` (1..4) bytes of `value` at `offset` within word `idx`.
+  storeSpan =
+    pages: idx: offset: width: value:
     let
-      idx = wordIndex addr;
-      offset = byteOffset addr;
+      lo = getWord pages idx;
+      shift = byteShift offset;
+      mask = pow2 (width * 8) - 1;
+      v = builtins.bitAnd value mask;
+      loBits = builtins.bitAnd (mask * shift) wordMask;
+      newLo = lo - builtins.bitAnd lo loBits + builtins.bitAnd (v * shift) wordMask;
+      withLo = setWord pages idx newLo;
     in
-    byteAt (getWord pages idx) offset;
+    if offset + width <= 4 then
+      withLo
+    else
+      let
+        hi = getWord pages (idx + 1);
+        hiShift = byteShift (4 - offset);
+      in
+      setWord withLo (idx + 1) (hi - builtins.bitAnd hi (mask / hiShift) + v / hiShift);
 
-  setByteUnchecked =
-    pages: addr: byte:
+  # The load and store paths below run for every memory access, so they read
+  # the state and check bounds inline instead of calling getMem, getPages and
+  # checkAccess, and handle aligned whole words without loadSpan/storeSpan.
+  loadWidth =
+    op: width: addr: st:
     let
-      idx = wordIndex addr;
-      offset = byteOffset addr;
-      word = getWord pages idx;
+      mem = st.mem or { };
+      pages = mem.pages or { };
+      offset = builtins.bitAnd addr 3;
     in
-    setWord pages idx (setByte word offset byte);
+    if addr < 0 || addr + width > (mem.pageCount or 1) * pageBytes then
+      throw "wasm trap: ${op} out of bounds"
+    else if offset == 0 && width == 4 then
+      getWord pages (addr / 4)
+    else
+      loadSpan pages (addr / 4) offset width;
+
+  storeWidth =
+    op: width: value: addr: st:
+    let
+      mem = st.mem or { };
+      pages = mem.pages or { };
+      offset = builtins.bitAnd addr 3;
+      idx = addr / 4;
+    in
+    if addr < 0 || addr + width > (mem.pageCount or 1) * pageBytes then
+      throw "wasm trap: ${op} out of bounds"
+    else
+      st
+      // {
+        mem = mem // {
+          pages =
+            if offset == 0 && width == 4 then
+              setWord pages idx (builtins.bitAnd value wordMask)
+            else
+              storeSpan pages idx offset width value;
+        };
+      };
+
+  getByteUnchecked = pages: addr: loadSpan pages (addr / 4) (builtins.bitAnd addr 3) 1;
 
   loadBytes =
     op: width: addr: st:
@@ -2188,87 +2257,118 @@ let
       let
         pages = getPages st;
       in
-      map (i: getByteUnchecked pages (addr + i)) (range width)
+      builtins.genList (i: getByteUnchecked pages (addr + i)) width
     );
 
-  bytesToU16 = bytes: elemAt bytes 0 + elemAt bytes 1 * 256;
-
-  bytesToU32 =
-    bytes: elemAt bytes 0 + elemAt bytes 1 * 256 + elemAt bytes 2 * 65536 + elemAt bytes 3 * 16777216;
-
-  bytesToLimitedU64 =
-    bytes:
-    let
-      lo = bytesToU32 (builtins.genList (i: elemAt bytes i) 4);
-      hi = bytesToU32 (builtins.genList (i: elemAt bytes (i + 4)) 4);
-    in
-    i64FromParts { inherit lo hi; };
-
-  u32ToBytes =
-    value:
-    let
-      v = u32 value;
-    in
-    [
-      (floorMod v 256)
-      (floorMod (v / 256) 256)
-      (floorMod (v / 65536) 256)
-      (floorMod (v / 16777216) 256)
-    ];
-
-  limitedU64ToBytes =
-    value:
-    let
-      parts = i64Parts value;
-    in
-    u32ToBytes parts.lo ++ u32ToBytes parts.hi;
-
+  # Writes a byte list with one chunk-wise overlay covering every touched word.
   storeBytes =
     op: bytes: addr: st:
-    builtins.seq (checkAccess op (length bytes) addr st) (
-      let
-        pages = builtins.foldl' (acc: i: setByteUnchecked acc (addr + i) (elemAt bytes i)) (getPages st) (
-          range (length bytes)
+    let
+      len = length bytes;
+      end = addr + len;
+      pages = getPages st;
+      firstWord = addr / 4;
+      lastWord = (end - 1) / 4;
+      byteAtAddr = a: if a >= addr && a < end then elemAt bytes (a - addr) else getByteUnchecked pages a;
+      wordAt =
+        idx:
+        let
+          base = idx * 4;
+        in
+        byteAtAddr base
+        + byteAtAddr (base + 1) * 256
+        + byteAtAddr (base + 2) * 65536
+        + byteAtAddr (base + 3) * 16777216;
+      firstChunk = firstWord / chunkWords;
+      chunkOverlay =
+        chunk:
+        let
+          from = if chunk == firstChunk then firstWord else chunk * chunkWords;
+          to = if chunk == lastWord / chunkWords then lastWord else chunk * chunkWords + slotMask;
+        in
+        builtins.listToAttrs (
+          builtins.genList (i: {
+            name = toString (builtins.bitAnd (from + i) slotMask);
+            value = wordAt (from + i);
+          }) (to - from + 1)
         );
-      in
-      setPages pages st
+      overlay = builtins.listToAttrs (
+        builtins.genList (
+          i:
+          let
+            chunk = firstChunk + i;
+          in
+          {
+            name = toString chunk;
+            value = chunkOverlay chunk;
+          }
+        ) (lastWord / chunkWords - firstChunk + 1)
+      );
+      newPages = overlayPages pages overlay;
+    in
+    builtins.seq (checkAccess op len addr st) (
+      if len == 0 then st else builtins.deepSeq overlay (builtins.deepSeq newPages (setPages newPages st))
     );
 
   mem = rec {
-    load_u8 = addr: st: elemAt (loadBytes "load_u8" 1 addr st) 0;
+    load_u8 = loadWidth "load_u8" 1;
     load_s8 = addr: st: u32 (signExtend 8 (load_u8 addr st));
     load_s8_i64 = addr: st: checkI64 (signExtend 8 (load_u8 addr st));
-    load_u16 = addr: st: bytesToU16 (loadBytes "load_u16" 2 addr st);
+    load_u16 = loadWidth "load_u16" 2;
     load_s16 = addr: st: u32 (signExtend 16 (load_u16 addr st));
     load_s16_i64 = addr: st: checkI64 (signExtend 16 (load_u16 addr st));
-    load_u32 = addr: st: bytesToU32 (loadBytes "load_u32" 4 addr st);
-    load_s32 = addr: st: u32 (signExtend 32 (load_u32 addr st));
+    load_u32 = loadWidth "load_u32" 4;
+    load_s32 = load_u32;
     load_s32_i64 = addr: st: checkI64 (signExtend 32 (load_u32 addr st));
     load_i32 = load_u32;
     load_f32 = load_u32;
-    load_i64 = addr: st: bytesToLimitedU64 (loadBytes "load_i64" 8 addr st);
+    load_i64 =
+      addr: st:
+      let
+        mem = st.mem or { };
+        pages = mem.pages or { };
+        idx = addr / 4;
+        offset = builtins.bitAnd addr 3;
+        lo = if offset == 0 then getWord pages idx else loadSpan pages idx offset 4;
+        hi = if offset == 0 then getWord pages (idx + 1) else loadSpan pages (idx + 1) offset 4;
+      in
+      if addr < 0 || addr + 8 > (mem.pageCount or 1) * pageBytes then
+        throw "wasm trap: load_i64 out of bounds"
+      else if hi >= i32Sign then
+        (hi - u32Mod) * u32Mod + lo
+      else
+        hi * u32Mod + lo;
     load_f64 = load_i64;
 
-    store_u8 =
-      value: addr: st:
-      storeBytes "store_u8" [ (floorMod value 256) ] addr st;
-    store_u16 =
-      value: addr: st:
-      let
-        v = u32 value;
-      in
-      storeBytes "store_u16" [
-        (floorMod v 256)
-        (floorMod (v / 256) 256)
-      ] addr st;
-    store_i32 =
-      value: addr: st:
-      storeBytes "store_i32" (u32ToBytes value) addr st;
+    store_u8 = storeWidth "store_u8" 1;
+    store_u16 = storeWidth "store_u16" 2;
+    store_i32 = storeWidth "store_i32" 4;
     store_u32 = store_i32;
     store_f32 = store_i32;
     store_i64 =
       value: addr: st:
-      storeBytes "store_i64" (limitedU64ToBytes value) addr st;
+      let
+        mem = st.mem or { };
+        pages = mem.pages or { };
+        idx = addr / 4;
+        offset = builtins.bitAnd addr 3;
+        lo = builtins.bitAnd value wordMask;
+        # value - lo is a multiple of 2^32, so the division is exact.
+        hi = builtins.bitAnd ((value - lo) / u32Mod) wordMask;
+      in
+      if addr < 0 || addr + 8 > (mem.pageCount or 1) * pageBytes then
+        throw "wasm trap: store_i64 out of bounds"
+      else
+        st
+        // {
+          mem = mem // {
+            pages =
+              if offset == 0 then
+                setWord (setWord pages idx lo) (idx + 1) hi
+              else
+                storeSpan (storeSpan pages idx offset 4 lo) (idx + 1) offset 4 hi;
+          };
+        };
     store_f64 = store_i64;
 
     size = st: pageCount st;
@@ -2291,13 +2391,7 @@ let
         };
     fill =
       dst: value: len: st:
-      builtins.seq (checkAccess "memory.fill" len dst st) (
-        let
-          byte = floorMod value 256;
-          pages = builtins.foldl' (acc: i: setByteUnchecked acc (dst + i) byte) (getPages st) (range len);
-        in
-        setPages pages st
-      );
+      storeBytes "memory.fill" (builtins.genList (_: builtins.bitAnd value 255) len) dst st;
     copy =
       dst: src: len: st:
       let
@@ -2314,6 +2408,11 @@ let
       in
       storeBytes "memory.init" bytes dst st;
     data_drop = segIndex: st: setDataSegment segIndex [ ] st;
+    load_bytes =
+      addr: len: st:
+      loadBytes "load_bytes" len addr st;
+    store_bytes = storeBytes "store_bytes";
+    overlay_pages = overlayPages;
   };
 
   globals = st: st.globals or { };
@@ -2920,6 +3019,12 @@ in
     init = mem.init;
     # wasm2nix:runtime-fn mem.data_drop(seg_index, st) -> state
     data_drop = mem.data_drop;
+    # wasm2nix:runtime-fn mem.load_bytes(addr, len, st) -> value
+    load_bytes = mem.load_bytes;
+    # wasm2nix:runtime-fn mem.store_bytes(bytes, addr, st) -> state
+    store_bytes = mem.store_bytes;
+    # wasm2nix:runtime-fn mem.overlay_pages(base, overlay) -> value
+    overlay_pages = mem.overlay_pages;
   };
 
   global = {

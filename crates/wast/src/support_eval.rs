@@ -199,8 +199,10 @@ fn select_string_path(mut expr: Expr, attrs: &[&str]) -> Expr {
     expr
 }
 
+/// Embeds a rendered state expression; it is parenthesized because `Raw`
+/// renders as an atom and the state may be an application.
 pub fn state_expr(state: &str) -> Expr {
-    Expr::raw(state.to_string())
+    Expr::raw(format!("({state})"))
 }
 
 pub fn nix_u64(value: u64) -> Result<Expr> {

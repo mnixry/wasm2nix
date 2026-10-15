@@ -7,6 +7,7 @@ use wasm2nix::{
     nix::{Expr, nix},
     translator::NixModule,
 };
+use wasm2nix_runtime::RuntimeFunction;
 use wast::{
     WastArg, WastRet,
     core::{NanPattern, WastArgCore, WastRetCore},
@@ -192,13 +193,11 @@ fn merge_memory_words_expr(
 ) -> String {
     let offset = nix_u64(offset).unwrap_or_else(|_| Expr::raw(offset.to_string()));
     let len = nix_u64(len as u64).unwrap_or_else(|_| Expr::raw(len.to_string()));
-    nix!(harness.mergeMemoryWords({
-        dstSt = #{state_expr(target_state)};
-        srcSt = #{state_expr(source_state)};
-        offset = #{offset};
-        len = #{len};
-    }))
-    .render()
+    let bytes =
+        RuntimeFunction::MemLoadBytes.call(vec![offset.clone(), len, state_expr(source_state)]);
+    RuntimeFunction::MemStoreBytes
+        .call(vec![bytes, offset, state_expr(target_state)])
+        .render()
 }
 
 pub fn sync_global_imports_from_targets(

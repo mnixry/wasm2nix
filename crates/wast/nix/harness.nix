@@ -165,39 +165,6 @@ rec {
       };
     };
 
-  mergeMemoryWords =
-    {
-      dstSt,
-      srcSt,
-      offset,
-      len,
-    }:
-    let
-      firstWord = offset / 4;
-      lastWord = if len == 0 then firstWord else (offset + len - 1) / 4;
-      dstMem = dstSt.mem or { };
-      srcMem = srcSt.mem or { };
-      srcPages = srcMem.pages or { };
-      entries = builtins.listToAttrs (
-        builtins.genList (
-          i:
-          let
-            word = index (firstWord + i);
-          in
-          {
-            name = word;
-            value = builtins.getAttr word srcPages;
-          }
-        ) (lastWord - firstWord + 1)
-      );
-    in
-    dstSt
-    // {
-      mem = dstMem // {
-        pages = (dstMem.pages or { }) // entries;
-      };
-    };
-
   syncGlobalState =
     {
       dstSt,
