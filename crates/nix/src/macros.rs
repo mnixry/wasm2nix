@@ -318,16 +318,38 @@ macro_rules! __nix_parse_add_acc {
         $crate::__nix_parse_add_acc!([-] $($rest)+)
     };
     ([$($lhs:tt)+] + $($rhs:tt)+) => {
-        $crate::Expr::bin($crate::BinOp::Add, $crate::nix!($($lhs)+), $crate::__nix_parse_add!($($rhs)+))
+        $crate::__nix_fold_add!($crate::nix!($($lhs)+); Add [] $($rhs)+)
     };
     ([$($lhs:tt)+] - $($rhs:tt)+) => {
-        $crate::Expr::bin($crate::BinOp::Sub, $crate::nix!($($lhs)+), $crate::__nix_parse_add!($($rhs)+))
+        $crate::__nix_fold_add!($crate::nix!($($lhs)+); Sub [] $($rhs)+)
     };
     ([$($lhs:tt)*] $next:tt $($rest:tt)*) => {
         $crate::__nix_parse_add_acc!([$($lhs)* $next] $($rest)*)
     };
     ([$($all:tt)+]) => {
         $crate::__nix_parse_mul!($($all)+)
+    };
+}
+
+/// Folds a `+`/`-` chain left to right, so `a - b - c` is `(a - b) - c`.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __nix_fold_add {
+    ($acc:expr; $op:ident [$($cur:tt)+] + $($rest:tt)+) => {
+        $crate::__nix_fold_add!(
+            $crate::Expr::bin($crate::BinOp::$op, $acc, $crate::nix!($($cur)+)); Add [] $($rest)+
+        )
+    };
+    ($acc:expr; $op:ident [$($cur:tt)+] - $($rest:tt)+) => {
+        $crate::__nix_fold_add!(
+            $crate::Expr::bin($crate::BinOp::$op, $acc, $crate::nix!($($cur)+)); Sub [] $($rest)+
+        )
+    };
+    ($acc:expr; $op:ident [$($cur:tt)*] $next:tt $($rest:tt)*) => {
+        $crate::__nix_fold_add!($acc; $op [$($cur)* $next] $($rest)*)
+    };
+    ($acc:expr; $op:ident [$($cur:tt)+]) => {
+        $crate::Expr::bin($crate::BinOp::$op, $acc, $crate::nix!($($cur)+))
     };
 }
 
@@ -343,19 +365,38 @@ macro_rules! __nix_parse_mul {
 #[macro_export]
 macro_rules! __nix_parse_mul_acc {
     ([$($lhs:tt)+] * $($rhs:tt)+) => {
-        $crate::Expr::bin($crate::BinOp::Mul, $crate::nix!($($lhs)+), $crate::__nix_parse_mul!($($rhs)+))
+        $crate::__nix_fold_mul!($crate::nix!($($lhs)+); Mul [] $($rhs)+)
     };
     ([$($lhs:tt)+] / $($rhs:tt)+) => {
-        $crate::Expr::bin($crate::BinOp::Div, $crate::nix!($($lhs)+), $crate::__nix_parse_mul!($($rhs)+))
-    };
-    ([$($lhs:tt)+] % $($rhs:tt)+) => {
-        $crate::Expr::bin($crate::BinOp::Mod, $crate::nix!($($lhs)+), $crate::__nix_parse_mul!($($rhs)+))
+        $crate::__nix_fold_mul!($crate::nix!($($lhs)+); Div [] $($rhs)+)
     };
     ([$($lhs:tt)*] $next:tt $($rest:tt)*) => {
         $crate::__nix_parse_mul_acc!([$($lhs)* $next] $($rest)*)
     };
     ([$($all:tt)+]) => {
         $crate::__nix_atom!($($all)+)
+    };
+}
+
+/// Folds a `*`/`/` chain left to right, so `a / b / c` is `(a / b) / c`.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __nix_fold_mul {
+    ($acc:expr; $op:ident [$($cur:tt)+] * $($rest:tt)+) => {
+        $crate::__nix_fold_mul!(
+            $crate::Expr::bin($crate::BinOp::$op, $acc, $crate::nix!($($cur)+)); Mul [] $($rest)+
+        )
+    };
+    ($acc:expr; $op:ident [$($cur:tt)+] / $($rest:tt)+) => {
+        $crate::__nix_fold_mul!(
+            $crate::Expr::bin($crate::BinOp::$op, $acc, $crate::nix!($($cur)+)); Div [] $($rest)+
+        )
+    };
+    ($acc:expr; $op:ident [$($cur:tt)*] $next:tt $($rest:tt)*) => {
+        $crate::__nix_fold_mul!($acc; $op [$($cur)* $next] $($rest)*)
+    };
+    ($acc:expr; $op:ident [$($cur:tt)+]) => {
+        $crate::Expr::bin($crate::BinOp::$op, $acc, $crate::nix!($($cur)+))
     };
 }
 
@@ -516,6 +557,17 @@ mod tests {
     #[test]
     fn macro_builds_binary_ops() {
         assert_eq!(nix!(a + b * c).render(), "a + b * c");
+        assert_eq!(nix!(a - b - c).render(), "a - b - c");
+        assert_eq!(nix!(a - b + c).render(), "a - b + c");
+        assert_eq!(nix!(a / b * c).render(), "a / b * c");
+        assert_eq!(
+            nix!(a - b - c),
+            Expr::bin(
+                BinOp::Sub,
+                Expr::bin(BinOp::Sub, Expr::ident("a"), Expr::ident("b")),
+                Expr::ident("c"),
+            )
+        );
         assert_eq!(
             nix!(a - (b - c)).render(),
             Expr::bin(

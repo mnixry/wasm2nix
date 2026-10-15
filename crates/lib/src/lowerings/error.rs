@@ -12,9 +12,6 @@ pub enum LowerError {
     #[snafu(display("block b{block} has no terminator"))]
     EmptyBlock { block: u32 },
 
-    #[snafu(display("unsupported Cranelift type {ty} while lowering {context}"))]
-    UnsupportedClifType { context: &'static str, ty: String },
-
     #[snafu(display("unsupported global type {ty}"))]
     UnsupportedGlobalType { ty: String },
 
@@ -35,9 +32,6 @@ pub enum LowerError {
 
     #[snafu(display("unknown intrinsic index {index}"))]
     UnknownIntrinsic { index: u32 },
-
-    #[snafu(display("missing function index {func_index}"))]
-    MissingFunction { func_index: u32 },
 
     #[snafu(display("missing type index {type_index}"))]
     MissingType { type_index: u32 },

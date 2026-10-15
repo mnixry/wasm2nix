@@ -39,55 +39,20 @@ impl Default for TranspileOptions {
 ///
 /// Returns an error when the Wasm bytes cannot be translated or when lowering
 /// to the Nix AST fails.
-pub fn lower_wasm_to_nix(wasm: &[u8], runtime_path_expr: &str) -> error::Result<String> {
-    lower_wasm_to_nix_with_options(wasm, &TranspileOptions::new(runtime_path_expr))
-}
-
-/// Lowers a Wasm module to a complete Nix module wrapper with configurable
-/// rendering.
-///
-/// # Errors
-///
-/// Returns an error when the Wasm bytes cannot be translated or when lowering
-/// to the Nix AST fails.
-pub fn lower_wasm_to_nix_with_options(
-    wasm: &[u8], options: &TranspileOptions,
-) -> error::Result<String> {
-    let module = lower_wasm_to_nix_module_with_options(wasm, &options.render_options)?;
-    let runtime_path_expr = &options.runtime_import_expr;
-    if options.render_options.style == nix::RenderStyle::Compact {
-        return Ok(format!(
-            "{{ imports ? {{ }}, rt ? import {runtime_path_expr} {{ }} }}: ({module}) rt imports"
-        ));
-    }
-    Ok(format!(
-        "{{ imports ? {{ }}, rt ? import {runtime_path_expr} {{ }} }}:\n\n({module}) rt imports"
-    ))
-}
-
-/// Lowers a Wasm module to the inner Nix module expression.
-///
-/// # Errors
-///
-/// Returns an error when the Wasm bytes cannot be translated or when lowering
-/// to the Nix AST fails.
-pub fn lower_wasm_to_nix_module(wasm: &[u8]) -> error::Result<String> {
-    lower_wasm_to_nix_module_with_options(wasm, &nix::RenderOptions::default())
-}
-
-/// Lowers a Wasm module to the inner Nix module expression with configurable
-/// rendering.
-///
-/// # Errors
-///
-/// Returns an error when the Wasm bytes cannot be translated or when lowering
-/// to the Nix AST fails.
-pub fn lower_wasm_to_nix_module_with_options(
-    wasm: &[u8], render_options: &nix::RenderOptions,
-) -> error::Result<String> {
+pub fn lower_wasm_to_nix(wasm: &[u8], options: &TranspileOptions) -> error::Result<String> {
     let module = translator::NixModule::translate(wasm).context(error::TranslateWasmSnafu)?;
-    let lowered = lowerings::lower_module(&module).context(error::LowerNixSnafu)?;
-    Ok(lowered.render_with(render_options))
+    let module = lowerings::lower_module(&module)
+        .context(error::LowerNixSnafu)?
+        .render_with(&options.render_options);
+    let separator = if options.render_options.style == nix::RenderStyle::Compact {
+        " "
+    } else {
+        "\n\n"
+    };
+    Ok(format!(
+        "{{ imports ? {{ }}, rt ? import {} {{ }} }}:{separator}({module}) rt imports",
+        options.runtime_import_expr
+    ))
 }
 
 #[must_use]
@@ -141,8 +106,7 @@ pub fn runtime_import_expr(
     }
 }
 
-#[must_use]
-pub fn default_runtime_file_name(out_path: &Path) -> String {
+fn default_runtime_file_name(out_path: &Path) -> String {
     let stem = out_path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -151,8 +115,7 @@ pub fn default_runtime_file_name(out_path: &Path) -> String {
     format!("{stem}-rt.nix")
 }
 
-#[must_use]
-pub fn nix_path_expr(path: &Path) -> String {
+fn nix_path_expr(path: &Path) -> String {
     if path.is_absolute() {
         path.display().to_string()
     } else {
@@ -160,8 +123,7 @@ pub fn nix_path_expr(path: &Path) -> String {
     }
 }
 
-#[must_use]
-pub fn relative_nix_path_expr(path: &Path) -> String {
+fn relative_nix_path_expr(path: &Path) -> String {
     let path = path.display().to_string();
     if path.starts_with("./") || path.starts_with("../") {
         path
@@ -181,11 +143,8 @@ mod tests {
             0x03, 0x02, 0x01, 0x00, 0x0A, 0x04, 0x01, 0x02, 0x00, 0x0B,
         ];
 
-        let nix = lower_wasm_to_nix(
-            &wasm,
-            &format!("./{}", wasm2nix_runtime::DEFAULT_RUNTIME_FILE_NAME),
-        )
-        .expect("wasm should lower");
+        let nix =
+            lower_wasm_to_nix(&wasm, &TranspileOptions::default()).expect("wasm should lower");
 
         assert!(nix.starts_with("{ imports ? { }, rt ? import ./wasm2nix-rt.nix { } }:"));
         assert!(nix.ends_with(") rt imports"));

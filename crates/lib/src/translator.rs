@@ -71,11 +71,9 @@ pub struct NixModuleInfo {
 
     pub global_inits: SecondaryMap<GlobalIndex, Option<ConstExpr>>,
 
-    pub passive_data: SecondaryMap<DataIndex, Vec<u8>>,
     pub data_segments: SecondaryMap<DataIndex, Vec<u8>>,
     pub data_initializers: Vec<DataInitializer>,
     pub table_initializers: Vec<TableInitializer>,
-    pub passive_elements: SecondaryMap<ElemIndex, Vec<FuncIndex>>,
     pub element_segments: SecondaryMap<ElemIndex, Vec<FuncIndex>>,
 
     data_segment_count: usize,
@@ -99,11 +97,9 @@ impl NixModuleInfo {
             tables: PrimaryMap::new(),
             globals: PrimaryMap::new(),
             global_inits: SecondaryMap::new(),
-            passive_data: SecondaryMap::new(),
             data_segments: SecondaryMap::new(),
             data_initializers: Vec::new(),
             table_initializers: Vec::new(),
-            passive_elements: SecondaryMap::new(),
             element_segments: SecondaryMap::new(),
             data_segment_count: 0,
             elem_segment_count: 0,
@@ -129,9 +125,6 @@ impl NixModuleInfo {
 pub struct NixModule {
     pub info: NixModuleInfo,
     trans: FuncTranslator,
-
-    pub module_name: Option<String>,
-    pub function_names: SecondaryMap<FuncIndex, Option<String>>,
 }
 
 impl Default for NixModule {
@@ -147,8 +140,6 @@ impl NixModule {
         Self {
             info: NixModuleInfo::new(config),
             trans: FuncTranslator::new(),
-            module_name: None,
-            function_names: SecondaryMap::new(),
         }
     }
 
@@ -346,9 +337,6 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn reserve_table_elements(&mut self, num: u32) -> WasmResult<()> {
-        if self.info.passive_elements.is_empty() {
-            self.info.passive_elements = SecondaryMap::with_capacity(num as usize);
-        }
         if self.info.element_segments.is_empty() {
             self.info.element_segments = SecondaryMap::with_capacity(num as usize);
         }
@@ -379,9 +367,7 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     fn declare_passive_element(
         &mut self, index: ElemIndex, elements: Box<[FuncIndex]>,
     ) -> WasmResult<()> {
-        let elements = elements.into_vec();
-        self.info.passive_elements[index].clone_from(&elements);
-        self.info.element_segments[index] = elements;
+        self.info.element_segments[index] = elements.into_vec();
         self.info.elem_segment_count = self.info.elem_segment_count.max(index.index() + 1);
         Ok(())
     }
@@ -394,7 +380,6 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn declare_passive_data(&mut self, data_index: DataIndex, data: &'data [u8]) -> WasmResult<()> {
-        self.info.passive_data[data_index] = data.to_vec();
         self.info.data_segments[data_index] = data.to_vec();
         self.info.data_segment_count = self.info.data_segment_count.max(data_index.index() + 1);
         Ok(())
@@ -440,14 +425,6 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         Ok(())
     }
 
-    fn declare_module_name(&mut self, name: &'data str) {
-        self.module_name = Some(name.to_string());
-    }
-
-    fn declare_func_name(&mut self, func_index: FuncIndex, name: &'data str) {
-        self.function_names[func_index] = Some(name.to_string());
-    }
-
     fn reserve_function_bodies(&mut self, bodies: u32, _code_section_offset: u64) {
         if self.info.function_bodies.is_empty() {
             self.info.function_bodies = PrimaryMap::with_capacity(bodies as usize);
@@ -460,9 +437,6 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn reserve_passive_data(&mut self, count: u32) -> WasmResult<()> {
-        if self.info.passive_data.is_empty() {
-            self.info.passive_data = SecondaryMap::with_capacity(count as usize);
-        }
         if self.info.data_segments.is_empty() {
             self.info.data_segments = SecondaryMap::with_capacity(count as usize);
         }

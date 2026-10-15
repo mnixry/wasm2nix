@@ -17,11 +17,6 @@ pub fn runtime_nix_path() -> &'static Path {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/nix/rt.nix"))
 }
 
-#[must_use]
-pub const fn runtime_functions_json() -> &'static str {
-    include_str!(concat!(env!("OUT_DIR"), "/runtime-functions.json"))
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeResultKind {
     Value,
@@ -69,17 +64,6 @@ mod tests {
     }
 
     #[test]
-    fn generated_manifest_is_json() {
-        let value: serde_json::Value =
-            serde_json::from_str(runtime_functions_json()).expect("manifest should be valid JSON");
-        assert!(
-            value["functions"]
-                .as_array()
-                .is_some_and(|items| !items.is_empty())
-        );
-    }
-
-    #[test]
     fn generated_runtime_function_metadata_matches_calls() {
         assert_eq!(RuntimeFunction::I32Add.path(), &["i32", "add"]);
         assert_eq!(RuntimeFunction::I32Add.arity(), 2);
@@ -88,7 +72,8 @@ mod tests {
             RuntimeResultKind::Value
         );
 
-        let call = calls::i32_add(wasm2nix_ast::Expr::int(1), wasm2nix_ast::Expr::int(2));
+        let call = RuntimeFunction::I32Add
+            .call(vec![wasm2nix_ast::Expr::int(1), wasm2nix_ast::Expr::int(2)]);
         assert_eq!(call.render(), "rt.i32.add 1 2");
     }
 

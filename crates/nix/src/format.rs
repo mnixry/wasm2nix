@@ -6,22 +6,20 @@ type Doc = BoxDoc<'static, ()>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Prec {
-    Top         = 0,
-    PipeBack    = 10,
-    PipeForward = 20,
-    Implies     = 30,
-    Or          = 40,
-    And         = 50,
-    Equal       = 60,
-    Compare     = 70,
-    Update      = 80,
-    Prefix      = 90,
-    Add         = 100,
-    Mul         = 110,
-    Concat      = 120,
-    Apply       = 130,
-    Select      = 140,
-    Atom        = 150,
+    Top     = 0,
+    Implies = 30,
+    Or      = 40,
+    And     = 50,
+    Equal   = 60,
+    Compare = 70,
+    Update  = 80,
+    Prefix  = 90,
+    Add     = 100,
+    Mul     = 110,
+    Concat  = 120,
+    Apply   = 130,
+    Select  = 140,
+    Atom    = 150,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,8 +32,6 @@ enum Assoc {
 impl From<BinOp> for Prec {
     fn from(val: BinOp) -> Self {
         match val {
-            BinOp::PipeBackward => Self::PipeBack,
-            BinOp::PipeForward => Self::PipeForward,
             BinOp::Implies => Self::Implies,
             BinOp::Or => Self::Or,
             BinOp::And => Self::And,
@@ -43,7 +39,7 @@ impl From<BinOp> for Prec {
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Self::Compare,
             BinOp::Update => Self::Update,
             BinOp::Add | BinOp::Sub => Self::Add,
-            BinOp::Mul | BinOp::Div | BinOp::Mod => Self::Mul,
+            BinOp::Mul | BinOp::Div => Self::Mul,
             BinOp::Concat => Self::Concat,
         }
     }
@@ -52,15 +48,10 @@ impl From<BinOp> for Prec {
 impl From<BinOp> for Assoc {
     fn from(val: BinOp) -> Self {
         match val {
-            BinOp::Update | BinOp::Concat | BinOp::PipeBackward | BinOp::Implies => Self::Right,
-            BinOp::Add
-            | BinOp::Sub
-            | BinOp::Mul
-            | BinOp::Div
-            | BinOp::Mod
-            | BinOp::And
-            | BinOp::Or
-            | BinOp::PipeForward => Self::Left,
+            BinOp::Update | BinOp::Concat | BinOp::Implies => Self::Right,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::And | BinOp::Or => {
+                Self::Left
+            }
             BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Self::None,
         }
     }

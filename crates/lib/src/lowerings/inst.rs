@@ -86,7 +86,7 @@ pub(super) fn lower_function(
         ));
     }
 
-    let entry_with_key = lower_jump_record_with_key(entry, entry_args, nix!(st), 0);
+    let entry_with_key = lower_jump_record(entry, entry_args, nix!(st), Some(0));
     let apply_args = nix!(func: args: builtins."foldl'"(f: arg: f(arg), func, args));
     let apply_block = nix!(block: args: blockSt:
         (applyArgs(builtins.getAttr(block, blocks), args))(blockSt)
@@ -521,7 +521,7 @@ impl BlockLowering<'_> {
                 .map(|v| self.value_expr(*v, st_name)),
         );
         if self.cfg.back_edges.contains(&(from, target)) {
-            Ok(lower_jump_record(target, args, Expr::ident(st_name)))
+            Ok(lower_jump_record(target, args, Expr::ident(st_name), None))
         } else {
             args.push(Expr::ident(st_name));
             Ok(Expr::app(Expr::ident(block_name(target)), args))
@@ -865,15 +865,9 @@ fn remove_ident_force(forces: &mut Vec<Force>, name: &str) {
     });
 }
 
-fn lower_jump_record(target: Block, args: Vec<Expr>, st: Expr) -> Expr {
-    lower_jump_record_binds(target, args, st, None)
-}
-
-fn lower_jump_record_with_key(target: Block, args: Vec<Expr>, st: Expr, key: i64) -> Expr {
-    lower_jump_record_binds(target, args, st, Some(key))
-}
-
-fn lower_jump_record_binds(target: Block, args: Vec<Expr>, st: Expr, key: Option<i64>) -> Expr {
+/// A jump record for the trampoline; the entry record also carries the
+/// `genericClosure` key that later steps derive from it.
+fn lower_jump_record(target: Block, args: Vec<Expr>, st: Expr, key: Option<i64>) -> Expr {
     let block = block_name(target);
     let args = Expr::list(args);
     if let Some(key) = key {

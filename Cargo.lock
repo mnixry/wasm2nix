@@ -833,7 +833,6 @@ dependencies = [
  "cranelift-wasm",
  "proc-macro2",
  "quote",
- "serde_json",
  "snafu",
  "syn",
  "wasm2nix-ast",

@@ -35,11 +35,6 @@ pub struct AttrPath(Vec<AttrKey>);
 
 impl AttrPath {
     #[must_use]
-    pub const fn new(keys: Vec<AttrKey>) -> Self {
-        Self(keys)
-    }
-
-    #[must_use]
     pub fn one(key: AttrKey) -> Self {
         Self(vec![key])
     }
@@ -48,30 +43,14 @@ impl AttrPath {
         self.0.push(key);
     }
 
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = &AttrKey> {
         self.0.iter()
-    }
-
-    #[must_use]
-    pub fn into_vec(self) -> Vec<AttrKey> {
-        self.0
     }
 }
 
 impl From<AttrKey> for AttrPath {
     fn from(value: AttrKey) -> Self {
         Self::one(value)
-    }
-}
-
-impl From<Vec<AttrKey>> for AttrPath {
-    fn from(value: Vec<AttrKey>) -> Self {
-        Self::new(value)
     }
 }
 
@@ -124,7 +103,6 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
-    Mod,
     Eq,
     Neq,
     Lt,
@@ -136,8 +114,6 @@ pub enum BinOp {
     Update,
     Concat,
     Implies,
-    PipeForward,
-    PipeBackward,
 }
 
 impl BinOp {
@@ -148,7 +124,6 @@ impl BinOp {
             Self::Sub => "-",
             Self::Mul => "*",
             Self::Div => "/",
-            Self::Mod => "%",
             Self::Eq => "==",
             Self::Neq => "!=",
             Self::Lt => "<",
@@ -160,8 +135,6 @@ impl BinOp {
             Self::Update => "//",
             Self::Concat => "++",
             Self::Implies => "->",
-            Self::PipeForward => "|>",
-            Self::PipeBackward => "<|",
         }
     }
 }
@@ -298,33 +271,6 @@ impl Expr {
         }
     }
 
-    #[must_use]
-    pub fn select_path(expr: Self, path: impl Into<AttrPath>) -> Self {
-        let path = path.into();
-        if path.is_empty() {
-            return expr;
-        }
-
-        match expr {
-            Self::Select {
-                expr,
-                path: mut existing,
-            } => {
-                for key in path.into_vec() {
-                    existing.push(key);
-                }
-                Self::Select {
-                    expr,
-                    path: existing,
-                }
-            }
-            expr => Self::Select {
-                expr: Box::new(expr),
-                path,
-            },
-        }
-    }
-
     pub fn lambda(param: impl Into<String>, body: Self) -> Self {
         Self::Lambda {
             param: param.into(),
@@ -367,20 +313,6 @@ impl Expr {
         Self::Assert {
             conds,
             body: Box::new(body),
-        }
-    }
-
-    #[must_use]
-    pub fn apply(func: Self, arg: Self) -> Self {
-        match func {
-            Self::Apply { func, mut args } => {
-                args.push(arg);
-                Self::Apply { func, args }
-            }
-            func => Self::Apply {
-                func: Box::new(func),
-                args: vec![arg],
-            },
         }
     }
 

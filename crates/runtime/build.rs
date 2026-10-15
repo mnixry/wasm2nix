@@ -1,6 +1,6 @@
 use std::{env, error::Error, fs, path::PathBuf};
 
-use proc_macro2::{Ident, Literal, Span, TokenStream};
+use proc_macro2::{Ident, Literal, TokenStream};
 use quote::{format_ident, quote};
 
 #[derive(Debug, Clone)]
@@ -27,14 +27,6 @@ impl RuntimeResult {
         }
     }
 
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Value => "value",
-            Self::State => "state",
-            Self::Record => "record",
-        }
-    }
-
     fn tokens(self) -> TokenStream {
         match self {
             Self::Value => quote!(crate::RuntimeResultKind::Value),
@@ -56,10 +48,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     validate(&functions)?;
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR must be set")?);
-    fs::write(
-        out_dir.join("runtime-functions.json"),
-        runtime_functions_json(&functions)?,
-    )?;
 
     let generated = runtime_calls_tokens(&functions);
     syn::parse2::<syn::File>(generated.clone())?;
@@ -128,7 +116,6 @@ fn parse_runtime_function(annotation: &str) -> Result<RuntimeFn, String> {
 fn validate(functions: &[RuntimeFn]) -> Result<(), Box<dyn Error>> {
     let mut paths = std::collections::BTreeSet::new();
     let mut variants = std::collections::BTreeSet::new();
-    let mut helpers = std::collections::BTreeSet::new();
 
     for function in functions {
         let path = function.path.join(".");
@@ -141,12 +128,6 @@ fn validate(functions: &[RuntimeFn]) -> Result<(), Box<dyn Error>> {
         if !variants.insert(variant.clone()) {
             return Err(format!("duplicate runtime enum variant `{variant}`").into());
         }
-
-        let helper = helper_name(&function.path);
-        validate_rust_ident(&helper)?;
-        if !helpers.insert(helper.clone()) {
-            return Err(format!("duplicate runtime helper `{helper}`").into());
-        }
     }
 
     Ok(())
@@ -158,28 +139,10 @@ fn validate_rust_ident(s: &str) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
-fn runtime_functions_json(functions: &[RuntimeFn]) -> Result<String, serde_json::Error> {
-    let functions = functions
-        .iter()
-        .map(|function| {
-            serde_json::json!({
-                "path": function.path,
-                "args": function.args,
-                "result": function.result.as_str(),
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_string_pretty(&serde_json::json!({ "functions": functions }))
-}
-
 fn runtime_calls_tokens(functions: &[RuntimeFn]) -> TokenStream {
     let variants = functions
         .iter()
         .map(|function| format_ident!("{}", variant_name(&function.path)))
-        .collect::<Vec<_>>();
-    let helper_idents = functions
-        .iter()
-        .map(|function| format_ident!("{}", helper_name(&function.path)))
         .collect::<Vec<_>>();
     let path_arms = functions
         .iter()
@@ -191,25 +154,6 @@ fn runtime_calls_tokens(functions: &[RuntimeFn]) -> TokenStream {
         .collect::<Vec<_>>();
     let arity_arms = grouped_arity_arms(functions, &variants);
     let result_arms = grouped_result_arms(functions, &variants);
-    let helper_fns = functions
-        .iter()
-        .zip(&variants)
-        .zip(&helper_idents)
-        .map(|((function, variant), helper)| {
-            let args = function
-                .args
-                .iter()
-                .map(|arg| Ident::new(arg, Span::call_site()))
-                .collect::<Vec<_>>();
-            quote! {
-                #[must_use]
-                pub fn #helper(#(#args: wasm2nix_ast::Expr),*) -> wasm2nix_ast::Expr {
-                    crate::RuntimeFunction::#variant.call(vec![#(#args),*])
-                }
-            }
-        })
-        .collect::<Vec<_>>();
-
     quote! {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub enum RuntimeFunction {
@@ -262,12 +206,6 @@ fn runtime_calls_tokens(functions: &[RuntimeFn]) -> TokenStream {
                 wasm2nix_ast::Expr::app(self.expr(), args)
             }
         }
-
-        pub mod calls {
-            #![allow(clippy::too_many_arguments)]
-
-            #(#helper_fns)*
-        }
     }
 }
 
@@ -318,13 +256,6 @@ fn variant_name(path: &[String]) -> String {
         .flat_map(|segment| segment.split('_'))
         .map(to_pascal_segment)
         .collect::<String>()
-}
-
-fn helper_name(path: &[String]) -> String {
-    path.iter()
-        .map(|segment| segment.replace('-', "_"))
-        .collect::<Vec<_>>()
-        .join("_")
 }
 
 fn to_pascal_segment(segment: &str) -> String {

@@ -49,15 +49,11 @@ macro_rules! cached_intrinsic_method {
     };
 }
 
-#[derive(Debug, Default, Clone)]
-struct Intrinsics {
-    refs: BTreeMap<u32, ir::FuncRef>,
-}
-
 pub struct NixFuncEnvironment<'m> {
     mod_info: &'m NixModuleInfo,
     heaps: PrimaryMap<Heap, HeapData>,
-    intrinsics: Intrinsics,
+    /// Intrinsic imports already declared in the current function.
+    intrinsics: BTreeMap<u32, ir::FuncRef>,
 }
 
 impl<'m> NixFuncEnvironment<'m> {
@@ -66,7 +62,7 @@ impl<'m> NixFuncEnvironment<'m> {
         Self {
             mod_info,
             heaps: PrimaryMap::default(),
-            intrinsics: Intrinsics::default(),
+            intrinsics: BTreeMap::new(),
         }
     }
 
@@ -100,12 +96,12 @@ impl<'m> NixFuncEnvironment<'m> {
         &mut self, func: &mut ir::Function, intrinsic: intr::Intrinsic, sig: ir::Signature,
     ) -> ir::FuncRef {
         let key = u32::from(intrinsic);
-        if let Some(fref) = self.intrinsics.refs.get(&key).copied() {
+        if let Some(fref) = self.intrinsics.get(&key).copied() {
             return fref;
         }
 
         let fref = Self::import_intrinsic(func, intrinsic, sig);
-        self.intrinsics.refs.insert(key, fref);
+        self.intrinsics.insert(key, fref);
         fref
     }
 

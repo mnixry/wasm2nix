@@ -223,7 +223,7 @@ fn lower_initial_memory(module: &NixModule) -> Expr {
 
     if let Some((module_name, field_name)) = module.info.imported_memories.get(memory_index.index())
     {
-        let imported = lower_imported_memory(module_name, field_name);
+        let imported = lower_imported_extern(module_name, field_name);
         nix!(let
             importedMem = #{imported};
         in {
@@ -285,7 +285,9 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
     )
 }
 
-fn lower_imported_memory(module_name: &str, field_name: &str) -> Expr {
+/// An imported memory, table or global: either the value itself or an
+/// accessor whose `get` reads it from the exporting module's state.
+fn lower_imported_extern(module_name: &str, field_name: &str) -> Expr {
     let module = nix!(imports.(module_name));
     let imported = nix!(#{module.clone()}.(field_name));
     nix!(if builtins.isAttrs(#{imported.clone()}) && builtins.hasAttr("get", #{imported.clone()})
@@ -324,7 +326,7 @@ fn lower_initial_globals(module: &NixModule) -> Result<Expr> {
         let value = if let Some((module_name, field_name)) =
             module.info.imported_globals.get(idx.index())
         {
-            lower_imported_global(module_name, field_name)
+            lower_imported_extern(module_name, field_name)
         } else if let Some(init) = module
             .info
             .global_inits
@@ -373,7 +375,7 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
         let table_expr = if let Some((module_name, field_name)) =
             module.info.imported_tables.get(table_index.index())
         {
-            let imported = lower_imported_table(module_name, field_name);
+            let imported = lower_imported_extern(module_name, field_name);
             nix!(let
                 importedTable = #{imported};
             in {
@@ -404,14 +406,6 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
     }
 
     Expr::attrset(false, table_binds)
-}
-
-fn lower_imported_table(module_name: &str, field_name: &str) -> Expr {
-    let module = nix!(imports.(module_name));
-    let imported = nix!(#{module.clone()}.(field_name));
-    nix!(if builtins.isAttrs(#{imported.clone()}) && builtins.hasAttr("get", #{imported.clone()})
-        then #{imported.clone()}.get(#{lower_imported_extern_state(module)})
-        else #{imported})
 }
 
 fn lower_element_segments(module: &NixModule) -> Expr {
@@ -468,14 +462,6 @@ fn signature_id(sig: &ir::Signature) -> String {
     format!("({params})->({returns})")
 }
 
-fn lower_imported_global(module_name: &str, field_name: &str) -> Expr {
-    let module = nix!(imports.(module_name));
-    let imported = nix!(#{module.clone()}.(field_name));
-    nix!(if builtins.isAttrs(#{imported.clone()}) && builtins.hasAttr("get", #{imported.clone()})
-        then #{imported.clone()}.get(#{lower_imported_extern_state(module)})
-        else #{imported})
-}
-
 fn lower_imported_extern_state(module: Expr) -> Expr {
     nix!(if builtins.isAttrs(#{module.clone()}) && builtins.hasAttr("__wasm2nixState", #{module.clone()})
         then #{module.clone()}."__wasm2nixState"
@@ -510,7 +496,12 @@ fn lower_const_expr(
             ConstOp::RefFunc(func_index) if matches!(ty, WasmValType::Ref(_)) => {
                 stack.push(lower_table_entry(module, func_index));
             }
-            ConstOp::I32Add | ConstOp::I32Sub | ConstOp::I32Mul => {
+            ConstOp::I32Add
+            | ConstOp::I32Sub
+            | ConstOp::I32Mul
+            | ConstOp::I64Add
+            | ConstOp::I64Sub
+            | ConstOp::I64Mul => {
                 let rhs = stack.pop().context(MalformedConstExprSnafu {
                     reason: format!("{op:?} missing right operand"),
                 })?;
@@ -521,32 +512,9 @@ fn lower_const_expr(
                     ConstOp::I32Add => RuntimeFunction::I32Add,
                     ConstOp::I32Sub => RuntimeFunction::I32Sub,
                     ConstOp::I32Mul => RuntimeFunction::I32Mul,
-                    _ => {
-                        return MalformedConstExprSnafu {
-                            reason: format!("unexpected operator {op:?}"),
-                        }
-                        .fail();
-                    }
-                };
-                stack.push(function.call(vec![lhs, rhs]));
-            }
-            ConstOp::I64Add | ConstOp::I64Sub | ConstOp::I64Mul => {
-                let rhs = stack.pop().context(MalformedConstExprSnafu {
-                    reason: format!("{op:?} missing right operand"),
-                })?;
-                let lhs = stack.pop().context(MalformedConstExprSnafu {
-                    reason: format!("{op:?} missing left operand"),
-                })?;
-                let function = match op {
                     ConstOp::I64Add => RuntimeFunction::I64Add,
                     ConstOp::I64Sub => RuntimeFunction::I64Sub,
-                    ConstOp::I64Mul => RuntimeFunction::I64Mul,
-                    _ => {
-                        return MalformedConstExprSnafu {
-                            reason: format!("unexpected operator {op:?}"),
-                        }
-                        .fail();
-                    }
+                    _ => RuntimeFunction::I64Mul,
                 };
                 stack.push(function.call(vec![lhs, rhs]));
             }

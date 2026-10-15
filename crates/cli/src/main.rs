@@ -9,7 +9,7 @@ use snafu::prelude::*;
 use wasm2nix::{
     TranspileOptions, default_output_path, generated_nix_file,
     linking::{self, FuncType, GlobalType, ImportMap, Limits, ModuleInterface, TableType},
-    lower_wasm_to_nix_with_options, runtime_import_expr, runtime_path_for_output,
+    lower_wasm_to_nix, runtime_import_expr, runtime_path_for_output,
     translator::NixModule,
 };
 use wasm2nix_runtime::runtime_nix;
@@ -128,7 +128,7 @@ fn main() -> Result<()> {
         validate_import_manifest(&wasm, imports_path)?;
     }
 
-    let nix_expr = lower_wasm_to_nix_with_options(&wasm, &options).context(LowerWasmSnafu)?;
+    let nix_expr = lower_wasm_to_nix(&wasm, &options).context(LowerWasmSnafu)?;
     let nix = generated_nix_file(Some(&args.input), &nix_expr, &options.render_options);
 
     if !args.no_export_rt {

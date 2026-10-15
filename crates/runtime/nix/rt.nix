@@ -514,14 +514,6 @@ let
     popcnt = value: checkI64 (popcntBy 64 bitSetI64 value);
   };
 
-  unsupportedFloat =
-    ty: op: _lhs: _rhs:
-    throw "wasm2nix runtime: ${ty}.${op} requires the soft IEEE-754 runtime";
-
-  unsupportedUnaryFloat =
-    ty: op: _value:
-    throw "wasm2nix runtime: ${ty}.${op} requires the soft IEEE-754 runtime";
-
   cmp = {
     eq = lhs: rhs: lhs == rhs;
     ne = lhs: rhs: lhs != rhs;
@@ -1508,34 +1500,6 @@ let
       inherit rawExp frac;
     };
 
-  f32ToExactInt =
-    op: value:
-    let
-      parts = f32Parts value;
-      exp = parts.rawExp - 127;
-      sig = 8388608 + parts.frac;
-      unsigned =
-        if parts.rawExp == 255 then
-          exactIntFloatError "f32" op "NaN or infinity"
-        else if parts.rawExp == 0 then
-          if parts.frac == 0 then 0 else exactIntFloatError "f32" op "subnormal"
-        else if exp < 0 then
-          exactIntFloatError "f32" op "fractional value"
-        else if exp > 52 then
-          exactIntFloatError "f32" op "outside host integer range"
-        else if exp >= 23 then
-          sig * pow2 (exp - 23)
-        else
-          let
-            divisor = pow2 (23 - exp);
-          in
-          if builtins.bitAnd sig (divisor - 1) == 0 then
-            sig / divisor
-          else
-            exactIntFloatError "f32" op "fractional value";
-    in
-    if parts.sign then 0 - unsigned else unsigned;
-
   f32FromExactInt =
     op: value:
     let
@@ -1562,24 +1526,6 @@ let
     in
     if magnitude == 0 then sign else u32 (sign + (exp + 127) * 8388608 + frac);
 
-  f32ExactBin =
-    op: fn: lhs: rhs:
-    f32FromExactInt op (fn (f32ToExactInt op lhs) (f32ToExactInt op rhs));
-
-  f32ExactDiv =
-    lhs: rhs:
-    let
-      a = f32ToExactInt "div" lhs;
-      b = f32ToExactInt "div" rhs;
-    in
-    if b == 0 then
-      exactIntFloatError "f32" "div" "division by zero"
-    else
-      let
-        q = a / b;
-      in
-      if q * b == a then f32FromExactInt "div" q else exactIntFloatError "f32" "div" "rounded result";
-
   f64Parts =
     value:
     let
@@ -1592,33 +1538,6 @@ let
       inherit rawExp fracHi;
       fracLo = parts.lo;
     };
-
-  f64ToExactInt =
-    op: value:
-    let
-      parts = f64Parts value;
-      exp = parts.rawExp - 1023;
-      frac = parts.fracHi * u32Mod + parts.fracLo;
-      sig = 4503599627370496 + frac;
-      unsigned =
-        if parts.rawExp == 2047 then
-          exactIntFloatError "f64" op "NaN or infinity"
-        else if parts.rawExp == 0 then
-          if frac == 0 then 0 else exactIntFloatError "f64" op "subnormal"
-        else if exp < 0 then
-          exactIntFloatError "f64" op "fractional value"
-        else if exp > 52 then
-          exactIntFloatError "f64" op "outside host integer range"
-        else
-          let
-            divisor = pow2 (52 - exp);
-          in
-          if builtins.bitAnd sig (divisor - 1) == 0 then
-            sig / divisor
-          else
-            exactIntFloatError "f64" op "fractional value";
-    in
-    if parts.sign then 0 - unsigned else unsigned;
 
   f64FromExactInt =
     op: value:
@@ -1650,24 +1569,6 @@ let
         lo = fracLo;
         hi = u32 (sign + (exp + 1023) * 1048576 + fracHi);
       };
-
-  f64ExactBin =
-    op: fn: lhs: rhs:
-    f64FromExactInt op (fn (f64ToExactInt op lhs) (f64ToExactInt op rhs));
-
-  f64ExactDiv =
-    lhs: rhs:
-    let
-      a = f64ToExactInt "div" lhs;
-      b = f64ToExactInt "div" rhs;
-    in
-    if b == 0 then
-      exactIntFloatError "f64" "div" "division by zero"
-    else
-      let
-        q = a / b;
-      in
-      if q * b == a then f64FromExactInt "div" q else exactIntFloatError "f64" "div" "rounded result";
 
   u64PartsFromNonNegative = value: {
     lo = builtins.bitAnd value u32Max;
