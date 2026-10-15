@@ -28,9 +28,7 @@ pub enum Error {
     },
 
     #[snafu(display("Nix lowering failed"))]
-    LowerNix {
-        source: crate::lowerings::LowerError,
-    },
+    LowerNix { source: crate::lower::LowerError },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

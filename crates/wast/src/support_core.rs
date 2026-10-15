@@ -150,7 +150,7 @@ fn run_wast_script_with_options(script: &str, options: WastHarnessOptions) -> Re
                 }
                 let nix = error::directive(
                     directive_index,
-                    wasm2nix::lowerings::lower_module(&translated).context(LowerNixSnafu),
+                    wasm2nix::lower::lower_module(&translated).context(LowerNixSnafu),
                 )?
                 .render();
                 let path = write_generated_module(&ctx, &nix)?;
@@ -334,7 +334,7 @@ fn run_wast_script_with_options(script: &str, options: WastHarnessOptions) -> Re
                 }
                 let nix = error::directive(
                     directive_index,
-                    wasm2nix::lowerings::lower_module(&translated).context(LowerNixSnafu),
+                    wasm2nix::lower::lower_module(&translated).context(LowerNixSnafu),
                 )?
                 .render();
                 let path = write_generated_module(&ctx, &nix)?;

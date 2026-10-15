@@ -1,18 +1,41 @@
-use cranelift_codegen::{
-    ir,
-    ir::{
-        Opcode,
-        types::{F32, F64, I32, I64},
-    },
+use cranelift_codegen::ir::{
+    self, Opcode,
+    types::{F32, F64, I32, I64},
 };
-use cranelift_wasm::WasmValType;
 use wasm2nix_runtime::RuntimeFunction;
 
-use super::error::{
-    Result, UnsupportedGlobalTypeSnafu, UnsupportedLoadSnafu, UnsupportedStoreSnafu,
+use crate::{
+    lower::{
+        error::{Result, UnsupportedLoadSnafu, UnsupportedStoreSnafu},
+        inst::{InstCtx, LoweredInst},
+    },
+    nix::Expr,
 };
 
-pub fn load_function(op: Opcode, ty: ir::Type) -> Result<RuntimeFunction> {
+impl InstCtx<'_> {
+    pub(super) fn lower_load(&self, arg: ir::Value, offset: i32) -> Result<LoweredInst> {
+        let out = self.results[0];
+        let out_ty = self.func.dfg.value_type(out);
+        let addr = self.addr_with_offset(arg, offset);
+        let e = Expr::app(
+            load_function(self.op, out_ty)?.expr(),
+            vec![addr, Expr::ident(self.st_name)],
+        );
+        Ok(self.pure_bind(out, e))
+    }
+
+    pub(super) fn lower_store(&self, args: [ir::Value; 2], offset: i32) -> Result<LoweredInst> {
+        let val = self.value_expr(args[0]);
+        let addr = self.addr_with_offset(args[1], offset);
+        let e = Expr::app(
+            store_function(self.op, self.func.dfg.value_type(args[0]))?.expr(),
+            vec![val, addr, Expr::ident(self.st_name)],
+        );
+        Ok(self.stateful_state_step(e))
+    }
+}
+
+fn load_function(op: Opcode, ty: ir::Type) -> Result<RuntimeFunction> {
     match op {
         Opcode::Load => match ty {
             I32 => Ok(RuntimeFunction::MemLoadI32),
@@ -42,7 +65,7 @@ pub fn load_function(op: Opcode, ty: ir::Type) -> Result<RuntimeFunction> {
     }
 }
 
-pub fn store_function(op: Opcode, ty: ir::Type) -> Result<RuntimeFunction> {
+fn store_function(op: Opcode, ty: ir::Type) -> Result<RuntimeFunction> {
     match op {
         Opcode::Store => match ty {
             I32 => Ok(RuntimeFunction::MemStoreI32),
@@ -63,25 +86,5 @@ pub fn store_function(op: Opcode, ty: ir::Type) -> Result<RuntimeFunction> {
             ty: ty.to_string(),
         }
         .fail(),
-    }
-}
-
-pub fn global_get_function(ty: WasmValType) -> Result<RuntimeFunction> {
-    match ty {
-        WasmValType::I32 | WasmValType::Ref(_) => Ok(RuntimeFunction::GlobalGetI32),
-        WasmValType::I64 => Ok(RuntimeFunction::GlobalGetI64),
-        WasmValType::F32 => Ok(RuntimeFunction::GlobalGetF32),
-        WasmValType::F64 => Ok(RuntimeFunction::GlobalGetF64),
-        WasmValType::V128 => UnsupportedGlobalTypeSnafu { ty: ty.to_string() }.fail(),
-    }
-}
-
-pub fn global_set_function(ty: WasmValType) -> Result<RuntimeFunction> {
-    match ty {
-        WasmValType::I32 | WasmValType::Ref(_) => Ok(RuntimeFunction::GlobalSetI32),
-        WasmValType::I64 => Ok(RuntimeFunction::GlobalSetI64),
-        WasmValType::F32 => Ok(RuntimeFunction::GlobalSetF32),
-        WasmValType::F64 => Ok(RuntimeFunction::GlobalSetF64),
-        WasmValType::V128 => UnsupportedGlobalTypeSnafu { ty: ty.to_string() }.fail(),
     }
 }

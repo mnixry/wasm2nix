@@ -47,7 +47,7 @@ pub fn apply_trapping_module_side_effects(
     )?;
     let nix = error::directive(
         directive_index,
-        wasm2nix::lowerings::lower_module(&translated).context(LowerNixSnafu),
+        wasm2nix::lower::lower_module(&translated).context(LowerNixSnafu),
     )?
     .render();
     let path = write_generated_module(ctx, &nix)?;

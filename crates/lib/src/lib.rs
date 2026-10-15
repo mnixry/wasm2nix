@@ -2,7 +2,7 @@ pub mod error;
 mod func_env;
 pub mod instantiation;
 pub mod linking;
-pub mod lowerings;
+pub mod lower;
 pub mod translator;
 
 use std::path::{Path, PathBuf};
@@ -41,7 +41,7 @@ impl Default for TranspileOptions {
 /// to the Nix AST fails.
 pub fn lower_wasm_to_nix(wasm: &[u8], options: &TranspileOptions) -> error::Result<String> {
     let module = translator::NixModule::translate(wasm).context(error::TranslateWasmSnafu)?;
-    let module = lowerings::lower_module(&module)
+    let module = lower::lower_module(&module)
         .context(error::LowerNixSnafu)?
         .render_with(&options.render_options);
     let separator = if options.render_options.style == nix::RenderStyle::Compact {

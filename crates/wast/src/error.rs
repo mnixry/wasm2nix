@@ -55,9 +55,7 @@ pub enum Error {
     },
 
     #[snafu(display("Nix lowering failed"))]
-    LowerNix {
-        source: wasm2nix::lowerings::LowerError,
-    },
+    LowerNix { source: wasm2nix::lower::LowerError },
 
     #[snafu(display("link validation failed"))]
     Link {
