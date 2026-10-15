@@ -129,32 +129,20 @@ fn eval_i32_const_expr<R: ActiveInitializerResolver>(
         match op {
             ConstOp::I32Const(value) => stack.push(u64::from(value.cast_unsigned())),
             ConstOp::GlobalGet(index) => stack.push(global_i32_value(module, resolver, index)?),
-            ConstOp::I32Add => {
+            ConstOp::I32Add | ConstOp::I32Sub | ConstOp::I32Mul => {
                 let rhs = stack.pop().context(MalformedConstExprSnafu {
-                    reason: "i32.add missing right operand".to_string(),
+                    reason: format!("{op:?} missing right operand"),
                 })?;
                 let lhs = stack.pop().context(MalformedConstExprSnafu {
-                    reason: "i32.add missing left operand".to_string(),
+                    reason: format!("{op:?} missing left operand"),
                 })?;
-                stack.push(u64::from((lhs as u32).wrapping_add(rhs as u32)));
-            }
-            ConstOp::I32Sub => {
-                let rhs = stack.pop().context(MalformedConstExprSnafu {
-                    reason: "i32.sub missing right operand".to_string(),
-                })?;
-                let lhs = stack.pop().context(MalformedConstExprSnafu {
-                    reason: "i32.sub missing left operand".to_string(),
-                })?;
-                stack.push(u64::from((lhs as u32).wrapping_sub(rhs as u32)));
-            }
-            ConstOp::I32Mul => {
-                let rhs = stack.pop().context(MalformedConstExprSnafu {
-                    reason: "i32.mul missing right operand".to_string(),
-                })?;
-                let lhs = stack.pop().context(MalformedConstExprSnafu {
-                    reason: "i32.mul missing left operand".to_string(),
-                })?;
-                stack.push(u64::from((lhs as u32).wrapping_mul(rhs as u32)));
+                let (lhs, rhs) = (lhs as u32, rhs as u32);
+                let value = match op {
+                    ConstOp::I32Add => lhs.wrapping_add(rhs),
+                    ConstOp::I32Sub => lhs.wrapping_sub(rhs),
+                    _ => lhs.wrapping_mul(rhs),
+                };
+                stack.push(u64::from(value));
             }
             _ => {
                 return UnsupportedActiveOffsetExpressionSnafu {

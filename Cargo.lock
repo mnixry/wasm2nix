@@ -799,6 +799,7 @@ dependencies = [
  "cranelift-frontend",
  "cranelift-wasm",
  "hex",
+ "serde",
  "snafu",
  "target-lexicon",
  "wasm2nix-ast",
@@ -819,7 +820,6 @@ name = "wasm2nix-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "serde",
  "serde_json",
  "snafu",
  "wasm2nix",

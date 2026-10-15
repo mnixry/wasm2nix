@@ -61,80 +61,69 @@ pub fn eval_invoke(
     ctx: &HarnessContext, module_key: &str, modules: &HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>, name: &str, args: &[WastArg<'_>], state: Option<&str>,
 ) -> Result<InvokeResult> {
-    let args = args
+    let mut args = args
         .iter()
         .map(wast_arg_to_nix)
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .chain(std::iter::once(Expr::ident("st_in")))
-        .collect::<Vec<_>>();
-    let state_expr = state.map_or_else(|| nix!(i.st), state_expr);
-    let world = EvalWorld::new(modules, aliases);
-    let module_var = world
-        .module_vars
-        .get(module_key)
-        .context(UnknownModuleSnafu {
-            key: module_key.to_string(),
-        })?
-        .clone();
-    let export_key = format!("__wasm2nix_export_{}", hex::encode(name.as_bytes()));
-    let export =
-        nix!(#{Expr::ident(module_var.as_str())}."__wasm2nix"."exportsByName".(export_key));
-    let expr = Expr::let_in(
-        eval_binds(
-            world,
-            vec![
-                (
-                    "i".into(),
-                    nix!(#{Expr::ident(module_var.as_str())}.instantiate({})),
-                ),
-                ("st_in".into(), state_expr),
-                ("call".into(), Expr::app(export, args)),
-            ],
-        ),
-        nix!({
-            results = call.results;
-            st = call.st;
-        }),
-    );
-    let value = eval_nix_json(ctx, &expr)?;
-    let results = value["results"].clone();
-    let state = json_to_nix_expr(&value["st"])?;
-    Ok(InvokeResult { results, state })
+        .collect::<Result<Vec<_>>>()?;
+    args.push(Expr::ident("st_in"));
+    eval_export(ctx, module_key, modules, aliases, name, state, |export| {
+        (
+            ("call".into(), Expr::app(export, args)),
+            nix!({
+                results = call.results;
+                st = call.st;
+            }),
+        )
+    })
 }
 
 pub fn eval_get(
     ctx: &HarnessContext, module_key: &str, modules: &HashMap<String, HarnessModule>,
     aliases: &HashMap<String, String>, name: &str, state: Option<&str>,
 ) -> Result<InvokeResult> {
+    eval_export(ctx, module_key, modules, aliases, name, state, |export| {
+        (
+            ("value".into(), nix!(#{export}.get(st_in))),
+            nix!({
+                results = [value];
+                st = st_in;
+            }),
+        )
+    })
+}
+
+/// Evaluates `body` with the export `name` of `module_key` and the input state
+/// `st_in` in scope; `use_export` returns one extra binding and the
+/// `{ results; st; }` body.
+fn eval_export(
+    ctx: &HarnessContext, module_key: &str, modules: &HashMap<String, HarnessModule>,
+    aliases: &HashMap<String, String>, name: &str, state: Option<&str>,
+    use_export: impl FnOnce(Expr) -> ((String, Expr), Expr),
+) -> Result<InvokeResult> {
     let state_expr = state.map_or_else(|| nix!(i.st), state_expr);
     let world = EvalWorld::new(modules, aliases);
-    let module_var = world
-        .module_vars
-        .get(module_key)
-        .context(UnknownModuleSnafu {
-            key: module_key.to_string(),
-        })?
-        .clone();
+    let module = Expr::ident(
+        world
+            .module_vars
+            .get(module_key)
+            .context(UnknownModuleSnafu {
+                key: module_key.to_string(),
+            })?
+            .as_str(),
+    );
     let export_key = format!("__wasm2nix_export_{}", hex::encode(name.as_bytes()));
-    let export =
-        nix!(#{Expr::ident(module_var.as_str())}."__wasm2nix"."exportsByName".(export_key));
+    let export = nix!(#{module.clone()}."__wasm2nix"."exportsByName".(export_key));
+    let (bind, body) = use_export(export);
     let expr = Expr::let_in(
         eval_binds(
             world,
             vec![
-                (
-                    "i".into(),
-                    nix!(#{Expr::ident(module_var.as_str())}.instantiate({})),
-                ),
+                ("i".into(), nix!(#{module}.instantiate({}))),
                 ("st_in".into(), state_expr),
-                ("value".into(), nix!(#{export}.get(st_in))),
+                bind,
             ],
         ),
-        nix!({
-            results = [value];
-            st = st_in;
-        }),
+        body,
     );
     let value = eval_nix_json(ctx, &expr)?;
     let results = value["results"].clone();

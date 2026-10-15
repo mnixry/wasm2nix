@@ -121,12 +121,6 @@ pub enum Error {
         field_name: String,
     },
 
-    #[snafu(display("missing memory limits for {module_name}.{field_name}"))]
-    MissingMemoryLimits {
-        module_name: String,
-        field_name: String,
-    },
-
     #[snafu(display("unsupported imported offset global {module_name}.{field_name}"))]
     UnsupportedImportedOffsetGlobal {
         module_name: String,

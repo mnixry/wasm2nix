@@ -1,14 +1,10 @@
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use serde::Deserialize;
 use snafu::prelude::*;
 use wasm2nix::{
     TranspileOptions, default_output_path, generated_nix_file,
-    linking::{self, FuncType, GlobalType, ImportMap, Limits, ModuleInterface, TableType},
+    linking::{self, ImportMap},
     lower_wasm_to_nix, runtime_import_expr, runtime_path_for_output,
     translator::NixModule,
 };
@@ -149,101 +145,16 @@ fn validate_import_manifest(wasm: &[u8], path: &Path) -> Result<()> {
     linking::validate_imports(&module, &mut imports).context(ValidateImportsSnafu)
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ImportModuleManifest {
-    #[serde(default)]
-    funcs: BTreeMap<String, FuncManifest>,
-    #[serde(default)]
-    globals: BTreeMap<String, GlobalManifest>,
-    #[serde(default)]
-    memories: BTreeMap<String, LimitsManifest>,
-    #[serde(default)]
-    tables: BTreeMap<String, TableManifest>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FuncManifest {
-    #[serde(default)]
-    params: Vec<String>,
-    #[serde(default)]
-    results: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GlobalManifest {
-    #[serde(rename = "type")]
-    ty: String,
-    #[serde(default)]
-    mutable: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LimitsManifest {
-    min: u64,
-    #[serde(default)]
-    max: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TableManifest {
-    #[serde(rename = "type")]
-    ty: String,
-    min: u64,
-    #[serde(default)]
-    max: Option<u64>,
-}
-
 fn parse_imports_manifest(path: &Path, source: &str) -> Result<ImportMap> {
-    let manifest = serde_json::from_str::<BTreeMap<String, ImportModuleManifest>>(source).context(
-        ParseImportsSnafu {
-            path: path.to_path_buf(),
-        },
-    )?;
-    let mut modules = BTreeMap::new();
-
-    for (module_name, module) in manifest {
-        modules.insert(
-            module_name,
-            ModuleInterface {
-                funcs: module
-                    .funcs
-                    .into_iter()
-                    .map(|(name, func)| (name, FuncType::new(func.params, func.results)))
-                    .collect(),
-                globals: module
-                    .globals
-                    .into_iter()
-                    .map(|(name, global)| (name, GlobalType::new(global.ty, global.mutable)))
-                    .collect(),
-                memories: module
-                    .memories
-                    .into_iter()
-                    .map(|(name, memory)| (name, Limits::new(memory.min, memory.max)))
-                    .collect(),
-                tables: module
-                    .tables
-                    .into_iter()
-                    .map(|(name, table)| {
-                        (
-                            name,
-                            TableType::new(table.ty, Limits::new(table.min, table.max)),
-                        )
-                    })
-                    .collect(),
-            },
-        );
-    }
-
-    Ok(ImportMap::new(modules))
+    serde_json::from_str(source).context(ParseImportsSnafu {
+        path: path.to_path_buf(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use wasm2nix::linking::{FuncType, GlobalType, Limits, TableType};
+
     use super::*;
 
     #[test]
@@ -290,6 +201,14 @@ mod tests {
             FuncType::new(vec!["i32".to_string()], Vec::new())
         );
         assert_eq!(spectest.memories["memory"], Limits::new(1, Some(2)));
+        assert_eq!(
+            spectest.globals["global_i32"],
+            GlobalType::new("i32", false)
+        );
+        assert_eq!(
+            spectest.tables["table"],
+            TableType::new("funcref", Limits::new(10, Some(20)))
+        );
     }
 
     #[test]
@@ -310,6 +229,11 @@ mod tests {
 
         let err = parse_imports_manifest(Path::new("imports.json"), manifest)
             .expect_err("unknown fields should be rejected");
+        assert!(matches!(err, CliError::ParseImports { .. }));
+
+        let table = r#"{ "m": { "tables": { "t": { "type": "funcref", "min": 1, "size": 2 } } } }"#;
+        let err = parse_imports_manifest(Path::new("imports.json"), table)
+            .expect_err("unknown table fields should be rejected");
         assert!(matches!(err, CliError::ParseImports { .. }));
     }
 }

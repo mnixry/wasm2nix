@@ -1,14 +1,16 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use cranelift_entity::EntityRef;
+use cranelift_entity::{EntityRef, PrimaryMap};
 use serde_json::Value as JsonValue;
 use snafu::prelude::*;
 use tempfile::{Builder as TempFileBuilder, TempDir};
 use wasm2nix::{
     instantiation::ActiveInitializerResolver,
-    linking::{self, ExternType, FuncType, GlobalType, ImportResolver, Limits, TableType},
+    linking::{
+        self, ExternType, FuncType, GlobalType, ImportResolver, Limits, ModuleInterface, TableType,
+    },
     nix::nix,
-    translator::NixModule,
+    translator::{Exportable, NixModule},
 };
 use wast::{
     Wast, WastDirective, WastExecute,
@@ -21,9 +23,9 @@ use crate::{
         self, ActiveInitializerSnafu, CreateTempDirSnafu, CreateTempFileSnafu, EncodeWatSnafu,
         Error, ExpectedAtLeastOneResultSnafu, ExpectedResultArraySnafu, HarnessResolverError,
         IncompatibleImportTypeSnafu, KeepTempFileSnafu, LimitsQueryNotObjectSnafu, LinkSnafu,
-        LowerNixSnafu, MissingMemoryLimitsSnafu, MissingTableLimitsSnafu,
-        ModuleAccessBeforeModuleSnafu, ParseWastSnafu, Result, TranslateWasmSnafu,
-        UnknownImportModuleSnafu, UnknownImportSnafu, UnknownModuleSnafu, WriteTempFileSnafu,
+        LowerNixSnafu, MissingTableLimitsSnafu, ModuleAccessBeforeModuleSnafu, ParseWastSnafu,
+        Result, TranslateWasmSnafu, UnknownImportModuleSnafu, UnknownImportSnafu,
+        UnknownModuleSnafu, WriteTempFileSnafu,
     },
     support_eval::{
         eval_get, eval_instantiate, eval_invoke, eval_nix_json, nix_optional_u64, nix_u64,
@@ -136,20 +138,10 @@ fn run_wast_script_with_options(script: &str, options: WastHarnessOptions) -> Re
                     directive_index,
                     NixModule::translate(&wasm).context(TranslateWasmSnafu),
                 )?;
-                let imported_tables = translated.info.imported_tables.clone();
-                let imported_globals = translated.info.imported_globals.clone();
-                let imported_memories = translated.info.imported_memories.clone();
                 error::directive(
                     directive_index,
                     validate_imports_for_linking(&ctx, &translated, &modules, &aliases),
                 )?;
-                let func_exports = func_exports(&translated);
-                let table_exports = table_exports(&translated);
-                let global_exports = global_exports(&translated);
-                let memory_exports = memory_exports(&translated);
-                let table_export_limits = table_export_limits(&translated);
-                let global_export_types = global_export_types(&translated);
-                let memory_export_limits = memory_export_limits(&translated);
                 if active_initializer_traps(&ctx, &translated, &modules, &aliases)? {
                     return Err(Error::Directive {
                         directive_index,
@@ -170,20 +162,7 @@ fn run_wast_script_with_options(script: &str, options: WastHarnessOptions) -> Re
                 let state = eval_instantiate(&ctx, &path, &key, &modules, &aliases)?;
                 modules.insert(
                     key.clone(),
-                    HarnessModule {
-                        path,
-                        state: Some(state),
-                        imported_tables,
-                        imported_globals,
-                        imported_memories,
-                        func_exports,
-                        table_exports,
-                        global_exports,
-                        memory_exports,
-                        table_export_limits,
-                        global_export_types,
-                        memory_export_limits,
-                    },
+                    HarnessModule::new(path, Some(state), &translated),
                 );
                 merge_imported_table_initializers(&key, &mut modules, &aliases)?;
                 sync_memory_imports_to_targets(&key, &mut modules, &aliases);
@@ -315,7 +294,7 @@ fn run_wast_script_with_options(script: &str, options: WastHarnessOptions) -> Re
                 let Ok(wasm) = module.encode() else {
                     continue;
                 };
-                if wasmparser::Validator::new_with_features(harness_wasm_features())
+                if wasmparser::Validator::new_with_features(wasm2nix::translator::WASM_FEATURES)
                     .validate_all(&wasm)
                     .is_err()
                 {
@@ -432,29 +411,50 @@ fn run_wast_script_with_options(script: &str, options: WastHarnessOptions) -> Re
     Ok(())
 }
 
-const fn harness_wasm_features() -> wasmparser::WasmFeatures {
-    wasmparser::WasmFeatures::WASM1
-        .union(wasmparser::WasmFeatures::MUTABLE_GLOBAL)
-        .union(wasmparser::WasmFeatures::SIGN_EXTENSION)
-        .union(wasmparser::WasmFeatures::MULTI_VALUE)
-        .union(wasmparser::WasmFeatures::REFERENCE_TYPES)
-        .union(wasmparser::WasmFeatures::SATURATING_FLOAT_TO_INT)
-        .union(wasmparser::WasmFeatures::BULK_MEMORY)
-}
-
 pub struct HarnessModule {
     pub path: PathBuf,
     pub state: Option<String>,
     pub imported_tables: Vec<(String, String)>,
     pub imported_globals: Vec<(String, String)>,
     pub imported_memories: Vec<(String, String)>,
-    pub func_exports: HashMap<String, FuncType>,
+    /// Export types by name.
+    pub interface: ModuleInterface,
+    /// Export indices by name, used to address the exporting module's state.
     pub table_exports: HashMap<String, u32>,
     pub global_exports: HashMap<String, u32>,
     pub memory_exports: HashMap<String, u32>,
-    pub table_export_limits: HashMap<String, TableType>,
-    pub global_export_types: HashMap<String, GlobalType>,
-    pub memory_export_limits: HashMap<String, Limits>,
+}
+
+impl HarnessModule {
+    pub fn new(path: PathBuf, state: Option<String>, module: &NixModule) -> Self {
+        let info = &module.info;
+        Self {
+            path,
+            state,
+            imported_tables: info.imported_tables.clone(),
+            imported_globals: info.imported_globals.clone(),
+            imported_memories: info.imported_memories.clone(),
+            interface: ModuleInterface::from_module(module),
+            table_exports: export_indices(&info.tables),
+            global_exports: export_indices(&info.globals),
+            memory_exports: export_indices(&info.memories),
+        }
+    }
+}
+
+fn export_indices<K: EntityRef, E>(
+    entities: &PrimaryMap<K, Exportable<E>>,
+) -> HashMap<String, u32> {
+    entities
+        .iter()
+        .flat_map(|(index, entity)| {
+            let index = u32::try_from(index.index()).expect("Wasm indices fit in u32");
+            entity
+                .export_names
+                .iter()
+                .map(move |name| (name.clone(), index))
+        })
+        .collect()
 }
 
 fn select_module_key(
@@ -618,8 +618,7 @@ fn memory_limits_for_index(
             .fail(),
         }
     } else {
-        let memory = module.info.memories[index].entity;
-        Ok(Limits::new(memory.minimum, memory.maximum))
+        Ok(Limits::from(&module.info.memories[index].entity))
     }
 }
 
@@ -637,11 +636,7 @@ fn table_limits_for_index(
             .fail(),
         }
     } else {
-        let table = module.info.tables[index].entity;
-        Ok(Limits::new(
-            u64::from(table.minimum),
-            table.maximum.map(u64::from),
-        ))
+        Ok(TableType::from(&module.info.tables[index].entity).limits)
     }
 }
 
@@ -664,15 +659,16 @@ fn lookup_import(
         module_name: module_name.to_string(),
     })?;
 
-    if let Some(sig) = module.func_exports.get(field_name) {
+    if let Some(sig) = module.interface.funcs.get(field_name) {
         return Ok(ExternType::Func(sig.clone()));
     }
-    if let Some(global) = module.global_export_types.get(field_name) {
+    if let Some(global) = module.interface.globals.get(field_name) {
         return Ok(ExternType::Global(global.clone()));
     }
     if let Some(index) = module.table_exports.get(field_name) {
         let static_type = module
-            .table_export_limits
+            .interface
+            .tables
             .get(field_name)
             .context(MissingTableLimitsSnafu {
                 module_name: module_name.to_string(),
@@ -689,17 +685,9 @@ fn lookup_import(
         };
         return Ok(ExternType::Table(table_type));
     }
-    if let Some(index) = module.memory_exports.get(field_name) {
-        let static_limits =
-            *module
-                .memory_export_limits
-                .get(field_name)
-                .context(MissingMemoryLimitsSnafu {
-                    module_name: module_name.to_string(),
-                    field_name: field_name.to_string(),
-                })?;
+    if let Some(&static_limits) = module.interface.memories.get(field_name) {
         let limits = if let Some(state) = module.state.as_deref() {
-            dynamic_memory_limits(ctx, state, *index, static_limits)?
+            dynamic_memory_limits(ctx, state, static_limits)?
         } else {
             static_limits
         };
@@ -714,36 +702,23 @@ fn lookup_import(
 }
 
 fn spectest_import(field_name: &str) -> Option<ExternType> {
+    let print = |params: &[&str]| {
+        let params = params.iter().map(ToString::to_string).collect();
+        Some(ExternType::Func(FuncType::new(params, Vec::new())))
+    };
+    let global = |ty| Some(ExternType::Global(GlobalType::new(ty, false)));
     match field_name {
-        "print" => Some(ExternType::Func(FuncType::new(Vec::new(), Vec::new()))),
-        "print_i32" => Some(ExternType::Func(FuncType::new(
-            vec!["i32".to_string()],
-            Vec::new(),
-        ))),
-        "print_i64" => Some(ExternType::Func(FuncType::new(
-            vec!["i64".to_string()],
-            Vec::new(),
-        ))),
-        "print_f32" => Some(ExternType::Func(FuncType::new(
-            vec!["f32".to_string()],
-            Vec::new(),
-        ))),
-        "print_f64" => Some(ExternType::Func(FuncType::new(
-            vec!["f64".to_string()],
-            Vec::new(),
-        ))),
-        "print_i32_f32" => Some(ExternType::Func(FuncType::new(
-            vec!["i32".to_string(), "f32".to_string()],
-            Vec::new(),
-        ))),
-        "print_f64_f64" => Some(ExternType::Func(FuncType::new(
-            vec!["f64".to_string(), "f64".to_string()],
-            Vec::new(),
-        ))),
-        "global_i32" => Some(ExternType::Global(GlobalType::new("i32", false))),
-        "global_i64" => Some(ExternType::Global(GlobalType::new("i64", false))),
-        "global_f32" => Some(ExternType::Global(GlobalType::new("f32", false))),
-        "global_f64" => Some(ExternType::Global(GlobalType::new("f64", false))),
+        "print" => print(&[]),
+        "print_i32" => print(&["i32"]),
+        "print_i64" => print(&["i64"]),
+        "print_f32" => print(&["f32"]),
+        "print_f64" => print(&["f64"]),
+        "print_i32_f32" => print(&["i32", "f32"]),
+        "print_f64_f64" => print(&["f64", "f64"]),
+        "global_i32" => global("i32"),
+        "global_i64" => global("i64"),
+        "global_f32" => global("f32"),
+        "global_f64" => global("f64"),
         "memory" => Some(ExternType::Memory(Limits::new(1, Some(2)))),
         "table" => Some(ExternType::Table(TableType::new(
             "funcref",
@@ -754,7 +729,7 @@ fn spectest_import(field_name: &str) -> Option<ExternType> {
 }
 
 fn dynamic_memory_limits(
-    ctx: &HarnessContext, state: &str, _index: u32, static_limits: Limits,
+    ctx: &HarnessContext, state: &str, static_limits: Limits,
 ) -> Result<Limits> {
     let expr = nix!(harness.dynamicMemoryLimits({
         st = #{state_expr(state)};
@@ -794,122 +769,4 @@ fn limits_from_json(value: JsonValue, static_limits: Limits) -> Result<Limits> {
 
 pub fn write_generated_module(ctx: &HarnessContext, nix: &str) -> Result<PathBuf> {
     ctx.write_temp_nix_file("wast", nix)
-}
-
-pub fn table_exports(module: &NixModule) -> HashMap<String, u32> {
-    module
-        .info
-        .tables
-        .iter()
-        .flat_map(|(idx, table)| {
-            table
-                .export_names
-                .iter()
-                .cloned()
-                .map(move |name| (name, idx.as_u32()))
-        })
-        .collect()
-}
-
-pub fn func_exports(module: &NixModule) -> HashMap<String, FuncType> {
-    module
-        .info
-        .functions
-        .iter()
-        .flat_map(|(_idx, func)| {
-            let sig = FuncType::from_signature(&module.info.signatures[func.entity]);
-            func.export_names
-                .iter()
-                .cloned()
-                .map(move |name| (name, sig.clone()))
-        })
-        .collect()
-}
-
-pub fn global_exports(module: &NixModule) -> HashMap<String, u32> {
-    module
-        .info
-        .globals
-        .iter()
-        .flat_map(|(idx, global)| {
-            global
-                .export_names
-                .iter()
-                .cloned()
-                .map(move |name| (name, idx.as_u32()))
-        })
-        .collect()
-}
-
-pub fn global_export_types(module: &NixModule) -> HashMap<String, GlobalType> {
-    module
-        .info
-        .globals
-        .iter()
-        .flat_map(|(_idx, global)| {
-            let ty = global_import_type(&global.entity);
-            global
-                .export_names
-                .iter()
-                .cloned()
-                .map(move |name| (name, ty.clone()))
-        })
-        .collect()
-}
-
-pub fn memory_exports(module: &NixModule) -> HashMap<String, u32> {
-    module
-        .info
-        .memories
-        .iter()
-        .flat_map(|(idx, memory)| {
-            memory
-                .export_names
-                .iter()
-                .cloned()
-                .map(move |name| (name, idx.as_u32()))
-        })
-        .collect()
-}
-
-pub fn memory_export_limits(module: &NixModule) -> HashMap<String, Limits> {
-    module
-        .info
-        .memories
-        .iter()
-        .flat_map(|(_idx, memory)| {
-            let limits = Limits::new(memory.entity.minimum, memory.entity.maximum);
-            memory
-                .export_names
-                .iter()
-                .cloned()
-                .map(move |name| (name, limits))
-        })
-        .collect()
-}
-
-pub fn table_export_limits(module: &NixModule) -> HashMap<String, TableType> {
-    module
-        .info
-        .tables
-        .iter()
-        .flat_map(|(_idx, table)| {
-            let table_type = TableType::new(
-                table.entity.wasm_ty.to_string(),
-                Limits::new(
-                    u64::from(table.entity.minimum),
-                    table.entity.maximum.map(u64::from),
-                ),
-            );
-            table
-                .export_names
-                .iter()
-                .cloned()
-                .map(move |name| (name, table_type.clone()))
-        })
-        .collect()
-}
-
-fn global_import_type(global: &cranelift_wasm::Global) -> GlobalType {
-    GlobalType::new(global.wasm_ty.to_string(), global.mutability)
 }

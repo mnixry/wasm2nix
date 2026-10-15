@@ -199,30 +199,13 @@ impl TargetEnvironment for NixModule {
 impl<'data> ModuleEnvironment<'data> for NixModule {
     fn declare_type_func(&mut self, wasm: WasmFuncType) -> WasmResult<()> {
         let mut sig = ir::Signature::new(CallConv::Fast);
-
-        let mut cvt = |ty: &WasmValType| -> WasmResult<ir::AbiParam> {
-            let clif_ty = match ty {
-                WasmValType::I32 | WasmValType::Ref(_) => I32,
-                WasmValType::I64 => I64,
-                WasmValType::F32 => F32,
-                WasmValType::F64 => F64,
-                WasmValType::V128 => return Err(WasmError::Unsupported("SIMD/v128".into())),
-            };
-            Ok(ir::AbiParam::new(clif_ty))
-        };
-
-        sig.params.extend(
-            wasm.params()
-                .iter()
-                .map(&mut cvt)
-                .collect::<WasmResult<Vec<_>>>()?,
-        );
-        sig.returns.extend(
-            wasm.returns()
-                .iter()
-                .map(&mut cvt)
-                .collect::<WasmResult<Vec<_>>>()?,
-        );
+        let param = |ty: &WasmValType| clif_type(*ty).map(ir::AbiParam::new);
+        sig.params = wasm.params().iter().map(param).collect::<WasmResult<_>>()?;
+        sig.returns = wasm
+            .returns()
+            .iter()
+            .map(param)
+            .collect::<WasmResult<_>>()?;
         self.info.signatures.push(sig);
         Ok(())
     }
@@ -444,13 +427,27 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     }
 
     fn wasm_features(&self) -> wasmparser::WasmFeatures {
-        wasmparser::WasmFeatures::WASM1
-            .union(wasmparser::WasmFeatures::MUTABLE_GLOBAL)
-            .union(wasmparser::WasmFeatures::SIGN_EXTENSION)
-            .union(wasmparser::WasmFeatures::MULTI_VALUE)
-            .union(wasmparser::WasmFeatures::REFERENCE_TYPES)
-            .union(wasmparser::WasmFeatures::SATURATING_FLOAT_TO_INT)
-            .union(wasmparser::WasmFeatures::BULK_MEMORY)
+        WASM_FEATURES
+    }
+}
+
+/// The Wasm proposals the translator and the runtime support.
+pub const WASM_FEATURES: wasmparser::WasmFeatures = wasmparser::WasmFeatures::WASM1
+    .union(wasmparser::WasmFeatures::MUTABLE_GLOBAL)
+    .union(wasmparser::WasmFeatures::SIGN_EXTENSION)
+    .union(wasmparser::WasmFeatures::MULTI_VALUE)
+    .union(wasmparser::WasmFeatures::REFERENCE_TYPES)
+    .union(wasmparser::WasmFeatures::SATURATING_FLOAT_TO_INT)
+    .union(wasmparser::WasmFeatures::BULK_MEMORY);
+
+/// The Cranelift type a Wasm value lowers to; references are i32 handles.
+pub(crate) fn clif_type(ty: WasmValType) -> WasmResult<ir::Type> {
+    match ty {
+        WasmValType::I32 | WasmValType::Ref(_) => Ok(I32),
+        WasmValType::I64 => Ok(I64),
+        WasmValType::F32 => Ok(F32),
+        WasmValType::F64 => Ok(F64),
+        WasmValType::V128 => Err(WasmError::Unsupported("SIMD/v128".into())),
     }
 }
 
@@ -468,14 +465,7 @@ pub(crate) fn validate_memory_type(memory: Memory) -> WasmResult<()> {
 }
 
 fn validate_global_type(global: Global) -> WasmResult<()> {
-    match global.wasm_ty {
-        WasmValType::I32
-        | WasmValType::I64
-        | WasmValType::F32
-        | WasmValType::F64
-        | WasmValType::Ref(_) => Ok(()),
-        WasmValType::V128 => Err(WasmError::Unsupported("SIMD/v128".into())),
-    }
+    clif_type(global.wasm_ty).map(drop)
 }
 
 const fn default_frontend_config() -> TargetFrontendConfig {

@@ -1,9 +1,12 @@
 use std::{collections::BTreeMap, convert::Infallible, fmt};
 
 use cranelift_codegen::ir;
+use cranelift_entity::{EntityRef, PrimaryMap};
+use cranelift_wasm::{Global, Memory, Table};
+use serde::Deserialize;
 use snafu::Snafu;
 
-use crate::translator::NixModule;
+use crate::translator::{Exportable, NixModule};
 
 pub type Result<T, E = Infallible> = std::result::Result<T, LinkError<E>>;
 
@@ -31,7 +34,8 @@ pub enum LinkError<E: snafu::Error + 'static = Infallible> {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Limits {
     pub min: u64,
     pub max: Option<u64>,
@@ -55,6 +59,12 @@ impl Limits {
     }
 }
 
+impl From<&Memory> for Limits {
+    fn from(memory: &Memory) -> Self {
+        Self::new(memory.minimum, memory.maximum)
+    }
+}
+
 impl fmt::Display for Limits {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.max {
@@ -64,9 +74,12 @@ impl fmt::Display for Limits {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FuncType {
+    #[serde(default)]
     pub params: Vec<String>,
+    #[serde(default)]
     pub results: Vec<String>,
 }
 
@@ -104,9 +117,12 @@ impl fmt::Display for FuncType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GlobalType {
+    #[serde(rename = "type")]
     pub ty: String,
+    #[serde(default)]
     pub mutable: bool,
 }
 
@@ -120,6 +136,12 @@ impl GlobalType {
     }
 }
 
+impl From<&Global> for GlobalType {
+    fn from(global: &Global) -> Self {
+        Self::new(global.wasm_ty.to_string(), global.mutability)
+    }
+}
+
 impl fmt::Display for GlobalType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mutability = if self.mutable { "mut" } else { "const" };
@@ -127,10 +149,28 @@ impl fmt::Display for GlobalType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "TableManifest")]
 pub struct TableType {
     pub ty: String,
     pub limits: Limits,
+}
+
+/// The manifest form of a table, with its limits inline:
+/// `{ "type": "funcref", "min": 1, "max": 2 }`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TableManifest {
+    #[serde(rename = "type")]
+    ty: String,
+    min: u64,
+    max: Option<u64>,
+}
+
+impl From<TableManifest> for TableType {
+    fn from(table: TableManifest) -> Self {
+        Self::new(table.ty, Limits::new(table.min, table.max))
+    }
 }
 
 impl TableType {
@@ -145,6 +185,15 @@ impl TableType {
     #[must_use]
     pub fn satisfies_import(&self, expected: &Self) -> bool {
         self.ty == expected.ty && self.limits.satisfies_import(expected.limits)
+    }
+}
+
+impl From<&Table> for TableType {
+    fn from(table: &Table) -> Self {
+        Self::new(
+            table.wasm_ty.to_string(),
+            Limits::new(u64::from(table.minimum), table.maximum.map(u64::from)),
+        )
     }
 }
 
@@ -186,7 +235,8 @@ impl fmt::Display for ExternType {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ModuleInterface {
     pub funcs: BTreeMap<String, FuncType>,
     pub globals: BTreeMap<String, GlobalType>,
@@ -197,43 +247,15 @@ pub struct ModuleInterface {
 impl ModuleInterface {
     #[must_use]
     pub fn from_module(module: &NixModule) -> Self {
-        let mut interface = Self::default();
-
-        for (_idx, func) in &module.info.functions {
-            let ty = FuncType::from_signature(&module.info.signatures[func.entity]);
-            for name in &func.export_names {
-                interface.funcs.insert(name.clone(), ty.clone());
-            }
+        let info = &module.info;
+        Self {
+            funcs: exports(&info.functions, |sig| {
+                FuncType::from_signature(&info.signatures[*sig])
+            }),
+            globals: exports(&info.globals, |global| GlobalType::from(global)),
+            memories: exports(&info.memories, |memory| Limits::from(memory)),
+            tables: exports(&info.tables, |table| TableType::from(table)),
         }
-
-        for (_idx, global) in &module.info.globals {
-            let ty = GlobalType::new(global.entity.wasm_ty.to_string(), global.entity.mutability);
-            for name in &global.export_names {
-                interface.globals.insert(name.clone(), ty.clone());
-            }
-        }
-
-        for (_idx, memory) in &module.info.memories {
-            let limits = Limits::new(memory.entity.minimum, memory.entity.maximum);
-            for name in &memory.export_names {
-                interface.memories.insert(name.clone(), limits);
-            }
-        }
-
-        for (_idx, table) in &module.info.tables {
-            let ty = TableType::new(
-                table.entity.wasm_ty.to_string(),
-                Limits::new(
-                    u64::from(table.entity.minimum),
-                    table.entity.maximum.map(u64::from),
-                ),
-            );
-            for name in &table.export_names {
-                interface.tables.insert(name.clone(), ty.clone());
-            }
-        }
-
-        interface
     }
 
     #[must_use]
@@ -248,16 +270,27 @@ impl ModuleInterface {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ImportMap {
-    pub modules: BTreeMap<String, ModuleInterface>,
+/// Maps every export name of `entities` to the type `ty` derives for it.
+fn exports<K: EntityRef, E, T: Clone>(
+    entities: &PrimaryMap<K, Exportable<E>>, ty: impl Fn(&E) -> T,
+) -> BTreeMap<String, T> {
+    entities
+        .values()
+        .flat_map(|entity| {
+            let entity_ty = ty(&entity.entity);
+            entity
+                .export_names
+                .iter()
+                .map(move |name| (name.clone(), entity_ty.clone()))
+        })
+        .collect()
 }
 
-impl ImportMap {
-    #[must_use]
-    pub const fn new(modules: BTreeMap<String, ModuleInterface>) -> Self {
-        Self { modules }
-    }
+/// Import manifest: the interface each import module provides, by name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct ImportMap {
+    pub modules: BTreeMap<String, ModuleInterface>,
 }
 
 pub trait ImportResolver {
@@ -296,38 +329,34 @@ impl ImportResolver for ImportMap {
 pub fn validate_imports<R: ImportResolver>(
     module: &NixModule, resolver: &mut R,
 ) -> Result<(), R::Error> {
-    for (idx, (module_name, field_name)) in module.info.imported_funcs.iter().enumerate() {
-        let func_index = cranelift_wasm::FuncIndex::from_u32(idx as u32);
-        let sig_index = module.info.functions[func_index].entity;
-        let expected =
-            ExternType::Func(FuncType::from_signature(&module.info.signatures[sig_index]));
-        validate_one(resolver, module_name, field_name, expected)?;
-    }
+    // Imported entities occupy the first indices of each index space.
+    let info = &module.info;
+    let funcs = info
+        .functions
+        .values()
+        .zip(&info.imported_funcs)
+        .map(|(func, name)| {
+            let ty = FuncType::from_signature(&info.signatures[func.entity]);
+            (name, ExternType::Func(ty))
+        });
+    let globals = info
+        .globals
+        .values()
+        .zip(&info.imported_globals)
+        .map(|(global, name)| (name, ExternType::Global(GlobalType::from(&global.entity))));
+    let tables = info
+        .tables
+        .values()
+        .zip(&info.imported_tables)
+        .map(|(table, name)| (name, ExternType::Table(TableType::from(&table.entity))));
+    let memories = info
+        .memories
+        .values()
+        .zip(&info.imported_memories)
+        .map(|(memory, name)| (name, ExternType::Memory(Limits::from(&memory.entity))));
 
-    for (idx, (module_name, field_name)) in module.info.imported_globals.iter().enumerate() {
-        let global_index = cranelift_wasm::GlobalIndex::from_u32(idx as u32);
-        let global = &module.info.globals[global_index].entity;
-        let expected = ExternType::Global(GlobalType::new(
-            global.wasm_ty.to_string(),
-            global.mutability,
-        ));
-        validate_one(resolver, module_name, field_name, expected)?;
-    }
-
-    for (idx, (module_name, field_name)) in module.info.imported_tables.iter().enumerate() {
-        let table_index = cranelift_wasm::TableIndex::from_u32(idx as u32);
-        let table = &module.info.tables[table_index].entity;
-        let expected = ExternType::Table(TableType::new(
-            table.wasm_ty.to_string(),
-            Limits::new(u64::from(table.minimum), table.maximum.map(u64::from)),
-        ));
-        validate_one(resolver, module_name, field_name, expected)?;
-    }
-
-    for (idx, (module_name, field_name)) in module.info.imported_memories.iter().enumerate() {
-        let memory_index = cranelift_wasm::MemoryIndex::from_u32(idx as u32);
-        let memory = &module.info.memories[memory_index].entity;
-        let expected = ExternType::Memory(Limits::new(memory.minimum, memory.maximum));
+    for ((module_name, field_name), expected) in funcs.chain(globals).chain(tables).chain(memories)
+    {
         validate_one(resolver, module_name, field_name, expected)?;
     }
 

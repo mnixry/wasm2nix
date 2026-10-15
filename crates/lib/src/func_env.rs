@@ -16,11 +16,11 @@ use cranelift_frontend::FunctionBuilder;
 use cranelift_wasm::{
     FuncEnvironment, FuncIndex, GlobalIndex, GlobalVariable, Heap, HeapData, HeapStyle,
     MemoryIndex, TableIndex, TargetEnvironment, TypeConvert, TypeIndex, WASM32_MAX_SIZE, WasmError,
-    WasmHeapType, WasmResult, WasmValType,
+    WasmHeapType, WasmResult,
 };
 use wasm2nix_runtime::intrinsics as intr;
 
-use crate::translator::{NixModuleInfo, validate_memory_type};
+use crate::translator::{NixModuleInfo, clif_type, validate_memory_type};
 
 macro_rules! intrinsic_abi_param {
     ($env:expr; vmctx) => {
@@ -255,16 +255,6 @@ impl<'m> NixFuncEnvironment<'m> {
             intr::Intrinsic::call_indirect(table_index, canonical_sig_index),
             sig,
         )
-    }
-
-    fn wasm_ty_to_clif_ty(ty: WasmValType) -> WasmResult<ir::Type> {
-        match ty {
-            WasmValType::I32 | WasmValType::Ref(_) => Ok(I32),
-            WasmValType::I64 => Ok(I64),
-            WasmValType::F32 => Ok(F32),
-            WasmValType::F64 => Ok(F64),
-            WasmValType::V128 => Err(WasmError::Unsupported("SIMD/v128".into())),
-        }
     }
 }
 
@@ -585,7 +575,7 @@ impl FuncEnvironment for NixFuncEnvironment<'_> {
         &mut self, builder: &mut FunctionBuilder, global_index: GlobalIndex,
     ) -> WasmResult<ir::Value> {
         let global = self.mod_info.globals[global_index].entity;
-        let clif_ty = Self::wasm_ty_to_clif_ty(global.wasm_ty)?;
+        let clif_ty = clif_type(global.wasm_ty)?;
         let idx = builder_u32_const(builder, global_index.as_u32());
         let fref = self.intrinsic_global_get(builder.func, clif_ty);
         call_builder_result(builder, fref, [idx])
@@ -595,7 +585,7 @@ impl FuncEnvironment for NixFuncEnvironment<'_> {
         &mut self, builder: &mut FunctionBuilder, global_index: GlobalIndex, val: ir::Value,
     ) -> WasmResult<()> {
         let global = self.mod_info.globals[global_index].entity;
-        let clif_ty = Self::wasm_ty_to_clif_ty(global.wasm_ty)?;
+        let clif_ty = clif_type(global.wasm_ty)?;
         let idx = builder_u32_const(builder, global_index.as_u32());
         let fref = self.intrinsic_global_set(builder.func, clif_ty);
         call_builder(builder, fref, [idx, val])?;

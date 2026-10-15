@@ -134,15 +134,20 @@ let
     builtins.foldl' (acc: bit: if bitSet value bit then acc + 1 else acc) 0 (range width);
 
   i32Bin = {
+    # wasm2nix:runtime-fn i32.add(lhs, rhs) -> value
     add = lhs: rhs: u32 (u32 lhs + u32 rhs);
+    # wasm2nix:runtime-fn i32.sub(lhs, rhs) -> value
     sub = lhs: rhs: u32 (u32 lhs - u32 rhs);
+    # wasm2nix:runtime-fn i32.mul(lhs, rhs) -> value
     mul = mul32;
+    # wasm2nix:runtime-fn i32.udiv(lhs, rhs) -> value
     udiv =
       lhs: rhs:
       let
         divisor = u32 rhs;
       in
       if divisor == 0 then throw "wasm trap: integer divide by zero" else (u32 lhs) / divisor;
+    # wasm2nix:runtime-fn i32.sdiv(lhs, rhs) -> value
     sdiv =
       lhs: rhs:
       let
@@ -150,12 +155,14 @@ let
         b = toI32 rhs;
       in
       if a == i32Min && b == -1 then throw "wasm trap: integer overflow" else u32 (signedDiv a b);
+    # wasm2nix:runtime-fn i32.urem(lhs, rhs) -> value
     urem =
       lhs: rhs:
       let
         divisor = u32 rhs;
       in
       if divisor == 0 then throw "wasm trap: integer divide by zero" else floorMod (u32 lhs) divisor;
+    # wasm2nix:runtime-fn i32.srem(lhs, rhs) -> value
     srem =
       lhs: rhs:
       let
@@ -163,27 +170,39 @@ let
         b = toI32 rhs;
       in
       u32 (signedRem a b);
+    # wasm2nix:runtime-fn i32.band(lhs, rhs) -> value
     band = lhs: rhs: u32 (builtins.bitAnd (u32 lhs) (u32 rhs));
+    # wasm2nix:runtime-fn i32.bor(lhs, rhs) -> value
     bor = lhs: rhs: u32 (builtins.bitOr (u32 lhs) (u32 rhs));
+    # wasm2nix:runtime-fn i32.bxor(lhs, rhs) -> value
     bxor = lhs: rhs: u32 (builtins.bitXor (u32 lhs) (u32 rhs));
+    # wasm2nix:runtime-fn i32.bnot(value) -> value
     bnot = value: u32Max - u32 value;
+    # wasm2nix:runtime-fn i32.shl(lhs, rhs) -> value
     shl = lhs: rhs: u32 (u32 lhs * pow2 (shiftCount32 rhs));
+    # wasm2nix:runtime-fn i32.shr_u(lhs, rhs) -> value
     shr_u = unsignedShiftRight32;
+    # wasm2nix:runtime-fn i32.shr_s(lhs, rhs) -> value
     shr_s = signedShiftRight32;
+    # wasm2nix:runtime-fn i32.rotl(lhs, rhs) -> value
     rotl =
       lhs: rhs:
       let
         n = shiftCount32 rhs;
       in
       if n == 0 then u32 lhs else i32Bin.bor (i32Bin.shl lhs n) (i32Bin.shr_u lhs (32 - n));
+    # wasm2nix:runtime-fn i32.rotr(lhs, rhs) -> value
     rotr =
       lhs: rhs:
       let
         n = shiftCount32 rhs;
       in
       if n == 0 then u32 lhs else i32Bin.bor (i32Bin.shr_u lhs n) (i32Bin.shl lhs (32 - n));
+    # wasm2nix:runtime-fn i32.clz(value) -> value
     clz = clzBy 32 bitSetU32;
+    # wasm2nix:runtime-fn i32.ctz(value) -> value
     ctz = ctzBy 32 bitSetU32;
+    # wasm2nix:runtime-fn i32.popcnt(value) -> value
     popcnt = popcntBy 32 bitSetU32;
   };
 
@@ -447,13 +466,21 @@ let
       i64FromParts signed;
 
   i64Bin = rec {
+    # wasm2nix:runtime-fn i64.add(lhs, rhs) -> value
     add = lhs: rhs: i64FromParts (i64AddParts (i64Parts lhs) (i64Parts rhs));
+    # wasm2nix:runtime-fn i64.sub(lhs, rhs) -> value
     sub = lhs: rhs: i64FromParts (i64SubParts (i64Parts lhs) (i64Parts rhs));
+    # wasm2nix:runtime-fn i64.mul(lhs, rhs) -> value
     mul = lhs: rhs: i64FromParts (i64MulParts (i64Parts lhs) (i64Parts rhs));
+    # wasm2nix:runtime-fn i64.udiv(lhs, rhs) -> value
     udiv = lhs: rhs: i64FromParts (i64UnsignedDivRemParts (i64Parts lhs) (i64Parts rhs)).quot;
+    # wasm2nix:runtime-fn i64.sdiv(lhs, rhs) -> value
     sdiv = lhs: rhs: i64SignedDiv lhs rhs;
+    # wasm2nix:runtime-fn i64.urem(lhs, rhs) -> value
     urem = lhs: rhs: i64FromParts (i64UnsignedDivRemParts (i64Parts lhs) (i64Parts rhs)).rem;
+    # wasm2nix:runtime-fn i64.srem(lhs, rhs) -> value
     srem = i64SignedRem;
+    # wasm2nix:runtime-fn i64.band(lhs, rhs) -> value
     band =
       lhs: rhs:
       let
@@ -464,6 +491,7 @@ let
         lo = builtins.bitAnd a.lo b.lo;
         hi = builtins.bitAnd a.hi b.hi;
       };
+    # wasm2nix:runtime-fn i64.bor(lhs, rhs) -> value
     bor =
       lhs: rhs:
       let
@@ -474,6 +502,7 @@ let
         lo = builtins.bitOr a.lo b.lo;
         hi = builtins.bitOr a.hi b.hi;
       };
+    # wasm2nix:runtime-fn i64.bxor(lhs, rhs) -> value
     bxor =
       lhs: rhs:
       let
@@ -484,6 +513,7 @@ let
         lo = builtins.bitXor a.lo b.lo;
         hi = builtins.bitXor a.hi b.hi;
       };
+    # wasm2nix:runtime-fn i64.bnot(value) -> value
     bnot =
       value:
       i64FromParts (
@@ -494,36 +524,54 @@ let
           }
         )
       );
+    # wasm2nix:runtime-fn i64.shl(lhs, rhs) -> value
     shl = lhs: rhs: i64FromParts (i64ShlParts (i64Parts lhs) rhs);
+    # wasm2nix:runtime-fn i64.shr_u(lhs, rhs) -> value
     shr_u = lhs: rhs: i64FromParts (i64ShrUParts (i64Parts lhs) rhs);
+    # wasm2nix:runtime-fn i64.shr_s(lhs, rhs) -> value
     shr_s = lhs: rhs: i64FromParts (i64ShrSParts (i64Parts lhs) rhs);
+    # wasm2nix:runtime-fn i64.rotl(lhs, rhs) -> value
     rotl =
       lhs: rhs:
       let
         n = builtins.bitAnd rhs 63;
       in
       if n == 0 then lhs else bor (shl lhs n) (shr_u lhs (64 - n));
+    # wasm2nix:runtime-fn i64.rotr(lhs, rhs) -> value
     rotr =
       lhs: rhs:
       let
         n = builtins.bitAnd rhs 63;
       in
       if n == 0 then lhs else bor (shr_u lhs n) (shl lhs (64 - n));
+    # wasm2nix:runtime-fn i64.clz(value) -> value
     clz = value: checkI64 (clzBy 64 bitSetI64 value);
+    # wasm2nix:runtime-fn i64.ctz(value) -> value
     ctz = value: checkI64 (ctzBy 64 bitSetI64 value);
+    # wasm2nix:runtime-fn i64.popcnt(value) -> value
     popcnt = value: checkI64 (popcntBy 64 bitSetI64 value);
   };
 
   cmp = {
+    # wasm2nix:runtime-fn cmp.eq(lhs, rhs) -> value
     eq = lhs: rhs: lhs == rhs;
+    # wasm2nix:runtime-fn cmp.ne(lhs, rhs) -> value
     ne = lhs: rhs: lhs != rhs;
+    # wasm2nix:runtime-fn cmp.lt_u(lhs, rhs) -> value
     lt_u = lhs: rhs: u32 lhs < u32 rhs;
+    # wasm2nix:runtime-fn cmp.le_u(lhs, rhs) -> value
     le_u = lhs: rhs: u32 lhs <= u32 rhs;
+    # wasm2nix:runtime-fn cmp.gt_u(lhs, rhs) -> value
     gt_u = lhs: rhs: u32 lhs > u32 rhs;
+    # wasm2nix:runtime-fn cmp.ge_u(lhs, rhs) -> value
     ge_u = lhs: rhs: u32 lhs >= u32 rhs;
+    # wasm2nix:runtime-fn cmp.lt_s(lhs, rhs) -> value
     lt_s = lhs: rhs: toI32 lhs < toI32 rhs;
+    # wasm2nix:runtime-fn cmp.le_s(lhs, rhs) -> value
     le_s = lhs: rhs: toI32 lhs <= toI32 rhs;
+    # wasm2nix:runtime-fn cmp.gt_s(lhs, rhs) -> value
     gt_s = lhs: rhs: toI32 lhs > toI32 rhs;
+    # wasm2nix:runtime-fn cmp.ge_s(lhs, rhs) -> value
     ge_s = lhs: rhs: toI32 lhs >= toI32 rhs;
   };
 
@@ -538,15 +586,25 @@ let
         a.lo == b.lo && a.hi == b.hi;
     in
     {
+      # wasm2nix:runtime-fn cmp_i64.eq(lhs, rhs) -> value
       eq = eqParts;
+      # wasm2nix:runtime-fn cmp_i64.ne(lhs, rhs) -> value
       ne = lhs: rhs: !(eqParts lhs rhs);
+      # wasm2nix:runtime-fn cmp_i64.lt_u(lhs, rhs) -> value
       lt_u = lhs: rhs: !(i64UnsignedGteParts (i64Parts lhs) (i64Parts rhs));
+      # wasm2nix:runtime-fn cmp_i64.le_u(lhs, rhs) -> value
       le_u = lhs: rhs: i64UnsignedGteParts (i64Parts rhs) (i64Parts lhs);
+      # wasm2nix:runtime-fn cmp_i64.gt_u(lhs, rhs) -> value
       gt_u = lhs: rhs: i64UnsignedGteParts (i64Parts lhs) (i64Parts rhs) && !(eqParts lhs rhs);
+      # wasm2nix:runtime-fn cmp_i64.ge_u(lhs, rhs) -> value
       ge_u = lhs: rhs: i64UnsignedGteParts (i64Parts lhs) (i64Parts rhs);
+      # wasm2nix:runtime-fn cmp_i64.lt_s(lhs, rhs) -> value
       lt_s = lhs: rhs: checkI64 lhs < checkI64 rhs;
+      # wasm2nix:runtime-fn cmp_i64.le_s(lhs, rhs) -> value
       le_s = lhs: rhs: checkI64 lhs <= checkI64 rhs;
+      # wasm2nix:runtime-fn cmp_i64.gt_s(lhs, rhs) -> value
       gt_s = lhs: rhs: checkI64 lhs > checkI64 rhs;
+      # wasm2nix:runtime-fn cmp_i64.ge_s(lhs, rhs) -> value
       ge_s = lhs: rhs: checkI64 lhs >= checkI64 rhs;
     };
 
@@ -685,9 +743,37 @@ let
     a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo);
 
   fcmp = {
+    # wasm2nix:runtime-fn fcmp.f32.ord(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f32.uno(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f32.eq(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f32.ne(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f32.one(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f32.ueq(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f32.lt(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f32.le(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f32.gt(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f32.ge(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f32.ult(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f32.ule(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f32.ugt(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f32.uge(lhs, rhs) -> value
     f32 = floatCmpFns f32IsNaN f32IsZero (lhs: rhs: u32 lhs == u32 rhs) (
       lhs: rhs: f32Key lhs < f32Key rhs
     );
+    # wasm2nix:runtime-fn fcmp.f64.ord(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f64.uno(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f64.eq(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f64.ne(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f64.one(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f64.ueq(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f64.lt(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f64.le(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f64.gt(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f64.ge(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f64.ult(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f64.ule(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f64.ugt(lhs, rhs) -> value
+    # wasm2nix:runtime-fn fcmp.f64.uge(lhs, rhs) -> value
     f64 = floatCmpFns f64IsNaN f64IsZero (lhs: rhs: cmp_i64.eq lhs rhs) f64KeyLt;
   };
 
@@ -1927,71 +2013,103 @@ let
       f64FromUnsignedParts magnitude.sign magnitude.parts;
 
   conv = {
+    # wasm2nix:runtime-fn conv.uextend(value, ty) -> value
     uextend = value: _ty: value;
+    # wasm2nix:runtime-fn conv.sextend(value) -> value
     sextend = value: value;
+    # wasm2nix:runtime-fn conv.ireduce(value) -> value
     ireduce = u32;
+    # wasm2nix:runtime-fn conv.sign_extend_8(value) -> value
     sign_extend_8 = value: u32 (signExtend 8 value);
+    # wasm2nix:runtime-fn conv.sign_extend_16(value) -> value
     sign_extend_16 = value: u32 (signExtend 16 value);
+    # wasm2nix:runtime-fn conv.sign_extend_8_i64(value) -> value
     sign_extend_8_i64 = value: checkI64 (signExtend 8 value);
+    # wasm2nix:runtime-fn conv.sign_extend_16_i64(value) -> value
     sign_extend_16_i64 = value: checkI64 (signExtend 16 value);
+    # wasm2nix:runtime-fn conv.sign_extend_32(value) -> value
     sign_extend_32 = value: checkI64 (signExtend 32 value);
     trunc_s = {
       f32 = {
+        # wasm2nix:runtime-fn conv.trunc_s.f32.i32(value) -> value
         i32 = truncToI32Signed false "f32";
+        # wasm2nix:runtime-fn conv.trunc_s.f32.i64(value) -> value
         i64 = truncToI64Signed false "f32";
       };
       f64 = {
+        # wasm2nix:runtime-fn conv.trunc_s.f64.i32(value) -> value
         i32 = truncToI32Signed false "f64";
+        # wasm2nix:runtime-fn conv.trunc_s.f64.i64(value) -> value
         i64 = truncToI64Signed false "f64";
       };
     };
     trunc_u = {
       f32 = {
+        # wasm2nix:runtime-fn conv.trunc_u.f32.i32(value) -> value
         i32 = truncToI32Unsigned false "f32";
+        # wasm2nix:runtime-fn conv.trunc_u.f32.i64(value) -> value
         i64 = truncToI64Unsigned false "f32";
       };
       f64 = {
+        # wasm2nix:runtime-fn conv.trunc_u.f64.i32(value) -> value
         i32 = truncToI32Unsigned false "f64";
+        # wasm2nix:runtime-fn conv.trunc_u.f64.i64(value) -> value
         i64 = truncToI64Unsigned false "f64";
       };
     };
     trunc_sat_s = {
       f32 = {
+        # wasm2nix:runtime-fn conv.trunc_sat_s.f32.i32(value) -> value
         i32 = truncToI32Signed true "f32";
+        # wasm2nix:runtime-fn conv.trunc_sat_s.f32.i64(value) -> value
         i64 = truncToI64Signed true "f32";
       };
       f64 = {
+        # wasm2nix:runtime-fn conv.trunc_sat_s.f64.i32(value) -> value
         i32 = truncToI32Signed true "f64";
+        # wasm2nix:runtime-fn conv.trunc_sat_s.f64.i64(value) -> value
         i64 = truncToI64Signed true "f64";
       };
     };
     trunc_sat_u = {
       f32 = {
+        # wasm2nix:runtime-fn conv.trunc_sat_u.f32.i32(value) -> value
         i32 = truncToI32Unsigned true "f32";
+        # wasm2nix:runtime-fn conv.trunc_sat_u.f32.i64(value) -> value
         i64 = truncToI64Unsigned true "f32";
       };
       f64 = {
+        # wasm2nix:runtime-fn conv.trunc_sat_u.f64.i32(value) -> value
         i32 = truncToI32Unsigned true "f64";
+        # wasm2nix:runtime-fn conv.trunc_sat_u.f64.i64(value) -> value
         i64 = truncToI64Unsigned true "f64";
       };
     };
     convert_s = {
       i32 = {
+        # wasm2nix:runtime-fn conv.convert_s.i32.f32(value) -> value
         f32 = convertIntToFloat true "i32" "f32";
+        # wasm2nix:runtime-fn conv.convert_s.i32.f64(value) -> value
         f64 = convertIntToFloat true "i32" "f64";
       };
       i64 = {
+        # wasm2nix:runtime-fn conv.convert_s.i64.f32(value) -> value
         f32 = convertIntToFloat true "i64" "f32";
+        # wasm2nix:runtime-fn conv.convert_s.i64.f64(value) -> value
         f64 = convertIntToFloat true "i64" "f64";
       };
     };
     convert_u = {
       i32 = {
+        # wasm2nix:runtime-fn conv.convert_u.i32.f32(value) -> value
         f32 = convertIntToFloat false "i32" "f32";
+        # wasm2nix:runtime-fn conv.convert_u.i32.f64(value) -> value
         f64 = convertIntToFloat false "i32" "f64";
       };
       i64 = {
+        # wasm2nix:runtime-fn conv.convert_u.i64.f32(value) -> value
         f32 = convertIntToFloat false "i64" "f32";
+        # wasm2nix:runtime-fn conv.convert_u.i64.f64(value) -> value
         f64 = convertIntToFloat false "i64" "f64";
       };
     };
@@ -2212,17 +2330,29 @@ let
     );
 
   mem = rec {
+    # wasm2nix:runtime-fn mem.load_u8(addr, st) -> value
     load_u8 = loadWidth "load_u8" 1;
+    # wasm2nix:runtime-fn mem.load_s8(addr, st) -> value
     load_s8 = addr: st: u32 (signExtend 8 (load_u8 addr st));
+    # wasm2nix:runtime-fn mem.load_s8_i64(addr, st) -> value
     load_s8_i64 = addr: st: checkI64 (signExtend 8 (load_u8 addr st));
+    # wasm2nix:runtime-fn mem.load_u16(addr, st) -> value
     load_u16 = loadWidth "load_u16" 2;
+    # wasm2nix:runtime-fn mem.load_s16(addr, st) -> value
     load_s16 = addr: st: u32 (signExtend 16 (load_u16 addr st));
+    # wasm2nix:runtime-fn mem.load_s16_i64(addr, st) -> value
     load_s16_i64 = addr: st: checkI64 (signExtend 16 (load_u16 addr st));
+    # wasm2nix:runtime-fn mem.load_u32(addr, st) -> value
     load_u32 = loadWidth "load_u32" 4;
+    # wasm2nix:runtime-fn mem.load_s32(addr, st) -> value
     load_s32 = load_u32;
+    # wasm2nix:runtime-fn mem.load_s32_i64(addr, st) -> value
     load_s32_i64 = addr: st: checkI64 (signExtend 32 (load_u32 addr st));
+    # wasm2nix:runtime-fn mem.load_i32(addr, st) -> value
     load_i32 = load_u32;
+    # wasm2nix:runtime-fn mem.load_f32(addr, st) -> value
     load_f32 = load_u32;
+    # wasm2nix:runtime-fn mem.load_i64(addr, st) -> value
     load_i64 =
       addr: st:
       let
@@ -2239,13 +2369,20 @@ let
         (hi - u32Mod) * u32Mod + lo
       else
         hi * u32Mod + lo;
+    # wasm2nix:runtime-fn mem.load_f64(addr, st) -> value
     load_f64 = load_i64;
 
+    # wasm2nix:runtime-fn mem.store_u8(value, addr, st) -> state
     store_u8 = storeWidth "store_u8" 1;
+    # wasm2nix:runtime-fn mem.store_u16(value, addr, st) -> state
     store_u16 = storeWidth "store_u16" 2;
+    # wasm2nix:runtime-fn mem.store_i32(value, addr, st) -> state
     store_i32 = storeWidth "store_i32" 4;
+    # wasm2nix:runtime-fn mem.store_u32(value, addr, st) -> state
     store_u32 = store_i32;
+    # wasm2nix:runtime-fn mem.store_f32(value, addr, st) -> state
     store_f32 = store_i32;
+    # wasm2nix:runtime-fn mem.store_i64(value, addr, st) -> state
     store_i64 =
       value: addr: st:
       let
@@ -2270,9 +2407,12 @@ let
                 storeSpan (storeSpan pages idx offset 4 lo) (idx + 1) offset 4 hi;
           };
         };
+    # wasm2nix:runtime-fn mem.store_f64(value, addr, st) -> state
     store_f64 = store_i64;
 
+    # wasm2nix:runtime-fn mem.size(st) -> value
     size = st: pageCount st;
+    # wasm2nix:runtime-fn mem.grow(delta, st) -> record
     grow =
       delta: st:
       let
@@ -2290,15 +2430,18 @@ let
           st = setPageCount new st;
           results = [ old ];
         };
+    # wasm2nix:runtime-fn mem.fill(dst, value, len, st) -> state
     fill =
       dst: value: len: st:
       storeBytes "memory.fill" (builtins.genList (_: builtins.bitAnd value 255) len) dst st;
+    # wasm2nix:runtime-fn mem.copy(dst, src, len, st) -> state
     copy =
       dst: src: len: st:
       let
         bytes = loadBytes "memory.copy" len src st;
       in
       storeBytes "memory.copy" bytes dst st;
+    # wasm2nix:runtime-fn mem.init(seg_index, dst, src, len, st) -> state
     init =
       segIndex: dst: src: len: st:
       let
@@ -2308,11 +2451,15 @@ let
         );
       in
       storeBytes "memory.init" bytes dst st;
+    # wasm2nix:runtime-fn mem.data_drop(seg_index, st) -> state
     data_drop = segIndex: st: setDataSegment segIndex [ ] st;
+    # wasm2nix:runtime-fn mem.load_bytes(addr, len, st) -> value
     load_bytes =
       addr: len: st:
       loadBytes "load_bytes" len addr st;
+    # wasm2nix:runtime-fn mem.store_bytes(bytes, addr, st) -> state
     store_bytes = storeBytes "store_bytes";
+    # wasm2nix:runtime-fn mem.overlay_pages(base, overlay) -> value
     overlay_pages = overlayPages;
   };
 
@@ -2331,19 +2478,27 @@ let
         };
     in
     {
+      # wasm2nix:runtime-fn global.get_i32(index, st) -> value
       get_i32 = get;
+      # wasm2nix:runtime-fn global.get_i64(index, st) -> value
       get_i64 = get;
+      # wasm2nix:runtime-fn global.get_f32(index, st) -> value
       get_f32 = get;
+      # wasm2nix:runtime-fn global.get_f64(index, st) -> value
       get_f64 = get;
+      # wasm2nix:runtime-fn global.set_i32(index, value, st) -> state
       set_i32 =
         idx: value: st:
         set idx (if builtins.isAttrs value then value else u32 value) st;
+      # wasm2nix:runtime-fn global.set_i64(index, value, st) -> state
       set_i64 =
         idx: value: st:
         set idx (checkI64 value) st;
+      # wasm2nix:runtime-fn global.set_f32(index, value, st) -> state
       set_f32 =
         idx: value: st:
         set idx (u32 value) st;
+      # wasm2nix:runtime-fn global.set_f64(index, value, st) -> state
       set_f64 = set;
     };
 
@@ -2396,6 +2551,7 @@ let
       applyArgs = builtins.foldl' (fn: arg: fn arg);
     in
     {
+      # wasm2nix:runtime-fn table.call(table_index, type_id, module_id, funcs, func_registry, elem_index, args, st) -> record
       call =
         tableIndex: typeIndex: moduleId: funcs: funcRegistry: elemIndex: args: st:
         let
@@ -2415,6 +2571,7 @@ let
             fn = builtins.getAttr ("f" + toString entry.func) targetFuncs;
           in
           (applyArgs fn args) st;
+      # wasm2nix:runtime-fn table.get(table_index, elem_index, st) -> value
       get =
         tableIndex: elemIndex: st:
         builtins.seq (checkTableAccess "table.get" (getTable tableIndex st) elemIndex 1) (
@@ -2423,6 +2580,7 @@ let
           in
           if entry == null then 0 else entry
         );
+      # wasm2nix:runtime-fn table.set(table_index, elem_index, value, st) -> state
       set =
         tableIndex: elemIndex: value: st:
         let
@@ -2433,7 +2591,9 @@ let
           );
         in
         builtins.deepSeq newTable (setTable tableIndex newTable st);
+      # wasm2nix:runtime-fn table.size(table_index, st) -> value
       size = tableIndex: st: (getTable tableIndex st).size or 0;
+      # wasm2nix:runtime-fn table.grow(table_index, init_value, delta, st) -> record
       grow =
         tableIndex: initValue: delta: st:
         let
@@ -2458,6 +2618,7 @@ let
             st = builtins.deepSeq newTable (setTable tableIndex newTable st);
             results = [ old ];
           };
+      # wasm2nix:runtime-fn table.fill(table_index, dst, value, len, st) -> state
       fill =
         tableIndex: dst: value: len: st:
         let
@@ -2469,6 +2630,7 @@ let
           );
         in
         builtins.deepSeq newTable (setTable tableIndex newTable st);
+      # wasm2nix:runtime-fn table.init(table_index, seg_index, dst, src, len, st) -> state
       init =
         tableIndex: segIndex: dst: src: len: st:
         let
@@ -2483,7 +2645,9 @@ let
           );
         in
         builtins.deepSeq newTable (setTable tableIndex newTable st);
+      # wasm2nix:runtime-fn table.elem_drop(seg_index, st) -> state
       elem_drop = segIndex: st: setElemSegment segIndex [ ] st;
+      # wasm2nix:runtime-fn table.copy(dst_table_index, src_table_index, dst, src, len, st) -> state
       copy =
         dstTableIndex: srcTableIndex: dst: src: len: st:
         let
@@ -2501,93 +2665,12 @@ let
     };
 in
 {
-  i32 = {
-    # wasm2nix:runtime-fn i32.add(lhs, rhs) -> value
-    add = i32Bin.add;
-    # wasm2nix:runtime-fn i32.sub(lhs, rhs) -> value
-    sub = i32Bin.sub;
-    # wasm2nix:runtime-fn i32.mul(lhs, rhs) -> value
-    mul = i32Bin.mul;
-    # wasm2nix:runtime-fn i32.udiv(lhs, rhs) -> value
-    udiv = i32Bin.udiv;
-    # wasm2nix:runtime-fn i32.sdiv(lhs, rhs) -> value
-    sdiv = i32Bin.sdiv;
-    # wasm2nix:runtime-fn i32.urem(lhs, rhs) -> value
-    urem = i32Bin.urem;
-    # wasm2nix:runtime-fn i32.srem(lhs, rhs) -> value
-    srem = i32Bin.srem;
-    # wasm2nix:runtime-fn i32.band(lhs, rhs) -> value
-    band = i32Bin.band;
-    # wasm2nix:runtime-fn i32.bor(lhs, rhs) -> value
-    bor = i32Bin.bor;
-    # wasm2nix:runtime-fn i32.bxor(lhs, rhs) -> value
-    bxor = i32Bin.bxor;
-    # wasm2nix:runtime-fn i32.bnot(value) -> value
-    bnot = i32Bin.bnot;
-    # wasm2nix:runtime-fn i32.shl(lhs, rhs) -> value
-    shl = i32Bin.shl;
-    # wasm2nix:runtime-fn i32.shr_u(lhs, rhs) -> value
-    shr_u = i32Bin.shr_u;
-    # wasm2nix:runtime-fn i32.shr_s(lhs, rhs) -> value
-    shr_s = i32Bin.shr_s;
-    # wasm2nix:runtime-fn i32.rotl(lhs, rhs) -> value
-    rotl = i32Bin.rotl;
-    # wasm2nix:runtime-fn i32.rotr(lhs, rhs) -> value
-    rotr = i32Bin.rotr;
-    # wasm2nix:runtime-fn i32.clz(value) -> value
-    clz = i32Bin.clz;
-    # wasm2nix:runtime-fn i32.ctz(value) -> value
-    ctz = i32Bin.ctz;
-    # wasm2nix:runtime-fn i32.popcnt(value) -> value
-    popcnt = i32Bin.popcnt;
-  };
-
-  i64 = {
-    # wasm2nix:runtime-fn i64.add(lhs, rhs) -> value
-    add = i64Bin.add;
-    # wasm2nix:runtime-fn i64.sub(lhs, rhs) -> value
-    sub = i64Bin.sub;
-    # wasm2nix:runtime-fn i64.mul(lhs, rhs) -> value
-    mul = i64Bin.mul;
-    # wasm2nix:runtime-fn i64.udiv(lhs, rhs) -> value
-    udiv = i64Bin.udiv;
-    # wasm2nix:runtime-fn i64.sdiv(lhs, rhs) -> value
-    sdiv = i64Bin.sdiv;
-    # wasm2nix:runtime-fn i64.urem(lhs, rhs) -> value
-    urem = i64Bin.urem;
-    # wasm2nix:runtime-fn i64.srem(lhs, rhs) -> value
-    srem = i64Bin.srem;
-    # wasm2nix:runtime-fn i64.band(lhs, rhs) -> value
-    band = i64Bin.band;
-    # wasm2nix:runtime-fn i64.bor(lhs, rhs) -> value
-    bor = i64Bin.bor;
-    # wasm2nix:runtime-fn i64.bxor(lhs, rhs) -> value
-    bxor = i64Bin.bxor;
-    # wasm2nix:runtime-fn i64.bnot(value) -> value
-    bnot = i64Bin.bnot;
-    # wasm2nix:runtime-fn i64.shl(lhs, rhs) -> value
-    shl = i64Bin.shl;
-    # wasm2nix:runtime-fn i64.shr_u(lhs, rhs) -> value
-    shr_u = i64Bin.shr_u;
-    # wasm2nix:runtime-fn i64.shr_s(lhs, rhs) -> value
-    shr_s = i64Bin.shr_s;
-    # wasm2nix:runtime-fn i64.rotl(lhs, rhs) -> value
-    rotl = i64Bin.rotl;
-    # wasm2nix:runtime-fn i64.rotr(lhs, rhs) -> value
-    rotr = i64Bin.rotr;
-    # wasm2nix:runtime-fn i64.clz(value) -> value
-    clz = i64Bin.clz;
-    # wasm2nix:runtime-fn i64.ctz(value) -> value
-    ctz = i64Bin.ctz;
-    # wasm2nix:runtime-fn i64.popcnt(value) -> value
-    popcnt = i64Bin.popcnt;
-  };
-
+  i32 = i32Bin;
+  i64 = i64Bin;
   int = {
     # wasm2nix:runtime-fn int.bnot(value) -> value
     bnot = i32Bin.bnot;
   };
-
   f32 = {
     # wasm2nix:runtime-fn f32.add(lhs, rhs) -> value
     add = f32Add;
@@ -2620,7 +2703,6 @@ in
     # wasm2nix:runtime-fn f32.demote_f64(value) -> value
     demote_f64 = f32DemoteF64;
   };
-
   f64 = {
     # wasm2nix:runtime-fn f64.add(lhs, rhs) -> value
     add = f64Add;
@@ -2653,318 +2735,13 @@ in
     # wasm2nix:runtime-fn f64.promote_f32(value) -> value
     promote_f32 = f64PromoteF32;
   };
-
-  cmp = {
-    # wasm2nix:runtime-fn cmp.eq(lhs, rhs) -> value
-    eq = cmp.eq;
-    # wasm2nix:runtime-fn cmp.ne(lhs, rhs) -> value
-    ne = cmp.ne;
-    # wasm2nix:runtime-fn cmp.lt_u(lhs, rhs) -> value
-    lt_u = cmp.lt_u;
-    # wasm2nix:runtime-fn cmp.le_u(lhs, rhs) -> value
-    le_u = cmp.le_u;
-    # wasm2nix:runtime-fn cmp.gt_u(lhs, rhs) -> value
-    gt_u = cmp.gt_u;
-    # wasm2nix:runtime-fn cmp.ge_u(lhs, rhs) -> value
-    ge_u = cmp.ge_u;
-    # wasm2nix:runtime-fn cmp.lt_s(lhs, rhs) -> value
-    lt_s = cmp.lt_s;
-    # wasm2nix:runtime-fn cmp.le_s(lhs, rhs) -> value
-    le_s = cmp.le_s;
-    # wasm2nix:runtime-fn cmp.gt_s(lhs, rhs) -> value
-    gt_s = cmp.gt_s;
-    # wasm2nix:runtime-fn cmp.ge_s(lhs, rhs) -> value
-    ge_s = cmp.ge_s;
-  };
-
-  cmp_i64 = {
-    # wasm2nix:runtime-fn cmp_i64.eq(lhs, rhs) -> value
-    eq = cmp_i64.eq;
-    # wasm2nix:runtime-fn cmp_i64.ne(lhs, rhs) -> value
-    ne = cmp_i64.ne;
-    # wasm2nix:runtime-fn cmp_i64.lt_u(lhs, rhs) -> value
-    lt_u = cmp_i64.lt_u;
-    # wasm2nix:runtime-fn cmp_i64.le_u(lhs, rhs) -> value
-    le_u = cmp_i64.le_u;
-    # wasm2nix:runtime-fn cmp_i64.gt_u(lhs, rhs) -> value
-    gt_u = cmp_i64.gt_u;
-    # wasm2nix:runtime-fn cmp_i64.ge_u(lhs, rhs) -> value
-    ge_u = cmp_i64.ge_u;
-    # wasm2nix:runtime-fn cmp_i64.lt_s(lhs, rhs) -> value
-    lt_s = cmp_i64.lt_s;
-    # wasm2nix:runtime-fn cmp_i64.le_s(lhs, rhs) -> value
-    le_s = cmp_i64.le_s;
-    # wasm2nix:runtime-fn cmp_i64.gt_s(lhs, rhs) -> value
-    gt_s = cmp_i64.gt_s;
-    # wasm2nix:runtime-fn cmp_i64.ge_s(lhs, rhs) -> value
-    ge_s = cmp_i64.ge_s;
-  };
-
-  fcmp = {
-    f32 = {
-      # wasm2nix:runtime-fn fcmp.f32.ord(lhs, rhs) -> value
-      ord = fcmp.f32.ord;
-      # wasm2nix:runtime-fn fcmp.f32.uno(lhs, rhs) -> value
-      uno = fcmp.f32.uno;
-      # wasm2nix:runtime-fn fcmp.f32.eq(lhs, rhs) -> value
-      eq = fcmp.f32.eq;
-      # wasm2nix:runtime-fn fcmp.f32.ne(lhs, rhs) -> value
-      ne = fcmp.f32.ne;
-      # wasm2nix:runtime-fn fcmp.f32.one(lhs, rhs) -> value
-      one = fcmp.f32.one;
-      # wasm2nix:runtime-fn fcmp.f32.ueq(lhs, rhs) -> value
-      ueq = fcmp.f32.ueq;
-      # wasm2nix:runtime-fn fcmp.f32.lt(lhs, rhs) -> value
-      lt = fcmp.f32.lt;
-      # wasm2nix:runtime-fn fcmp.f32.le(lhs, rhs) -> value
-      le = fcmp.f32.le;
-      # wasm2nix:runtime-fn fcmp.f32.gt(lhs, rhs) -> value
-      gt = fcmp.f32.gt;
-      # wasm2nix:runtime-fn fcmp.f32.ge(lhs, rhs) -> value
-      ge = fcmp.f32.ge;
-      # wasm2nix:runtime-fn fcmp.f32.ult(lhs, rhs) -> value
-      ult = fcmp.f32.ult;
-      # wasm2nix:runtime-fn fcmp.f32.ule(lhs, rhs) -> value
-      ule = fcmp.f32.ule;
-      # wasm2nix:runtime-fn fcmp.f32.ugt(lhs, rhs) -> value
-      ugt = fcmp.f32.ugt;
-      # wasm2nix:runtime-fn fcmp.f32.uge(lhs, rhs) -> value
-      uge = fcmp.f32.uge;
-    };
-
-    f64 = {
-      # wasm2nix:runtime-fn fcmp.f64.ord(lhs, rhs) -> value
-      ord = fcmp.f64.ord;
-      # wasm2nix:runtime-fn fcmp.f64.uno(lhs, rhs) -> value
-      uno = fcmp.f64.uno;
-      # wasm2nix:runtime-fn fcmp.f64.eq(lhs, rhs) -> value
-      eq = fcmp.f64.eq;
-      # wasm2nix:runtime-fn fcmp.f64.ne(lhs, rhs) -> value
-      ne = fcmp.f64.ne;
-      # wasm2nix:runtime-fn fcmp.f64.one(lhs, rhs) -> value
-      one = fcmp.f64.one;
-      # wasm2nix:runtime-fn fcmp.f64.ueq(lhs, rhs) -> value
-      ueq = fcmp.f64.ueq;
-      # wasm2nix:runtime-fn fcmp.f64.lt(lhs, rhs) -> value
-      lt = fcmp.f64.lt;
-      # wasm2nix:runtime-fn fcmp.f64.le(lhs, rhs) -> value
-      le = fcmp.f64.le;
-      # wasm2nix:runtime-fn fcmp.f64.gt(lhs, rhs) -> value
-      gt = fcmp.f64.gt;
-      # wasm2nix:runtime-fn fcmp.f64.ge(lhs, rhs) -> value
-      ge = fcmp.f64.ge;
-      # wasm2nix:runtime-fn fcmp.f64.ult(lhs, rhs) -> value
-      ult = fcmp.f64.ult;
-      # wasm2nix:runtime-fn fcmp.f64.ule(lhs, rhs) -> value
-      ule = fcmp.f64.ule;
-      # wasm2nix:runtime-fn fcmp.f64.ugt(lhs, rhs) -> value
-      ugt = fcmp.f64.ugt;
-      # wasm2nix:runtime-fn fcmp.f64.uge(lhs, rhs) -> value
-      uge = fcmp.f64.uge;
-    };
-  };
-
-  conv = {
-    # wasm2nix:runtime-fn conv.uextend(value, ty) -> value
-    uextend = conv.uextend;
-    # wasm2nix:runtime-fn conv.sextend(value) -> value
-    sextend = conv.sextend;
-    # wasm2nix:runtime-fn conv.ireduce(value) -> value
-    ireduce = conv.ireduce;
-    # wasm2nix:runtime-fn conv.sign_extend_8(value) -> value
-    sign_extend_8 = conv.sign_extend_8;
-    # wasm2nix:runtime-fn conv.sign_extend_16(value) -> value
-    sign_extend_16 = conv.sign_extend_16;
-    # wasm2nix:runtime-fn conv.sign_extend_8_i64(value) -> value
-    sign_extend_8_i64 = conv.sign_extend_8_i64;
-    # wasm2nix:runtime-fn conv.sign_extend_16_i64(value) -> value
-    sign_extend_16_i64 = conv.sign_extend_16_i64;
-    # wasm2nix:runtime-fn conv.sign_extend_32(value) -> value
-    sign_extend_32 = conv.sign_extend_32;
-    trunc_s = {
-      f32 = {
-        # wasm2nix:runtime-fn conv.trunc_s.f32.i32(value) -> value
-        i32 = conv.trunc_s.f32.i32;
-        # wasm2nix:runtime-fn conv.trunc_s.f32.i64(value) -> value
-        i64 = conv.trunc_s.f32.i64;
-      };
-      f64 = {
-        # wasm2nix:runtime-fn conv.trunc_s.f64.i32(value) -> value
-        i32 = conv.trunc_s.f64.i32;
-        # wasm2nix:runtime-fn conv.trunc_s.f64.i64(value) -> value
-        i64 = conv.trunc_s.f64.i64;
-      };
-    };
-    trunc_u = {
-      f32 = {
-        # wasm2nix:runtime-fn conv.trunc_u.f32.i32(value) -> value
-        i32 = conv.trunc_u.f32.i32;
-        # wasm2nix:runtime-fn conv.trunc_u.f32.i64(value) -> value
-        i64 = conv.trunc_u.f32.i64;
-      };
-      f64 = {
-        # wasm2nix:runtime-fn conv.trunc_u.f64.i32(value) -> value
-        i32 = conv.trunc_u.f64.i32;
-        # wasm2nix:runtime-fn conv.trunc_u.f64.i64(value) -> value
-        i64 = conv.trunc_u.f64.i64;
-      };
-    };
-    trunc_sat_s = {
-      f32 = {
-        # wasm2nix:runtime-fn conv.trunc_sat_s.f32.i32(value) -> value
-        i32 = conv.trunc_sat_s.f32.i32;
-        # wasm2nix:runtime-fn conv.trunc_sat_s.f32.i64(value) -> value
-        i64 = conv.trunc_sat_s.f32.i64;
-      };
-      f64 = {
-        # wasm2nix:runtime-fn conv.trunc_sat_s.f64.i32(value) -> value
-        i32 = conv.trunc_sat_s.f64.i32;
-        # wasm2nix:runtime-fn conv.trunc_sat_s.f64.i64(value) -> value
-        i64 = conv.trunc_sat_s.f64.i64;
-      };
-    };
-    trunc_sat_u = {
-      f32 = {
-        # wasm2nix:runtime-fn conv.trunc_sat_u.f32.i32(value) -> value
-        i32 = conv.trunc_sat_u.f32.i32;
-        # wasm2nix:runtime-fn conv.trunc_sat_u.f32.i64(value) -> value
-        i64 = conv.trunc_sat_u.f32.i64;
-      };
-      f64 = {
-        # wasm2nix:runtime-fn conv.trunc_sat_u.f64.i32(value) -> value
-        i32 = conv.trunc_sat_u.f64.i32;
-        # wasm2nix:runtime-fn conv.trunc_sat_u.f64.i64(value) -> value
-        i64 = conv.trunc_sat_u.f64.i64;
-      };
-    };
-    convert_s = {
-      i32 = {
-        # wasm2nix:runtime-fn conv.convert_s.i32.f32(value) -> value
-        f32 = conv.convert_s.i32.f32;
-        # wasm2nix:runtime-fn conv.convert_s.i32.f64(value) -> value
-        f64 = conv.convert_s.i32.f64;
-      };
-      i64 = {
-        # wasm2nix:runtime-fn conv.convert_s.i64.f32(value) -> value
-        f32 = conv.convert_s.i64.f32;
-        # wasm2nix:runtime-fn conv.convert_s.i64.f64(value) -> value
-        f64 = conv.convert_s.i64.f64;
-      };
-    };
-    convert_u = {
-      i32 = {
-        # wasm2nix:runtime-fn conv.convert_u.i32.f32(value) -> value
-        f32 = conv.convert_u.i32.f32;
-        # wasm2nix:runtime-fn conv.convert_u.i32.f64(value) -> value
-        f64 = conv.convert_u.i32.f64;
-      };
-      i64 = {
-        # wasm2nix:runtime-fn conv.convert_u.i64.f32(value) -> value
-        f32 = conv.convert_u.i64.f32;
-        # wasm2nix:runtime-fn conv.convert_u.i64.f64(value) -> value
-        f64 = conv.convert_u.i64.f64;
-      };
-    };
-  };
-
-  mem = {
-    # wasm2nix:runtime-fn mem.load_u8(addr, st) -> value
-    load_u8 = mem.load_u8;
-    # wasm2nix:runtime-fn mem.load_s8(addr, st) -> value
-    load_s8 = mem.load_s8;
-    # wasm2nix:runtime-fn mem.load_s8_i64(addr, st) -> value
-    load_s8_i64 = mem.load_s8_i64;
-    # wasm2nix:runtime-fn mem.load_u16(addr, st) -> value
-    load_u16 = mem.load_u16;
-    # wasm2nix:runtime-fn mem.load_s16(addr, st) -> value
-    load_s16 = mem.load_s16;
-    # wasm2nix:runtime-fn mem.load_s16_i64(addr, st) -> value
-    load_s16_i64 = mem.load_s16_i64;
-    # wasm2nix:runtime-fn mem.load_u32(addr, st) -> value
-    load_u32 = mem.load_u32;
-    # wasm2nix:runtime-fn mem.load_s32(addr, st) -> value
-    load_s32 = mem.load_s32;
-    # wasm2nix:runtime-fn mem.load_s32_i64(addr, st) -> value
-    load_s32_i64 = mem.load_s32_i64;
-    # wasm2nix:runtime-fn mem.load_i32(addr, st) -> value
-    load_i32 = mem.load_i32;
-    # wasm2nix:runtime-fn mem.load_f32(addr, st) -> value
-    load_f32 = mem.load_f32;
-    # wasm2nix:runtime-fn mem.load_i64(addr, st) -> value
-    load_i64 = mem.load_i64;
-    # wasm2nix:runtime-fn mem.load_f64(addr, st) -> value
-    load_f64 = mem.load_f64;
-    # wasm2nix:runtime-fn mem.store_u8(value, addr, st) -> state
-    store_u8 = mem.store_u8;
-    # wasm2nix:runtime-fn mem.store_u16(value, addr, st) -> state
-    store_u16 = mem.store_u16;
-    # wasm2nix:runtime-fn mem.store_i32(value, addr, st) -> state
-    store_i32 = mem.store_i32;
-    # wasm2nix:runtime-fn mem.store_u32(value, addr, st) -> state
-    store_u32 = mem.store_u32;
-    # wasm2nix:runtime-fn mem.store_f32(value, addr, st) -> state
-    store_f32 = mem.store_f32;
-    # wasm2nix:runtime-fn mem.store_i64(value, addr, st) -> state
-    store_i64 = mem.store_i64;
-    # wasm2nix:runtime-fn mem.store_f64(value, addr, st) -> state
-    store_f64 = mem.store_f64;
-    # wasm2nix:runtime-fn mem.size(st) -> value
-    size = mem.size;
-    # wasm2nix:runtime-fn mem.grow(delta, st) -> record
-    grow = mem.grow;
-    # wasm2nix:runtime-fn mem.fill(dst, value, len, st) -> state
-    fill = mem.fill;
-    # wasm2nix:runtime-fn mem.copy(dst, src, len, st) -> state
-    copy = mem.copy;
-    # wasm2nix:runtime-fn mem.init(seg_index, dst, src, len, st) -> state
-    init = mem.init;
-    # wasm2nix:runtime-fn mem.data_drop(seg_index, st) -> state
-    data_drop = mem.data_drop;
-    # wasm2nix:runtime-fn mem.load_bytes(addr, len, st) -> value
-    load_bytes = mem.load_bytes;
-    # wasm2nix:runtime-fn mem.store_bytes(bytes, addr, st) -> state
-    store_bytes = mem.store_bytes;
-    # wasm2nix:runtime-fn mem.overlay_pages(base, overlay) -> value
-    overlay_pages = mem.overlay_pages;
-  };
-
-  global = {
-    # wasm2nix:runtime-fn global.get_i32(index, st) -> value
-    get_i32 = global.get_i32;
-    # wasm2nix:runtime-fn global.get_i64(index, st) -> value
-    get_i64 = global.get_i64;
-    # wasm2nix:runtime-fn global.get_f32(index, st) -> value
-    get_f32 = global.get_f32;
-    # wasm2nix:runtime-fn global.get_f64(index, st) -> value
-    get_f64 = global.get_f64;
-    # wasm2nix:runtime-fn global.set_i32(index, value, st) -> state
-    set_i32 = global.set_i32;
-    # wasm2nix:runtime-fn global.set_i64(index, value, st) -> state
-    set_i64 = global.set_i64;
-    # wasm2nix:runtime-fn global.set_f32(index, value, st) -> state
-    set_f32 = global.set_f32;
-    # wasm2nix:runtime-fn global.set_f64(index, value, st) -> state
-    set_f64 = global.set_f64;
-  };
-
-  table = {
-    # wasm2nix:runtime-fn table.call(table_index, type_id, module_id, funcs, func_registry, elem_index, args, st) -> record
-    call = table.call;
-    # wasm2nix:runtime-fn table.get(table_index, elem_index, st) -> value
-    get = table.get;
-    # wasm2nix:runtime-fn table.set(table_index, elem_index, value, st) -> state
-    set = table.set;
-    # wasm2nix:runtime-fn table.size(table_index, st) -> value
-    size = table.size;
-    # wasm2nix:runtime-fn table.grow(table_index, init_value, delta, st) -> record
-    grow = table.grow;
-    # wasm2nix:runtime-fn table.fill(table_index, dst, value, len, st) -> state
-    fill = table.fill;
-    # wasm2nix:runtime-fn table.init(table_index, seg_index, dst, src, len, st) -> state
-    init = table.init;
-    # wasm2nix:runtime-fn table.elem_drop(seg_index, st) -> state
-    elem_drop = table.elem_drop;
-    # wasm2nix:runtime-fn table.copy(dst_table_index, src_table_index, dst, src, len, st) -> state
-    copy = table.copy;
-  };
+  inherit
+    cmp
+    cmp_i64
+    fcmp
+    conv
+    mem
+    global
+    table
+    ;
 }

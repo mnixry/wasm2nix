@@ -22,9 +22,8 @@ use crate::{
         UnsupportedAssertReturnResultSnafu, UnsupportedInvokeArgumentSnafu,
     },
     support_core::{
-        HarnessContext, HarnessModule, active_initializer_traps, func_exports, global_export_types,
-        global_exports, memory_export_limits, memory_exports, table_export_limits, table_exports,
-        validate_imports_for_linking, write_generated_module,
+        HarnessContext, HarnessModule, active_initializer_traps, validate_imports_for_linking,
+        write_generated_module,
     },
     support_eval::{eval_initial_state, eval_instantiate, nix_u64, state_expr},
 };
@@ -66,20 +65,7 @@ pub fn apply_trapping_module_side_effects(
     }
     modules.insert(
         transient_key,
-        HarnessModule {
-            path,
-            state: Some(source_state.clone()),
-            imported_tables: translated.info.imported_tables.clone(),
-            imported_globals: translated.info.imported_globals.clone(),
-            imported_memories: translated.info.imported_memories.clone(),
-            func_exports: func_exports(&translated),
-            table_exports: table_exports(&translated),
-            global_exports: global_exports(&translated),
-            memory_exports: memory_exports(&translated),
-            table_export_limits: table_export_limits(&translated),
-            global_export_types: global_export_types(&translated),
-            memory_export_limits: memory_export_limits(&translated),
-        },
+        HarnessModule::new(path, Some(source_state.clone()), &translated),
     );
     apply_trapping_table_side_effects(&translated, &source_state, modules, aliases);
     apply_trapping_memory_side_effects(&translated, &source_state, modules, aliases);
