@@ -39,6 +39,8 @@
             inherit system;
             overlays = [ (import inputs.rust-overlay) ];
           };
+          inherit (pkgs.stdenv) hostPlatform;
+
           rust = pkgs.rust-bin.stable.latest.default.override {
             targets = [
               "wasm32-unknown-unknown"
@@ -82,7 +84,6 @@
               programs.yamlfmt.enable = true;
             };
           devShells.default = pkgs.mkShell {
-            inherit (pkgs) stdenv;
             inputsFrom = [ config.treefmt.build.devShell ];
             buildInputs = [
               (lib.hiPrio rustfmt)
@@ -94,16 +95,16 @@
                 cargo-edit
                 cargo-nextest
               ]
-              ++ lib.optionals stdenv.isLinux [
+              ++ lib.optionals hostPlatform.isLinux [
                 llvmPackages.bolt
                 perf
               ]
-              ++ lib.optionals stdenv.isDarwin [
+              ++ lib.optionals hostPlatform.isDarwin [
                 darwin.libiconv
                 darwin.libresolv
               ]
             );
-            env = lib.optionalAttrs pkgs.stdenv.isDarwin { SDKROOT = pkgs.apple-sdk.sdkroot; };
+            env = lib.optionalAttrs hostPlatform.isDarwin { SDKROOT = pkgs.apple-sdk.sdkroot; };
           };
           checks = (
             {
