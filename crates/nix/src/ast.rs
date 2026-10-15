@@ -215,6 +215,12 @@ pub enum Expr {
         then_expr: Box<Self>,
         else_expr: Box<Self>,
     },
+    /// `assert c1; assert c2; body`. Conditions are kept in a list so that long
+    /// chains stay flat for the lowering and the printer.
+    Assert {
+        conds: Vec<Self>,
+        body: Box<Self>,
+    },
 
     Apply {
         func: Box<Self>,
@@ -349,6 +355,18 @@ impl Expr {
             cond: Box::new(cond),
             then_expr: Box::new(then_expr),
             else_expr: Box::new(else_expr),
+        }
+    }
+
+    #[must_use]
+    pub fn asserts(conds: Vec<Self>, body: Self) -> Self {
+        if conds.is_empty() {
+            return body;
+        }
+
+        Self::Assert {
+            conds,
+            body: Box::new(body),
         }
     }
 

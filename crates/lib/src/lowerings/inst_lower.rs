@@ -16,13 +16,69 @@ use super::{
     lower_table_entry, ops, signature_id, types,
 };
 use crate::{
-    nix::{Expr, UnOp, nix},
+    nix::{BinOp, Expr, UnOp, nix},
     translator::NixModule,
 };
 
 pub(super) struct Step {
     pub(super) binds: Vec<(String, Expr)>,
-    pub(super) force: Option<Expr>,
+    pub(super) force: Option<Force>,
+}
+
+/// Evaluation a block performs, in program order, before its terminator. Each
+/// force lowers to an `assert` condition, which evaluates in place without a
+/// call or a thunk for the rest of the block.
+pub(super) enum Force {
+    /// A bound SSA value. Values are numbers, booleans or small ref attrsets,
+    /// so `v == v` is a cheap way to force one.
+    Value(Expr),
+    /// A bound state, which is too large to compare.
+    State(Expr),
+    /// Throws `message` when `cond` evaluates to `trap_on`, or unconditionally
+    /// without a condition.
+    Trap {
+        cond: Option<Expr>,
+        trap_on: bool,
+        message: String,
+    },
+}
+
+impl Force {
+    pub(super) fn condition(self) -> Expr {
+        match self {
+            Self::Value(value) => nix!(#{value.clone()} == #{value}),
+            Self::State(state) => nix!(builtins.seq(#{state}, true)),
+            Self::Trap {
+                cond: None,
+                message,
+                ..
+            } => nix!(throw(#{message})),
+            Self::Trap {
+                cond: Some(cond),
+                trap_on: true,
+                message,
+            } => Expr::bin(BinOp::Implies, cond, nix!(throw(#{message}))),
+            Self::Trap {
+                cond: Some(cond),
+                trap_on: false,
+                message,
+            } => nix!(#{cond} || throw(#{message})),
+        }
+    }
+
+    pub(super) const fn expr(&self) -> Option<&Expr> {
+        match self {
+            Self::Value(expr) | Self::State(expr) => Some(expr),
+            Self::Trap { cond, .. } => cond.as_ref(),
+        }
+    }
+
+    pub(super) const fn expr_mut(&mut self) -> Option<&mut Expr> {
+        match self {
+            Self::Value(expr) | Self::State(expr) => Some(expr),
+            Self::Trap { cond, .. } => cond.as_mut(),
+        }
+    }
 }
 
 pub(super) struct LoweredInst {
@@ -138,7 +194,7 @@ impl<'a> InstCtx<'a> {
             {
                 Ok(self.lower_cond_trap(*arg, *code))
             }
-            InstructionData::Trap { code, .. } => Ok(self.lower_trap(*code)),
+            InstructionData::Trap { code, .. } => Ok(Self::lower_trap(*code)),
             _ if self.op == Opcode::Call => self.lower_call(),
             _ => Ok(self.unsupported(format!("wasm2nix: unimplemented inst opcode {}", self.op))),
         }
@@ -290,6 +346,18 @@ impl<'a> InstCtx<'a> {
             return Ok(self.pure_bind(out, e));
         }
 
+        if let Some(e) = ops::inline_int_binary(
+            self.op,
+            out_ty,
+            a.clone(),
+            b.clone(),
+            self.const_int(args[1]),
+        ) {
+            return Ok(self.pure_bind(out, e));
+        }
+        if self.op == Opcode::Iadd && out_ty == I32 && self.const_int(args[0]) == Some(0) {
+            return Ok(self.pure_bind(out, b));
+        }
         let Some(function) = ops::binary_function(self.op, out_ty) else {
             return self.unsupported_opcode();
         };
@@ -305,6 +373,19 @@ impl<'a> InstCtx<'a> {
             Expr::int(imm64)
         };
 
+        let imm_const = match imm_expr {
+            Expr::Int(value) => Some(value),
+            _ => None,
+        };
+        if let Some(e) = ops::inline_int_binary(
+            self.op,
+            out_ty,
+            self.value_expr(arg),
+            imm_expr.clone(),
+            imm_const,
+        ) {
+            return self.pure_bind(out, e);
+        }
         let Some(function) = ops::binary_imm_function(self.op, out_ty) else {
             return self.unsupported(format!("wasm2nix: unimplemented binary-imm op {}", self.op));
         };
@@ -319,10 +400,14 @@ impl<'a> InstCtx<'a> {
     }
 
     fn lower_int_compare(&self, args: [ir::Value; 2], cond: IntCC) -> LoweredInst {
-        let function = int_compare_function(self.func.dfg.value_type(args[0]) == I64, cond);
+        let is_i64 = self.func.dfg.value_type(args[0]) == I64;
+        let (lhs, rhs) = (self.value_expr(args[0]), self.value_expr(args[1]));
+        if let Some(e) = ops::inline_int_compare(is_i64, cond, lhs.clone(), rhs.clone()) {
+            return self.bind_result(e);
+        }
         self.bind_result(Expr::app(
-            function.expr(),
-            vec![self.value_expr(args[0]), self.value_expr(args[1])],
+            int_compare_function(is_i64, cond).expr(),
+            vec![lhs, rhs],
         ))
     }
 
@@ -333,10 +418,13 @@ impl<'a> InstCtx<'a> {
         } else {
             Expr::int(imm64)
         };
-        let function = int_compare_function(ty == I64, cond);
+        let lhs = self.value_expr(arg);
+        if let Some(e) = ops::inline_int_compare(ty == I64, cond, lhs.clone(), imm_expr.clone()) {
+            return self.bind_result(e);
+        }
         self.bind_result(Expr::app(
-            function.expr(),
-            vec![self.value_expr(arg), imm_expr],
+            int_compare_function(ty == I64, cond).expr(),
+            vec![lhs, imm_expr],
         ))
     }
 
@@ -373,28 +461,24 @@ impl<'a> InstCtx<'a> {
     }
 
     fn lower_cond_trap(&self, arg: ir::Value, code: ir::TrapCode) -> LoweredInst {
-        let trap_name = format!("trap_{}", self.inst.as_u32());
-        let c = self.truthy_expr(arg);
-        let trap_expr = nix!(throw(#{format!("wasm2nix: trap {code}")}));
-        let trap = if self.op == Opcode::Trapz {
-            nix!(if #{c} then 0 else #{trap_expr})
-        } else {
-            nix!(if #{c} then #{trap_expr} else 0)
-        };
         LoweredInst::step(Step {
-            binds: vec![(trap_name.clone(), trap)],
-            force: Some(Expr::ident(trap_name)),
+            binds: Vec::new(),
+            force: Some(Force::Trap {
+                cond: Some(self.truthy_expr(arg)),
+                trap_on: self.op == Opcode::Trapnz,
+                message: format!("wasm2nix: trap {code}"),
+            }),
         })
     }
 
-    fn lower_trap(&self, code: ir::TrapCode) -> LoweredInst {
-        let trap_name = format!("trap_{}", self.inst.as_u32());
+    fn lower_trap(code: ir::TrapCode) -> LoweredInst {
         LoweredInst::step(Step {
-            binds: vec![(
-                trap_name.clone(),
-                nix!(throw(#{format!("wasm2nix: trap {code}")})),
-            )],
-            force: Some(Expr::ident(trap_name)),
+            binds: Vec::new(),
+            force: Some(Force::Trap {
+                cond: None,
+                trap_on: true,
+                message: format!("wasm2nix: trap {code}"),
+            }),
         })
     }
 
@@ -473,7 +557,7 @@ impl<'a> InstCtx<'a> {
         LoweredInst::step_and_state(
             Step {
                 binds,
-                force: Some(Expr::ident(new_st.clone())),
+                force: Some(Force::State(Expr::ident(new_st.clone()))),
             },
             new_st,
         )
@@ -484,7 +568,7 @@ impl<'a> InstCtx<'a> {
         LoweredInst::step_and_state(
             Step {
                 binds: vec![(new_st.clone(), e)],
-                force: Some(Expr::ident(new_st.clone())),
+                force: Some(Force::State(Expr::ident(new_st.clone()))),
             },
             new_st,
         )
@@ -503,7 +587,8 @@ impl<'a> InstCtx<'a> {
             .results
             .first()
             .map(|v| Expr::ident(value_name(*v)))
-            .or_else(|| binds.first().map(|(n, _)| Expr::ident(n.clone())));
+            .or_else(|| binds.first().map(|(n, _)| Expr::ident(n.clone())))
+            .map(Force::Value);
         Step { binds, force }
     }
 
@@ -537,6 +622,24 @@ impl<'a> InstCtx<'a> {
 
     fn value_expr(&self, v: ir::Value) -> Expr {
         value_expr(self.func, v, self.st_name, self.vmctx)
+    }
+
+    /// The value of `v` when it is defined by a constant. Global values lower
+    /// to 0, which makes the heap base addition foldable.
+    fn const_int(&self, v: ir::Value) -> Option<i64> {
+        let v = self.func.dfg.resolve_aliases(v);
+        let inst = self.func.dfg.value_def(v).inst()?;
+        match self.func.dfg.insts[inst] {
+            InstructionData::UnaryImm {
+                opcode: Opcode::Iconst,
+                imm,
+            } => Some(imm.bits()),
+            InstructionData::UnaryGlobalValue {
+                opcode: Opcode::GlobalValue | Opcode::SymbolValue | Opcode::TlsValue,
+                ..
+            } => Some(0),
+            _ => None,
+        }
     }
 
     fn truthy_expr(&self, v: ir::Value) -> Expr {

@@ -1,8 +1,78 @@
 use cranelift_codegen::ir::{
-    Opcode,
+    Opcode, Type,
+    condcodes::IntCC,
     types::{F32, F64, I32, I64},
 };
 use wasm2nix_runtime::RuntimeFunction;
+
+use crate::nix::{AttrKey, BinOp, Expr};
+
+const U32_MASK: i64 = 0xFFFF_FFFF;
+
+/// Integer operations cheap enough to emit as inline Nix instead of a runtime
+/// call. i32 values are canonical u32 and i64 values native int64, so bitwise
+/// operations apply directly and i32 wraparound is a mask. `rhs_const` is the
+/// right operand when it is a known constant.
+pub(super) fn inline_int_binary(
+    op: Opcode, ty: Type, lhs: Expr, rhs: Expr, rhs_const: Option<i64>,
+) -> Option<Expr> {
+    let mask32 = |expr| bit_op("bitAnd", expr, Expr::int(U32_MASK));
+    // Shifting a u32 left by at most 31 bits stays below 2^63.
+    let shift_scale = |amount: i64| Expr::int(1 << (amount & 31));
+    match (ty, op) {
+        (I32, Opcode::Iadd | Opcode::IaddImm) if rhs_const == Some(0) => Some(lhs),
+        (I32, Opcode::Iadd | Opcode::IaddImm) => Some(mask32(Expr::bin(BinOp::Add, lhs, rhs))),
+        (I32, Opcode::Isub) => Some(mask32(Expr::bin(BinOp::Sub, lhs, rhs))),
+        (I32 | I64, Opcode::Band | Opcode::BandImm) => Some(bit_op("bitAnd", lhs, rhs)),
+        (I32 | I64, Opcode::Bor | Opcode::BorImm) => Some(bit_op("bitOr", lhs, rhs)),
+        (I32 | I64, Opcode::Bxor | Opcode::BxorImm) => Some(bit_op("bitXor", lhs, rhs)),
+        (I32, Opcode::Ishl | Opcode::IshlImm) => {
+            rhs_const.map(|amount| mask32(Expr::bin(BinOp::Mul, lhs, shift_scale(amount))))
+        }
+        (I32, Opcode::Ushr | Opcode::UshrImm) => {
+            rhs_const.map(|amount| Expr::bin(BinOp::Div, lhs, shift_scale(amount)))
+        }
+        _ => None,
+    }
+}
+
+/// Integer comparisons that map onto Nix's own operators: equality for both
+/// widths, unsigned order on canonical u32 and signed order on native int64.
+pub(super) fn inline_int_compare(is_i64: bool, cc: IntCC, lhs: Expr, rhs: Expr) -> Option<Expr> {
+    let op = match (is_i64, cc) {
+        (_, IntCC::Equal) => BinOp::Eq,
+        (_, IntCC::NotEqual) => BinOp::Neq,
+        (false, IntCC::UnsignedLessThan) | (true, IntCC::SignedLessThan) => BinOp::Lt,
+        (false, IntCC::UnsignedLessThanOrEqual) | (true, IntCC::SignedLessThanOrEqual) => BinOp::Le,
+        (false, IntCC::UnsignedGreaterThan) | (true, IntCC::SignedGreaterThan) => BinOp::Gt,
+        (false, IntCC::UnsignedGreaterThanOrEqual) | (true, IntCC::SignedGreaterThanOrEqual) => {
+            BinOp::Ge
+        }
+        _ => return None,
+    };
+    Some(Expr::bin(op, lhs, rhs))
+}
+
+fn bit_op(name: &str, lhs: Expr, rhs: Expr) -> Expr {
+    Expr::app(
+        Expr::select(Expr::ident("builtins"), AttrKey::ident(name)),
+        [lhs, rhs],
+    )
+}
+
+/// Whether `expr` is one of the bitwise builtins emitted by
+/// [`inline_int_binary`], which are pure on integers.
+pub(super) fn is_bit_op(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Select { expr, path }
+            if matches!(expr.as_ref(), Expr::Ident(name) if name == "builtins")
+                && matches!(
+                    path.iter().collect::<Vec<_>>().as_slice(),
+                    [AttrKey::Ident(name)] if matches!(name.as_str(), "bitAnd" | "bitOr" | "bitXor")
+                )
+    )
+}
 
 pub(super) const fn float_to_int_conv_function(
     op: Opcode, input: cranelift_codegen::ir::Type, output: cranelift_codegen::ir::Type,

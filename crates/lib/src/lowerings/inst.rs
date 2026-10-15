@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use cranelift_codegen::ir::{self, ArgumentPurpose, Block, Inst, InstructionData, Opcode};
 use snafu::prelude::*;
@@ -8,8 +11,8 @@ use super::{
         EmptyBlockSnafu, MissingEntryBlockSnafu, MissingVmContextSnafu, Result,
         UnsupportedOpcodeSnafu,
     },
-    inst_lower::{Step, lower_inst, truthy_value_expr, value_expr, value_name},
-    lambda_chain,
+    inst_lower::{Force, Step, lower_inst, truthy_value_expr, value_expr, value_name},
+    lambda_chain, ops,
 };
 use crate::{
     nix::{AttrBind, AttrKey, BinOp, Expr, LetBind, nix},
@@ -40,17 +43,18 @@ pub(super) fn lower_function(
         .collect();
     params.push("st".into());
 
-    let free_values = block_free_values(func, vmctx);
+    let cfg = ControlFlow::analyze(func, entry, vmctx);
 
-    // Blocks return either a jump record or a done record. The trampoline below
-    // keeps Wasm loops from consuming the Nix evaluator call stack.
-    let mut block_binds: Vec<(AttrKey, Expr)> = Vec::new();
-    for block in func.layout.blocks() {
-        let bname = block_name(block);
-        let bexpr = lower_block(module, func, block, vmctx, &free_values)?;
-        block_binds.push((AttrKey::ident(bname), bexpr));
-    }
-    let blocks_attrset = Expr::attrset(true, block_binds);
+    // Blocks call their forward successors directly and return either a done
+    // record or, on a loop back edge, a jump record for the trampoline below.
+    let lowering = BlockLowering {
+        module,
+        func,
+        vmctx,
+        cfg: &cfg,
+        spilled: RefCell::new(Vec::new()),
+    };
+    let blocks_attrset = Expr::attrset(true, lowering.lower_blocks(entry)?);
 
     let mut entry_args: Vec<Expr> = func
         .dfg
@@ -61,12 +65,26 @@ pub(super) fn lower_function(
         .map(|v| Expr::ident(value_name(v)))
         .collect();
     entry_args.extend(
-        free_values
+        cfg.free_values
             .get(&entry)
             .into_iter()
             .flat_map(|values| values.iter())
             .map(|v| Expr::ident(value_name(*v))),
     );
+
+    if cfg.back_edges.is_empty() {
+        entry_args.push(nix!(st));
+        let entry_call = Expr::app(
+            Expr::select(nix!(blocks), AttrKey::ident(block_name(entry))),
+            entry_args,
+        );
+        return Ok(lambda_chain(
+            &params,
+            nix!(let
+            blocks = #{blocks_attrset};
+        in #{entry_call}),
+        ));
+    }
 
     let entry_with_key = lower_jump_record_with_key(entry, entry_args, nix!(st), 0);
     let apply_args = nix!(func: args: builtins."foldl'"(f: arg: f(arg), func, args));
@@ -122,36 +140,14 @@ fn block_free_values(func: &ir::Function, vmctx: ir::Value) -> BTreeMap<Block, V
                 push_free_value(func, value, vmctx, &defined, &mut free);
             }
 
-            match &func.dfg.insts[inst] {
-                InstructionData::Jump { destination, .. } => {
-                    successors_by_block
-                        .entry(block)
-                        .or_insert_with(Vec::new)
-                        .push(destination.block(&func.dfg.value_lists));
-                    for value in destination.args_slice(&func.dfg.value_lists) {
-                        push_free_value(func, *value, vmctx, &defined, &mut free);
-                    }
+            for block_call in branch_calls(func, inst) {
+                successors_by_block
+                    .entry(block)
+                    .or_insert_with(Vec::new)
+                    .push(block_call.block(&func.dfg.value_lists));
+                for value in block_call.args_slice(&func.dfg.value_lists) {
+                    push_free_value(func, *value, vmctx, &defined, &mut free);
                 }
-                InstructionData::Brif { blocks, .. } => {
-                    for block_call in blocks {
-                        successors_by_block
-                            .entry(block)
-                            .or_insert_with(Vec::new)
-                            .push(block_call.block(&func.dfg.value_lists));
-                        for value in block_call.args_slice(&func.dfg.value_lists) {
-                            push_free_value(func, *value, vmctx, &defined, &mut free);
-                        }
-                    }
-                }
-                InstructionData::BranchTable { table, .. } => {
-                    let table_data = &func.dfg.jump_tables[*table];
-                    let successors = successors_by_block.entry(block).or_insert_with(Vec::new);
-                    successors.push(table_data.default_block().block(&func.dfg.value_lists));
-                    for block_call in table_data.as_slice() {
-                        successors.push(block_call.block(&func.dfg.value_lists));
-                    }
-                }
-                _ => {}
             }
             defined.extend(
                 func.dfg
@@ -191,6 +187,81 @@ fn block_free_values(func: &ir::Function, vmctx: ir::Value) -> BTreeMap<Block, V
     result
 }
 
+/// The block calls an instruction branches through, if it is a branch.
+fn branch_calls(func: &ir::Function, inst: Inst) -> Vec<ir::BlockCall> {
+    match &func.dfg.insts[inst] {
+        InstructionData::Jump { destination, .. } => vec![*destination],
+        InstructionData::Brif { blocks, .. } => blocks.to_vec(),
+        InstructionData::BranchTable { table, .. } => {
+            let table_data = &func.dfg.jump_tables[*table];
+            std::iter::once(table_data.default_block())
+                .chain(table_data.as_slice().iter().copied())
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+struct ControlFlow {
+    /// Values each block uses without defining, passed as extra parameters.
+    free_values: BTreeMap<Block, Vec<ir::Value>>,
+    /// Edges into a block that is still on the depth-first search path. Wasm
+    /// control flow is reducible, so these are exactly the loop back edges.
+    back_edges: BTreeSet<(Block, Block)>,
+    /// Number of branch edges into each block.
+    in_edges: BTreeMap<Block, usize>,
+}
+
+impl ControlFlow {
+    fn analyze(func: &ir::Function, entry: Block, vmctx: ir::Value) -> Self {
+        let successors = |block: Block| {
+            func.layout
+                .last_inst(block)
+                .map(|inst| branch_calls(func, inst))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|call| call.block(&func.dfg.value_lists))
+                .collect::<Vec<_>>()
+        };
+
+        let mut back_edges = BTreeSet::new();
+        let mut on_path = BTreeSet::from([entry]);
+        let mut visited = BTreeSet::from([entry]);
+        let mut stack = vec![(entry, successors(entry).into_iter())];
+        while let Some((block, pending)) = stack.last_mut() {
+            let block = *block;
+            if let Some(next) = pending.next() {
+                if on_path.contains(&next) {
+                    back_edges.insert((block, next));
+                } else if visited.insert(next) {
+                    on_path.insert(next);
+                    stack.push((next, successors(next).into_iter()));
+                }
+            } else {
+                on_path.remove(&block);
+                stack.pop();
+            }
+        }
+
+        let mut in_edges = BTreeMap::new();
+        for block in func.layout.blocks() {
+            for target in successors(block) {
+                *in_edges.entry(target).or_insert(0) += 1;
+            }
+        }
+
+        Self {
+            free_values: block_free_values(func, vmctx),
+            back_edges,
+            in_edges,
+        }
+    }
+
+    fn is_inlinable(&self, block: Block) -> bool {
+        self.in_edges.get(&block) == Some(&1)
+    }
+}
+
 fn push_free_value(
     func: &ir::Function, value: ir::Value, vmctx: ir::Value, defined: &[ir::Value],
     free: &mut Vec<ir::Value>,
@@ -201,91 +272,266 @@ fn push_free_value(
     }
 }
 
-fn lower_block(
-    module: &NixModule, func: &ir::Function, block: Block, vmctx: ir::Value,
-    free_values: &BTreeMap<Block, Vec<ir::Value>>,
-) -> Result<Expr> {
-    // Block parameters: block params excluding vmctx, then `st`.
-    let mut params: Vec<String> = func
-        .dfg
-        .block_params(block)
-        .iter()
-        .copied()
-        .filter(|v| *v != vmctx)
-        .map(value_name)
-        .collect();
-    params.extend(
-        free_values
-            .get(&block)
-            .into_iter()
-            .flat_map(|values| values.iter())
-            .map(|v| value_name(*v)),
-    );
-    params.push("st".into());
+/// Single-edge blocks nest at most this deep before they are emitted as
+/// separate block functions, which bounds recursion in the lowering and in
+/// the printer.
+const MAX_INLINE_DEPTH: usize = 32;
 
-    let body = lower_block_body(module, func, block, vmctx, free_values)?;
-    Ok(lambda_chain(&params, body))
+struct BlockLowering<'a> {
+    module: &'a NixModule,
+    func: &'a ir::Function,
+    vmctx: ir::Value,
+    cfg: &'a ControlFlow,
+    /// Single-edge blocks that were called instead of inlined because the
+    /// nesting limit was reached.
+    spilled: RefCell<Vec<Block>>,
 }
 
-fn lower_block_body(
-    module: &NixModule, func: &ir::Function, block: Block, vmctx: ir::Value,
-    free_values: &BTreeMap<Block, Vec<ir::Value>>,
-) -> Result<Expr> {
-    let mut insts: Vec<Inst> = func.layout.block_insts(block).collect();
-    ensure!(
-        !insts.is_empty(),
-        EmptyBlockSnafu {
-            block: block.as_u32()
-        }
-    );
+impl BlockLowering<'_> {
+    /// Lowers every block that needs its own function: the entry, blocks with
+    /// several incoming edges, loop headers and blocks spilled at the nesting
+    /// limit. Every other block is inlined into its only predecessor.
+    fn lower_blocks(&self, entry: Block) -> Result<Vec<(AttrKey, Expr)>> {
+        let mut pending: Vec<Block> = self
+            .func
+            .layout
+            .blocks()
+            .filter(|block| *block == entry || !self.cfg.is_inlinable(*block))
+            .collect();
+        pending.reverse();
 
-    let term = insts.pop().context(EmptyBlockSnafu {
-        block: block.as_u32(),
-    })?;
-
-    let mut steps: Vec<Step> = Vec::new();
-    let mut st_name = "st".to_string();
-
-    for inst in insts {
-        let lowered = lower_inst(module, func, inst, &st_name, vmctx)?;
-        if let Some(step) = lowered.step {
-            steps.push(step);
+        let mut emitted = BTreeSet::new();
+        let mut binds = Vec::new();
+        while let Some(block) = pending.pop() {
+            if !emitted.insert(block) {
+                continue;
+            }
+            binds.push((AttrKey::ident(block_name(block)), self.lower_block(block)?));
+            pending.extend(self.spilled.borrow_mut().drain(..).rev());
         }
-        if let Some(new_st) = lowered.next_state {
-            st_name = new_st;
-        }
+        Ok(binds)
     }
 
-    let expr = lower_terminator(func, term, &st_name, vmctx, free_values)?;
-    let lowered = inline_single_use_values(steps, expr);
+    fn lower_block(&self, block: Block) -> Result<Expr> {
+        let mut params = self.block_params(block);
+        params.extend(
+            self.cfg
+                .free_values
+                .get(&block)
+                .into_iter()
+                .flat_map(|values| values.iter())
+                .map(|v| value_name(*v)),
+        );
+        params.push("st".into());
 
-    let mut expr = lowered.body;
-    if !lowered.forces.is_empty() {
-        let force_list = Expr::list(lowered.forces);
-        let seq = || Expr::select(nix!(builtins), AttrKey::ident("seq"));
-        let force_step = Expr::lambda(
-            "acc",
-            Expr::lambda(
-                "force",
-                Expr::app(
-                    seq(),
-                    vec![nix!(acc), Expr::app(seq(), vec![nix!(force), nix!(force)])],
-                ),
-            ),
-        );
-        let force_steps = Expr::app(
-            Expr::select(nix!(builtins), AttrKey::string("foldl'")),
-            vec![force_step, Expr::int(0), force_list],
-        );
-        expr = Expr::app(seq(), vec![force_steps, expr]);
+        let body = self.lower_block_body(block, 0)?;
+        Ok(lambda_chain(&params, body))
     }
 
-    Ok(Expr::let_binds(lowered.binds, expr))
+    /// Block parameters, excluding vmctx.
+    fn block_params(&self, block: Block) -> Vec<String> {
+        self.func
+            .dfg
+            .block_params(block)
+            .iter()
+            .copied()
+            .filter(|v| *v != self.vmctx)
+            .map(value_name)
+            .collect()
+    }
+
+    fn lower_block_body(&self, block: Block, depth: usize) -> Result<Expr> {
+        let mut insts: Vec<Inst> = self.func.layout.block_insts(block).collect();
+        ensure!(
+            !insts.is_empty(),
+            EmptyBlockSnafu {
+                block: block.as_u32()
+            }
+        );
+
+        let term = insts.pop().context(EmptyBlockSnafu {
+            block: block.as_u32(),
+        })?;
+
+        let mut steps: Vec<Step> = Vec::new();
+        let mut st_name = "st".to_string();
+
+        for inst in insts {
+            let lowered = lower_inst(self.module, self.func, inst, &st_name, self.vmctx)?;
+            if let Some(step) = lowered.step {
+                steps.push(step);
+            }
+            if let Some(new_st) = lowered.next_state {
+                st_name = new_st;
+            }
+        }
+
+        let expr = self.lower_terminator(block, term, &st_name, depth)?;
+        let lowered = inline_single_use_values(steps, expr);
+        let conds = lowered.forces.into_iter().map(Force::condition).collect();
+        let expr = Expr::asserts(conds, lowered.body);
+
+        Ok(Expr::let_binds(lowered.binds, expr))
+    }
+
+    fn value_expr(&self, v: ir::Value, st_name: &str) -> Expr {
+        value_expr(self.func, v, st_name, self.vmctx)
+    }
+
+    fn lower_terminator(
+        &self, block: Block, inst: Inst, st_name: &str, depth: usize,
+    ) -> Result<Expr> {
+        let func = self.func;
+        let data = &func.dfg.insts[inst];
+        let op = data.opcode();
+
+        Ok(match (op, data) {
+            (Opcode::Return, InstructionData::MultiAry { args, .. }) => {
+                let rvs = args
+                    .as_slice(&func.dfg.value_lists)
+                    .iter()
+                    .map(|v| self.value_expr(*v, st_name))
+                    .collect::<Vec<_>>();
+                lower_done_record(Expr::ident(st_name), rvs)
+            }
+
+            (Opcode::Jump, InstructionData::Jump { destination, .. }) => {
+                self.lower_block_call(block, *destination, st_name, depth)?
+            }
+
+            (Opcode::Brif, InstructionData::Brif { blocks, arg, .. }) => {
+                let cond = truthy_value_expr(func, *arg, st_name, self.vmctx);
+                let then_call = self.lower_block_call(block, blocks[0], st_name, depth)?;
+                let else_call = self.lower_block_call(block, blocks[1], st_name, depth)?;
+                nix!(if #{cond} then #{then_call} else #{else_call})
+            }
+
+            (Opcode::BrTable, InstructionData::BranchTable { arg, table, .. }) => {
+                self.lower_branch_table(block, inst, *arg, *table, st_name, depth)?
+            }
+
+            (Opcode::Trap, _) => {
+                let trap_code = data
+                    .trap_code()
+                    .map_or_else(|| "?".into(), |code| code.to_string());
+                nix!(throw(#{format!("wasm2nix: trap {trap_code}")}))
+            }
+
+            (Opcode::Trapz, InstructionData::CondTrap { arg, code, .. }) => {
+                let c = truthy_value_expr(func, *arg, st_name, self.vmctx);
+                // trapz: if c is false then trap.
+                nix!(if #{c}
+                    then #{lower_done_record(Expr::ident(st_name), vec![])}
+                    else throw(#{format!("wasm2nix: trapz {code}")}))
+            }
+
+            (Opcode::Trapnz, InstructionData::CondTrap { arg, code, .. }) => {
+                let c = truthy_value_expr(func, *arg, st_name, self.vmctx);
+                let ok = lower_done_record(Expr::ident(st_name), vec![]);
+                // trapnz: if c is true then trap.
+                nix!(if #{c} then throw(#{format!("wasm2nix: trapnz {code}")}) else #{ok})
+            }
+
+            _ => {
+                return UnsupportedOpcodeSnafu {
+                    opcode: op.to_string(),
+                }
+                .fail();
+            }
+        })
+    }
+
+    fn lower_branch_table(
+        &self, block: Block, inst: Inst, arg: ir::Value, table: ir::JumpTable, st_name: &str,
+        depth: usize,
+    ) -> Result<Expr> {
+        let index_name = format!("br_table_index_{}", inst.as_u32());
+        let targets_name = format!("br_table_targets_{}", inst.as_u32());
+        let table_data = &self.func.dfg.jump_tables[table];
+        let targets = table_data
+            .as_slice()
+            .iter()
+            .map(|branch| self.lower_block_call(block, *branch, st_name, depth))
+            .collect::<Result<Vec<_>>>()?;
+        let target_count =
+            i64::try_from(targets.len()).expect("branch table target count fits in i64");
+        let default = self.lower_block_call(block, table_data.default_block(), st_name, depth)?;
+        let selected = Expr::app(
+            Expr::select(nix!(builtins), AttrKey::ident("elemAt")),
+            vec![
+                Expr::ident(targets_name.clone()),
+                Expr::ident(index_name.clone()),
+            ],
+        );
+        let in_range = nix!(
+            #{Expr::ident(index_name.clone())} >= 0
+                && #{Expr::ident(index_name.clone())} < #{target_count}
+        );
+
+        Ok(Expr::let_in(
+            vec![
+                (index_name, self.value_expr(arg, st_name)),
+                (targets_name, Expr::list(targets)),
+            ],
+            nix!(if #{in_range} then #{selected} else #{default}),
+        ))
+    }
+
+    /// Lowers a branch to `call`. A block with a single incoming edge is
+    /// inlined with its parameters bound by `let`; its free values are already
+    /// in scope because they are free in, or defined by, the predecessor.
+    /// Other forward edges call the target block directly, and back edges
+    /// return a jump record to the function's trampoline so that loops do not
+    /// grow the Nix call stack.
+    fn lower_block_call(
+        &self, from: Block, call: ir::BlockCall, st_name: &str, depth: usize,
+    ) -> Result<Expr> {
+        let value_lists = &self.func.dfg.value_lists;
+        let target = call.block(value_lists);
+        let mut args = call
+            .args_slice(value_lists)
+            .iter()
+            .map(|v| self.value_expr(*v, st_name))
+            .collect::<Vec<_>>();
+
+        if self.cfg.is_inlinable(target) && !self.cfg.back_edges.contains(&(from, target)) {
+            if depth < MAX_INLINE_DEPTH {
+                let mut binds = self
+                    .block_params(target)
+                    .into_iter()
+                    .zip(args)
+                    .collect::<Vec<_>>();
+                if st_name != "st" {
+                    binds.push(("st".into(), Expr::ident(st_name)));
+                }
+                return Ok(Expr::let_in(
+                    binds,
+                    self.lower_block_body(target, depth + 1)?,
+                ));
+            }
+            self.spilled.borrow_mut().push(target);
+        }
+
+        args.extend(
+            self.cfg
+                .free_values
+                .get(&target)
+                .into_iter()
+                .flat_map(|values| values.iter())
+                .map(|v| self.value_expr(*v, st_name)),
+        );
+        if self.cfg.back_edges.contains(&(from, target)) {
+            Ok(lower_jump_record(target, args, Expr::ident(st_name)))
+        } else {
+            args.push(Expr::ident(st_name));
+            Ok(Expr::app(Expr::ident(block_name(target)), args))
+        }
+    }
 }
 
 struct LoweredBlockBody {
     binds: Vec<LetBind>,
-    forces: Vec<Expr>,
+    forces: Vec<Force>,
     body: Expr,
 }
 
@@ -311,31 +557,40 @@ fn inline_single_use_values(steps: Vec<Step>, body: Expr) -> LoweredBlockBody {
             continue;
         }
 
-        let force_uses = count_ident_uses_in_exprs(&forces, &name);
+        // Forcing a bound value is redundant once it is inlined; trap
+        // conditions are ordinary use sites.
         let removable_force_count = forces
             .iter()
-            .filter(|force| is_ident_named(force, &name))
+            .filter(|force| matches!(force, Force::Value(expr) if is_ident_named(expr, &name)))
             .count();
-        if force_uses != removable_force_count || removable_force_count > 1 {
+        if removable_force_count > 1 {
             index += 1;
             continue;
         }
 
-        let use_count =
-            count_ident_uses_in_binds(&binds[index + 1..], &name) + count_ident_uses(&body, &name);
-        if use_count > 1 {
+        let use_count = count_ident_uses_in_binds(&binds[index + 1..], &name)
+            + count_ident_uses_in_forces(&forces, &name)
+            - removable_force_count
+            + count_ident_uses(&body, &name);
+        // List elements and attribute values stay unevaluated, so an expression
+        // inlined into a jump record would grow a thunk chain across loop
+        // iterations instead of being forced in this block.
+        if use_count > 1 || is_used_lazily(&body, &name) {
             index += 1;
             continue;
         }
 
+        if removable_force_count == 1 {
+            remove_ident_force(&mut forces, &name);
+        }
         if use_count == 1 {
             for bind in &mut binds[index + 1..] {
                 substitute_ident(&mut bind.value, &name, &value);
             }
+            for expr in forces.iter_mut().filter_map(Force::expr_mut) {
+                substitute_ident(expr, &name, &value);
+            }
             substitute_ident(&mut body, &name, &value);
-        }
-        if removable_force_count == 1 {
-            remove_ident_force(&mut forces, &name);
         }
         binds.remove(index);
     }
@@ -349,7 +604,7 @@ fn inline_single_use_values(steps: Vec<Step>, body: Expr) -> LoweredBlockBody {
 
 fn is_inline_candidate(expr: &Expr) -> bool {
     match expr {
-        Expr::Int(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Null => true,
+        Expr::Ident(_) | Expr::Int(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Null => true,
         Expr::IfThenElse {
             cond,
             then_expr,
@@ -359,19 +614,27 @@ fn is_inline_candidate(expr: &Expr) -> bool {
                 && is_inline_candidate(then_expr)
                 && is_inline_candidate(else_expr)
         }
+        // Division by a non-zero literal cannot trap.
+        Expr::BinOp {
+            op: BinOp::Div,
+            lhs,
+            rhs,
+        } => {
+            matches!(rhs.as_ref(), Expr::Int(divisor) if *divisor != 0) && is_inline_candidate(lhs)
+        }
         Expr::BinOp { op, lhs, rhs } => {
             is_safe_inline_binop(*op) && is_inline_candidate(lhs) && is_inline_candidate(rhs)
         }
         Expr::UnOp { expr, .. } => is_inline_candidate(expr),
-        Expr::Ident(_)
-        | Expr::Raw(_)
+        Expr::Apply { func, args } => ops::is_bit_op(func) && args.iter().all(is_inline_candidate),
+        Expr::Raw(_)
         | Expr::Path(_)
         | Expr::List(_)
         | Expr::AttrSet { .. }
         | Expr::Select { .. }
         | Expr::Lambda { .. }
         | Expr::LetIn { .. }
-        | Expr::Apply { .. } => false,
+        | Expr::Assert { .. } => false,
     }
 }
 
@@ -401,6 +664,14 @@ fn count_ident_uses_in_binds(binds: &[LetBind], name: &str) -> usize {
 
 fn count_ident_uses_in_exprs(exprs: &[Expr], name: &str) -> usize {
     exprs.iter().map(|expr| count_ident_uses(expr, name)).sum()
+}
+
+fn count_ident_uses_in_forces(forces: &[Force], name: &str) -> usize {
+    forces
+        .iter()
+        .filter_map(Force::expr)
+        .map(|expr| count_ident_uses(expr, name))
+        .sum()
 }
 
 fn count_ident_uses(expr: &Expr, name: &str) -> usize {
@@ -450,6 +721,46 @@ fn count_ident_uses(expr: &Expr, name: &str) -> usize {
                     .sum::<usize>()
         }
         Expr::BinOp { lhs, rhs, .. } => count_ident_uses(lhs, name) + count_ident_uses(rhs, name),
+        Expr::Assert { conds, body } => {
+            count_ident_uses_in_exprs(conds, name) + count_ident_uses(body, name)
+        }
+    }
+}
+
+fn is_used_lazily(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::List(items) => items.iter().any(|item| count_ident_uses(item, name) != 0),
+        Expr::AttrSet { .. } => count_ident_uses(expr, name) != 0,
+        Expr::Ident(_)
+        | Expr::Raw(_)
+        | Expr::Path(_)
+        | Expr::Int(_)
+        | Expr::Bool(_)
+        | Expr::Str(_)
+        | Expr::Null => false,
+        Expr::Select { expr, .. } | Expr::UnOp { expr, .. } => is_used_lazily(expr, name),
+        Expr::Lambda { param, body } => param != name && is_used_lazily(body, name),
+        Expr::LetIn { binds, body } => {
+            !binds.iter().any(|bind| bind.name == name)
+                && (binds.iter().any(|bind| is_used_lazily(&bind.value, name))
+                    || is_used_lazily(body, name))
+        }
+        Expr::IfThenElse {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            is_used_lazily(cond, name)
+                || is_used_lazily(then_expr, name)
+                || is_used_lazily(else_expr, name)
+        }
+        Expr::Apply { func, args } => {
+            is_used_lazily(func, name) || args.iter().any(|arg| is_used_lazily(arg, name))
+        }
+        Expr::BinOp { lhs, rhs, .. } => is_used_lazily(lhs, name) || is_used_lazily(rhs, name),
+        Expr::Assert { conds, body } => {
+            conds.iter().any(|cond| is_used_lazily(cond, name)) || is_used_lazily(body, name)
+        }
     }
 }
 
@@ -514,6 +825,12 @@ fn substitute_ident(expr: &mut Expr, name: &str, replacement: &Expr) {
             substitute_ident(lhs, name, replacement);
             substitute_ident(rhs, name, replacement);
         }
+        Expr::Assert { conds, body } => {
+            for cond in conds {
+                substitute_ident(cond, name, replacement);
+            }
+            substitute_ident(body, name, replacement);
+        }
     }
 }
 
@@ -536,145 +853,16 @@ fn is_ident_named(expr: &Expr, name: &str) -> bool {
     matches!(expr, Expr::Ident(ident) if ident == name)
 }
 
-fn remove_ident_force(forces: &mut Vec<Expr>, name: &str) {
+fn remove_ident_force(forces: &mut Vec<Force>, name: &str) {
     let mut removed = false;
     forces.retain(|force| {
-        if !removed && is_ident_named(force, name) {
+        if !removed && matches!(force, Force::Value(expr) if is_ident_named(expr, name)) {
             removed = true;
             false
         } else {
             true
         }
     });
-}
-
-fn lower_terminator(
-    func: &ir::Function, inst: Inst, st_name: &str, vmctx: ir::Value,
-    free_values: &BTreeMap<Block, Vec<ir::Value>>,
-) -> Result<Expr> {
-    let data = &func.dfg.insts[inst];
-    let op = data.opcode();
-
-    Ok(match (op, data) {
-        (Opcode::Return, InstructionData::MultiAry { args, .. }) => {
-            let rvs = args
-                .as_slice(&func.dfg.value_lists)
-                .iter()
-                .copied()
-                .map(|v| value_expr(func, v, st_name, vmctx))
-                .collect::<Vec<_>>();
-            lower_done_record(Expr::ident(st_name), rvs)
-        }
-
-        (Opcode::Jump, InstructionData::Jump { destination, .. }) => {
-            lower_block_call(func, *destination, st_name, vmctx, free_values)
-        }
-
-        (Opcode::Brif, InstructionData::Brif { blocks, arg, .. }) => {
-            let cond = truthy_value_expr(func, *arg, st_name, vmctx);
-
-            let then_call = lower_block_call(func, blocks[0], st_name, vmctx, free_values);
-            let else_call = lower_block_call(func, blocks[1], st_name, vmctx, free_values);
-
-            nix!(if #{cond} then #{then_call} else #{else_call})
-        }
-
-        (Opcode::BrTable, InstructionData::BranchTable { arg, table, .. }) => {
-            lower_branch_table(func, inst, *arg, *table, st_name, vmctx, free_values)
-        }
-
-        (Opcode::Trap, _) => {
-            let trap_code = data
-                .trap_code()
-                .map_or_else(|| "?".into(), |code| code.to_string());
-            nix!(throw(#{format!("wasm2nix: trap {trap_code}")}))
-        }
-
-        (Opcode::Trapz, InstructionData::CondTrap { arg, code, .. }) => {
-            let c = truthy_value_expr(func, *arg, st_name, vmctx);
-            // trapz: if c is false then trap.
-            nix!(if #{c}
-                then #{lower_done_record(Expr::ident(st_name), vec![])}
-                else throw(#{format!("wasm2nix: trapz {code}")}))
-        }
-
-        (Opcode::Trapnz, InstructionData::CondTrap { arg, code, .. }) => {
-            let c = truthy_value_expr(func, *arg, st_name, vmctx);
-            let ok = lower_done_record(Expr::ident(st_name), vec![]);
-            // trapnz: if c is true then trap.
-            nix!(if #{c} then throw(#{format!("wasm2nix: trapnz {code}")}) else #{ok})
-        }
-
-        _ => {
-            return UnsupportedOpcodeSnafu {
-                opcode: op.to_string(),
-            }
-            .fail();
-        }
-    })
-}
-
-fn lower_branch_table(
-    func: &ir::Function, inst: Inst, arg: ir::Value, table: ir::JumpTable, st_name: &str,
-    vmctx: ir::Value, free_values: &BTreeMap<Block, Vec<ir::Value>>,
-) -> Expr {
-    let index_name = format!("br_table_index_{}", inst.as_u32());
-    let targets_name = format!("br_table_targets_{}", inst.as_u32());
-    let table_data = &func.dfg.jump_tables[table];
-    let targets = table_data
-        .as_slice()
-        .iter()
-        .copied()
-        .map(|branch| lower_block_call(func, branch, st_name, vmctx, free_values))
-        .collect::<Vec<_>>();
-    let target_count = i64::try_from(targets.len()).expect("branch table target count fits in i64");
-    let default = lower_block_call(
-        func,
-        table_data.default_block(),
-        st_name,
-        vmctx,
-        free_values,
-    );
-    let selected = Expr::app(
-        Expr::select(nix!(builtins), AttrKey::ident("elemAt")),
-        vec![
-            Expr::ident(targets_name.clone()),
-            Expr::ident(index_name.clone()),
-        ],
-    );
-    let in_range = nix!(
-        #{Expr::ident(index_name.clone())} >= 0
-            && #{Expr::ident(index_name.clone())} < #{target_count}
-    );
-
-    Expr::let_in(
-        vec![
-            (index_name, value_expr(func, arg, st_name, vmctx)),
-            (targets_name, Expr::list(targets)),
-        ],
-        nix!(if #{in_range} then #{selected} else #{default}),
-    )
-}
-
-fn lower_block_call(
-    func: &ir::Function, call: ir::BlockCall, st_name: &str, vmctx: ir::Value,
-    free_values: &BTreeMap<Block, Vec<ir::Value>>,
-) -> Expr {
-    let target = call.block(&func.dfg.value_lists);
-    let mut args = call
-        .args_slice(&func.dfg.value_lists)
-        .iter()
-        .copied()
-        .map(|v| value_expr(func, v, st_name, vmctx))
-        .collect::<Vec<_>>();
-    args.extend(
-        free_values
-            .get(&target)
-            .into_iter()
-            .flat_map(|values| values.iter())
-            .map(|v| value_expr(func, *v, st_name, vmctx)),
-    );
-    lower_jump_record(target, args, Expr::ident(st_name))
 }
 
 fn lower_jump_record(target: Block, args: Vec<Expr>, st: Expr) -> Expr {

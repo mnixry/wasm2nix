@@ -69,7 +69,10 @@ impl From<BinOp> for Assoc {
 impl From<&Expr> for Prec {
     fn from(val: &Expr) -> Self {
         match val {
-            Expr::LetIn { .. } | Expr::IfThenElse { .. } | Expr::Lambda { .. } => Self::Top,
+            Expr::LetIn { .. }
+            | Expr::IfThenElse { .. }
+            | Expr::Assert { .. }
+            | Expr::Lambda { .. } => Self::Top,
             Expr::BinOp { op, .. } => (*op).into(),
             Expr::UnOp { .. } => Self::Prefix,
             Expr::Apply { .. } => Self::Apply,
@@ -182,6 +185,18 @@ impl Formatter {
                 .append(Doc::line())
                 .append(self.expr_prec(else_expr, Prec::Top))
                 .group(),
+            Expr::Assert { conds, body } => {
+                let asserts = conds.iter().map(|cond| {
+                    text("assert ")
+                        .append(self.expr_prec(cond, Prec::Top))
+                        .append(";")
+                        .group()
+                });
+                join(asserts, &Doc::line())
+                    .append(Doc::line())
+                    .append(self.expr_prec(body, Prec::Top))
+                    .group()
+            }
             Expr::Apply { func, args } => {
                 let args = join(
                     args.iter().map(|arg| self.expr_prec(arg, Prec::Select)),
@@ -408,6 +423,27 @@ mod tests {
                 style: RenderStyle::Compact,
             }),
             "{ alpha = 1; beta = 2; }"
+        );
+    }
+
+    #[test]
+    fn renders_assert_chain_flat() {
+        let e = Expr::asserts(
+            vec![
+                Expr::bin(BinOp::Eq, Expr::ident("a"), Expr::ident("a")),
+                Expr::bin(BinOp::Implies, Expr::ident("c"), Expr::ident("t")),
+            ],
+            Expr::ident("body"),
+        );
+
+        assert_eq!(e.render(), "assert a == a; assert c -> t; body");
+        assert_eq!(
+            e.render_with(&RenderOptions {
+                width: 16,
+                indent: 2,
+                style: RenderStyle::Pretty,
+            }),
+            "assert a == a;\nassert c -> t;\nbody"
         );
     }
 

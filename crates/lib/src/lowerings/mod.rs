@@ -656,14 +656,14 @@ mod tests {
         let nix = lower_wat(
             r#"
             (module
-              (func (export "add_consts") (result i32)
+              (func (export "mul_consts") (result i32)
                 i32.const 40
                 i32.const 2
-                i32.add))
+                i32.mul))
             "#,
         );
 
-        let expected = RuntimeFunction::I32Add
+        let expected = RuntimeFunction::I32Mul
             .call(vec![Expr::int(40), Expr::int(2)])
             .render();
         assert!(nix.contains(&expected));
@@ -671,6 +671,23 @@ mod tests {
             !nix.contains(" = 40;") && !nix.contains(" = 2;"),
             "single-use immediate should be inlined instead of bound"
         );
+    }
+
+    #[test]
+    fn generated_module_inlines_cheap_integer_ops() {
+        let nix = lower_wat(
+            r#"
+            (module
+              (func (export "f") (param i32 i32) (result i32)
+                (i32.shl (i32.add (local.get 0) (local.get 1)) (i32.const 3))))
+            "#,
+        );
+
+        assert!(
+            nix.contains("builtins.bitAnd (builtins.bitAnd (v0 + v1) 4294967295 * 8) 4294967295")
+        );
+        assert!(!nix.contains(&RuntimeFunction::I32Add.expr().render()));
+        assert!(!nix.contains(&RuntimeFunction::I32Shl.expr().render()));
     }
 
     #[test]
@@ -687,7 +704,35 @@ mod tests {
         assert!(nix.contains("st = st;"));
         assert!(nix.contains("exports = exports;"));
         assert!(nix.contains("__wasm2nix ="));
+        assert!(
+            !nix.contains("builtins.genericClosure"),
+            "loop-free functions call their blocks directly"
+        );
+    }
+
+    #[test]
+    fn generated_module_trampolines_loop_back_edges() {
+        let nix = lower_wat(
+            r#"
+            (module
+              (func (export "count") (param i32) (result i32) (local i32)
+                (block
+                  (loop
+                    (br_if 1 (i32.eqz (local.get 0)))
+                    (local.set 1 (i32.add (local.get 1) (i32.const 2)))
+                    (local.set 0 (i32.sub (local.get 0) (i32.const 1)))
+                    (br 0)))
+                (local.get 1)))
+            "#,
+        );
+
+        assert!(nix.contains("builtins.genericClosure"));
         assert!(nix.contains("builtins.deepSeq nextKeyed nextKeyed"));
+        assert!(nix.contains("tag = \"jump\";"));
+        assert!(
+            !nix.contains("args = [ ("),
+            "loop-carried values stay forced bindings"
+        );
     }
 
     #[test]
