@@ -28,9 +28,9 @@ use crate::{
 pub fn lower_module(module: &NixModule) -> Result<Expr> {
     // Top-level:
     // rt: imports:
-    // let moduleId = ...; funcs = rec { ... }; funcRegistry = ...; st0 = ...; st =
-    // ...; exports = ...; in exports // { instantiate = args: { st = st;
-    // exports = exports; }; __wasm2nix = { funcs = funcs; }; }
+    // let moduleId = ...; funcs = rec { ... }; funcRegistry = ...; st0 = ...;
+    // st = ...; exports = ...; in exports // { instantiate = args: { st =
+    // st; exports = exports; }; __wasm2nix = { funcs = funcs; }; }
     let funcs_expr = lower_funcs_rec_attrset(module)?;
     let exports_expr = lower_exports_attrset(module, ExportKeyMode::Public)?;
     let exports_by_name_expr = lower_exports_attrset(module, ExportKeyMode::Encoded)?;
@@ -139,8 +139,8 @@ fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> Result<Expr
             let Some(key) = export_attr_key(export_name, mode) else {
                 continue;
             };
-            // Use string keys for safety (names can contain characters invalid in
-            // identifiers).
+            // Use string keys for safety (names can contain characters invalid
+            // in identifiers).
             binds.push((AttrKey::string(key), f_expr.clone()));
         }
     }

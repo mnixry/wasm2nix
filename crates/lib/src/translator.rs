@@ -362,9 +362,9 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         let elem_index = ElemIndex::new(self.info.elem_segment_count);
         self.info.elem_segment_count += 1;
         let elements = elements.into_vec();
-        // Active element segments are consumed during instantiation. Keep their index
-        // present but empty so a later table.init with that index traps on
-        // segment bounds.
+        // Active element segments are consumed during instantiation. Keep their
+        // index present but empty so a later table.init with that index
+        // traps on segment bounds.
         self.info.element_segments[elem_index] = Vec::new();
         self.info.table_initializers.push(TableInitializer {
             elem_index,

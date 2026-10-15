@@ -341,9 +341,9 @@ impl FuncEnvironment for NixFuncEnvironment<'_> {
             .ok_or_else(|| WasmError::Unsupported("memory referenced but not declared".into()))?;
         validate_memory_type(memory)?;
 
-        // Make the base address symbolic so `heap_addr` results are stable and can be
-        // treated as linear offsets during CLIF->Nix lowering (we'll interpret
-        // the base as 0).
+        // Make the base address symbolic so `heap_addr` results are stable and
+        // can be treated as linear offsets during CLIF->Nix lowering
+        // (we'll interpret the base as 0).
         let base_name = func.declare_imported_user_function(ir::UserExternalName {
             namespace: intr::UserNamespace::Symbol.into(),
             index: 1000 + index.as_u32(),
@@ -355,8 +355,8 @@ impl FuncEnvironment for NixFuncEnvironment<'_> {
             tls: false,
         });
 
-        // Allow addressing up to the wasm32 maximum (4GiB); runtime will enforce actual
-        // size.
+        // Allow addressing up to the wasm32 maximum (4GiB); runtime will
+        // enforce actual size.
         let bound = WASM32_MAX_SIZE;
 
         Ok(self.heaps.push(HeapData {
