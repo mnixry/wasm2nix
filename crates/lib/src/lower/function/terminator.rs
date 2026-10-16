@@ -156,7 +156,7 @@ impl BlockLowering<'_> {
                 .map(|v| self.value_expr(*v, st_name)),
         );
         if self.cfg.back_edges.contains(&(from, target)) {
-            Ok(lower_jump_record(target, args, Expr::ident(st_name), None))
+            Ok(lower_jump_record(target, args, Expr::ident(st_name)))
         } else {
             args.push(Expr::ident(st_name));
             Ok(Expr::app(Expr::ident(block_name(target)), args))
@@ -166,16 +166,9 @@ impl BlockLowering<'_> {
 
 /// A jump record for the trampoline; the entry record also carries the
 /// `genericClosure` key that later steps derive from it.
-pub(super) fn lower_jump_record(
-    target: Block, args: Vec<Expr>, st: Expr, key: Option<i64>,
-) -> Expr {
+pub(super) fn lower_jump_record(target: Block, args: Vec<Expr>, st: Expr) -> Expr {
     let block = block_name(target);
-    let args = Expr::list(args);
-    if let Some(key) = key {
-        nix!({ tag = "jump"; block = #{block}; args = #{args}; st = #{st}; key = #{key}; })
-    } else {
-        nix!({ tag = "jump"; block = #{block}; args = #{args}; st = #{st}; })
-    }
+    nix!({ tag = "jump"; block = #{block}; args = #{Expr::list(args)}; st = #{st}; })
 }
 
 fn lower_done_record(st: Expr, results: Vec<Expr>) -> Expr {

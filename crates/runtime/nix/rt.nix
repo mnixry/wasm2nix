@@ -2118,14 +2118,18 @@ let
   getMem = st: st.mem or { };
   getPages = st: (getMem st).pages or { };
   pageCount = st: (getMem st).pageCount or 1;
+  # Stores force the new pages so that a run of stores without loads cannot
+  # build a chain of pending page updates.
   setPages =
     pages: st:
-    st
-    // {
-      mem = (getMem st) // {
-        pages = pages;
-      };
-    };
+    builtins.seq pages (
+      st
+      // {
+        mem = (getMem st) // {
+          pages = pages;
+        };
+      }
+    );
 
   setPageCount =
     count: st:
@@ -2163,36 +2167,76 @@ let
     in
     if offset < 0 || end > length segment then throw "wasm trap: ${op} out of bounds" else true;
 
-  # Memory holds little-endian u32 words in a two-level attrset: chunks of
-  # `chunkWords` words keyed by chunk index, each keyed by the word's slot
-  # within its chunk. Accesses work on whole words, and a store rewrites one
-  # chunk plus the chunk index instead of an attrset spanning all of memory.
+  # Memory holds little-endian u32 words in a three-level attrset: groups of
+  # `groupChunks` chunks of `chunkWords` words. Each level is keyed by the
+  # global index of its entry (group, chunk or word), so lookups need no slot
+  # arithmetic. Accesses work on whole words, and a store rewrites one chunk,
+  # its group and the group index instead of an attrset spanning all of memory.
   # Nix layers small right operands of `//` and flattens them once the layer
-  # chain fills, so the flatten cost is what the chunking bounds.
+  # chain fills, so the flatten cost is what the levels bound; with two levels
+  # the chunk index of a 1 MB memory dominated it.
   chunkWords = 128;
+  groupChunks = 32;
+  groupWords = chunkWords * groupChunks;
   slotMask = chunkWords - 1;
   wordMask = u32Max;
-  byteShift = offset: pow2 (offset * 8);
+  # 256^n and 256^n - 1, looked up instead of computed on every access.
+  byteShift = offset: elemAt [ 1 256 65536 16777216 ] offset;
+  byteMask =
+    width:
+    elemAt [
+      0
+      255
+      65535
+      16777215
+      4294967295
+    ] width;
+
+  getChunk =
+    pages: idx: (pages.${toString (idx / groupWords)} or { }).${toString (idx / chunkWords)} or { };
 
   getWord =
     pages: idx:
-    (pages.${toString (idx / chunkWords)} or { }).${toString (builtins.bitAnd idx slotMask)} or 0;
+    ((pages.${toString (idx / groupWords)} or { }).${toString (idx / chunkWords)} or { })
+    .${toString idx} or 0;
 
-  # Words are forced before they are stored so that pages never hold thunks
-  # that retain older pages.
-  setWord =
-    pages: idx: value:
+  # Merges `words` into the chunk holding word `idx`. Words, chunks and groups
+  # are forced before they are stored so that pages never hold thunks that
+  # retain older pages.
+  mergeWords =
+    pages: idx: words:
     let
-      key = toString (idx / chunkWords);
-      chunk = (pages.${key} or { }) // {
-        ${toString (builtins.bitAnd idx slotMask)} = value;
+      groupKey = toString (idx / groupWords);
+      chunkKey = toString (idx / chunkWords);
+      group = pages.${groupKey} or { };
+      chunk = (group.${chunkKey} or { }) // words;
+      newGroup = group // {
+        ${chunkKey} = chunk;
       };
     in
-    builtins.seq value (builtins.seq chunk (pages // { ${key} = chunk; }));
+    builtins.seq chunk (builtins.seq newGroup (pages // { ${groupKey} = newGroup; }));
 
-  # Merges a two-level overlay into `base` chunk by chunk.
-  overlayPages =
-    base: overlay: base // builtins.mapAttrs (key: chunk: (base.${key} or { }) // chunk) overlay;
+  setWord =
+    pages: idx: value:
+    builtins.seq value (mergeWords pages idx { ${toString idx} = value; });
+
+  # Stores the even word `idx` and the word after it, which share a chunk.
+  setWordPair =
+    pages: idx: lo: hi:
+    builtins.seq lo (
+      builtins.seq hi (
+        mergeWords pages idx {
+          ${toString idx} = lo;
+          ${toString (idx + 1)} = hi;
+        }
+      )
+    );
+
+  # Merges an overlay into `base` level by level.
+  mergeLevel =
+    merge: base: overlay:
+    base // builtins.mapAttrs (key: value: merge (base.${key} or { }) value) overlay;
+  overlayPages = mergeLevel (mergeLevel (chunk: words: chunk // words));
 
   # Reads `width` (1..4) bytes starting at `offset` within word `idx`, spilling
   # into the next word when the access crosses a word boundary.
@@ -2201,7 +2245,7 @@ let
     let
       lo = getWord pages idx;
       shift = byteShift offset;
-      mask = pow2 (width * 8) - 1;
+      mask = byteMask width;
     in
     if offset + width <= 4 then
       builtins.bitAnd (lo / shift) mask
@@ -2214,7 +2258,7 @@ let
     let
       lo = getWord pages idx;
       shift = byteShift offset;
-      mask = pow2 (width * 8) - 1;
+      mask = byteMask width;
       v = builtins.bitAnd value mask;
       loBits = builtins.bitAnd (mask * shift) wordMask;
       newLo = lo - builtins.bitAnd lo loBits + builtins.bitAnd (v * shift) wordMask;
@@ -2232,6 +2276,8 @@ let
   # The load and store paths below run for every memory access, so they read
   # the state and check bounds inline instead of calling getMem, getPages and
   # checkAccess, and handle aligned whole words without loadSpan/storeSpan.
+  # Addresses are a u32 index plus a u32 offset, so only the upper bound needs
+  # checking.
   loadWidth =
     op: width: addr: st:
     let
@@ -2239,7 +2285,7 @@ let
       pages = mem.pages or { };
       offset = builtins.bitAnd addr 3;
     in
-    if addr < 0 || addr + width > (mem.pageCount or 1) * pageBytes then
+    if addr + width > (mem.pageCount or 1) * pageBytes then
       throw "wasm trap: ${op} out of bounds"
     else if offset == 0 && width == 4 then
       getWord pages (addr / 4)
@@ -2253,20 +2299,23 @@ let
       pages = mem.pages or { };
       offset = builtins.bitAnd addr 3;
       idx = addr / 4;
+      newPages =
+        if offset == 0 && width == 4 then
+          setWord pages idx (builtins.bitAnd value wordMask)
+        else
+          storeSpan pages idx offset width value;
     in
-    if addr < 0 || addr + width > (mem.pageCount or 1) * pageBytes then
+    if addr + width > (mem.pageCount or 1) * pageBytes then
       throw "wasm trap: ${op} out of bounds"
     else
-      st
-      // {
-        mem = mem // {
-          pages =
-            if offset == 0 && width == 4 then
-              setWord pages idx (builtins.bitAnd value wordMask)
-            else
-              storeSpan pages idx offset width value;
-        };
-      };
+      builtins.seq newPages (
+        st
+        // {
+          mem = mem // {
+            pages = newPages;
+          };
+        }
+      );
 
   getByteUnchecked = pages: addr: loadSpan pages (addr / 4) (builtins.bitAnd addr 3) 1;
 
@@ -2279,7 +2328,7 @@ let
       builtins.genList (i: getByteUnchecked pages (addr + i)) width
     );
 
-  # Writes a byte list with one chunk-wise overlay covering every touched word.
+  # Writes a byte list by merging one overlay into each touched chunk.
   storeBytes =
     op: bytes: addr: st:
     let
@@ -2299,35 +2348,25 @@ let
         + byteAtAddr (base + 2) * 65536
         + byteAtAddr (base + 3) * 16777216;
       firstChunk = firstWord / chunkWords;
-      chunkOverlay =
-        chunk:
+      # Words are read from the original pages, so chunks merge in any order.
+      mergeChunk =
+        acc: chunk:
         let
           from = if chunk == firstChunk then firstWord else chunk * chunkWords;
           to = if chunk == lastWord / chunkWords then lastWord else chunk * chunkWords + slotMask;
+          words = builtins.listToAttrs (
+            builtins.genList (i: {
+              name = toString (from + i);
+              value = wordAt (from + i);
+            }) (to - from + 1)
+          );
         in
-        builtins.listToAttrs (
-          builtins.genList (i: {
-            name = toString (builtins.bitAnd (from + i) slotMask);
-            value = wordAt (from + i);
-          }) (to - from + 1)
-        );
-      overlay = builtins.listToAttrs (
-        builtins.genList (
-          i:
-          let
-            chunk = firstChunk + i;
-          in
-          {
-            name = toString chunk;
-            value = chunkOverlay chunk;
-          }
-        ) (lastWord / chunkWords - firstChunk + 1)
+        builtins.deepSeq words (mergeWords acc from words);
+      newPages = builtins.foldl' mergeChunk pages (
+        builtins.genList (i: firstChunk + i) (lastWord / chunkWords - firstChunk + 1)
       );
-      newPages = overlayPages pages overlay;
     in
-    builtins.seq (checkAccess op len addr st) (
-      if len == 0 then st else builtins.deepSeq overlay (builtins.deepSeq newPages (setPages newPages st))
-    );
+    builtins.seq (checkAccess op len addr st) (if len == 0 then st else setPages newPages st);
 
   mem = rec {
     # wasm2nix:runtime-fn mem.load_u8(addr, st) -> value
@@ -2360,10 +2399,14 @@ let
         pages = mem.pages or { };
         idx = addr / 4;
         offset = builtins.bitAnd addr 3;
-        lo = if offset == 0 then getWord pages idx else loadSpan pages idx offset 4;
-        hi = if offset == 0 then getWord pages (idx + 1) else loadSpan pages (idx + 1) offset 4;
+        # An 8-aligned access reads both words from the same chunk.
+        aligned = builtins.bitAnd addr 7 == 0;
+        chunk = getChunk pages idx;
+        word = i: if aligned then chunk.${toString i} or 0 else getWord pages i;
+        lo = if offset == 0 then word idx else loadSpan pages idx offset 4;
+        hi = if offset == 0 then word (idx + 1) else loadSpan pages (idx + 1) offset 4;
       in
-      if addr < 0 || addr + 8 > (mem.pageCount or 1) * pageBytes then
+      if addr + 8 > (mem.pageCount or 1) * pageBytes then
         throw "wasm trap: load_i64 out of bounds"
       else if hi >= i32Sign then
         (hi - u32Mod) * u32Mod + lo
@@ -2393,20 +2436,25 @@ let
         lo = builtins.bitAnd value wordMask;
         # value - lo is a multiple of 2^32, so the division is exact.
         hi = builtins.bitAnd ((value - lo) / u32Mod) wordMask;
+        newPages =
+          if builtins.bitAnd addr 7 == 0 then
+            setWordPair pages idx lo hi
+          else if offset == 0 then
+            setWord (setWord pages idx lo) (idx + 1) hi
+          else
+            storeSpan (storeSpan pages idx offset 4 lo) (idx + 1) offset 4 hi;
       in
-      if addr < 0 || addr + 8 > (mem.pageCount or 1) * pageBytes then
+      if addr + 8 > (mem.pageCount or 1) * pageBytes then
         throw "wasm trap: store_i64 out of bounds"
       else
-        st
-        // {
-          mem = mem // {
-            pages =
-              if offset == 0 then
-                setWord (setWord pages idx lo) (idx + 1) hi
-              else
-                storeSpan (storeSpan pages idx offset 4 lo) (idx + 1) offset 4 hi;
-          };
-        };
+        builtins.seq newPages (
+          st
+          // {
+            mem = mem // {
+              pages = newPages;
+            };
+          }
+        );
     # wasm2nix:runtime-fn mem.store_f64(value, addr, st) -> state
     store_f64 = store_i64;
 
@@ -2663,6 +2711,34 @@ let
         in
         builtins.deepSeq newDstTable (setTable dstTableIndex newDstTable st);
     };
+
+  # Runs a loop's blocks from `entry` until one returns a done record. Every
+  # step is a jump record `{ block; args; st; }`. Unlike genericClosure, which
+  # retains every step and its state until the loop ends, foldl' keeps only the
+  # current record. foldl' cannot stop early, so rounds fold over lists of 2^k
+  # steps with k growing to 20: short loops waste few steps and long ones
+  # recurse once per million. Records are deep-forced between rounds of 1024 or
+  # more steps, which keeps lazily built state from piling up.
+  fuel = builtins.genList (k: range (pow2 k)) 21;
+  # wasm2nix:runtime-fn trampoline(blocks, entry) -> record
+  trampoline =
+    blocks: entry:
+    let
+      enter = r: builtins.foldl' (f: arg: f arg) (builtins.getAttr r.block blocks) r.args r.st;
+      # A loop that never touches the state passes `r.st` along unevaluated, so
+      # it is forced here to keep a chain of selects from building up.
+      step = r: _: if r.tag == "done" then r else builtins.seq r.st (enter r);
+      run =
+        k: r:
+        let
+          next = builtins.foldl' step r (elemAt fuel k);
+        in
+        if next.tag == "done" then
+          next
+        else
+          run (if k < 20 then k + 1 else k) (if k >= 10 then builtins.deepSeq next next else next);
+    in
+    run 0 entry;
 in
 {
   i32 = i32Bin;
@@ -2743,5 +2819,6 @@ in
     mem
     global
     table
+    trampoline
     ;
 }

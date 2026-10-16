@@ -7,6 +7,9 @@ pub const DEFAULT_RUNTIME_FILE_NAME: &str = "wasm2nix-rt.nix";
 /// Number of u32 words per memory chunk; must match `chunkWords` in `rt.nix`.
 pub const MEMORY_CHUNK_WORDS: u64 = 128;
 
+/// Number of chunks per memory group; must match `groupChunks` in `rt.nix`.
+pub const MEMORY_GROUP_CHUNKS: u64 = 32;
+
 #[must_use]
 pub const fn runtime_nix() -> &'static str {
     include_str!("../nix/rt.nix")
@@ -59,8 +62,9 @@ mod tests {
     }
 
     #[test]
-    fn memory_chunk_size_matches_runtime() {
+    fn memory_layout_matches_runtime() {
         assert!(runtime_nix().contains(&format!("chunkWords = {MEMORY_CHUNK_WORDS};")));
+        assert!(runtime_nix().contains(&format!("groupChunks = {MEMORY_GROUP_CHUNKS};")));
     }
 
     #[test]

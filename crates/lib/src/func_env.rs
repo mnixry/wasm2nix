@@ -342,14 +342,16 @@ impl FuncEnvironment for NixFuncEnvironment<'_> {
         });
 
         // Allow addressing up to the wasm32 maximum (4GiB); runtime will
-        // enforce actual size.
+        // enforce actual size. The 2 GiB guard region, as in wasmtime, lets
+        // Cranelift skip its own bounds checks for offsets below it: the
+        // runtime bounds-checks every access anyway.
         let bound = WASM32_MAX_SIZE;
 
         Ok(self.heaps.push(HeapData {
             base,
             min_size: 0,
             max_size: Some(bound),
-            offset_guard_size: 0,
+            offset_guard_size: 0x8000_0000,
             style: HeapStyle::Static { bound },
             index_type: I32,
             memory_type: None,

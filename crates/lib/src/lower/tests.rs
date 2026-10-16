@@ -102,7 +102,7 @@ fn generated_module_keeps_compat_exports_and_instantiate() {
     assert!(nix.contains("exports = exports;"));
     assert!(nix.contains("__wasm2nix ="));
     assert!(
-        !nix.contains("builtins.genericClosure"),
+        !nix.contains(&RuntimeFunction::Trampoline.expr().render()),
         "loop-free functions call their blocks directly"
     );
 }
@@ -123,13 +123,43 @@ fn generated_module_trampolines_loop_back_edges() {
         "#,
     );
 
-    assert!(nix.contains("builtins.genericClosure"));
-    assert!(nix.contains("builtins.deepSeq nextKeyed nextKeyed"));
+    assert!(nix.contains(&RuntimeFunction::Trampoline.expr().render()));
     assert!(nix.contains("tag = \"jump\";"));
     assert!(
         !nix.contains("args = [ ("),
         "loop-carried values stay forced bindings"
     );
+}
+
+#[test]
+fn generated_module_leaves_bounds_checks_and_full_addresses_to_the_runtime() {
+    let nix = lower_wat(
+        r#"
+        (module
+          (memory 1)
+          (func (export "load") (param i32) (result i32)
+            (i32.load offset=1000000 (local.get 0))))
+        "#,
+    );
+    assert!(
+        !nix.contains("heap_oob"),
+        "Cranelift's bounds check is elided"
+    );
+    assert!(
+        nix.contains("(v0 + 1000000)"),
+        "index + offset is not wrapped"
+    );
+
+    // Offsets beyond the guard region keep Cranelift's explicit check.
+    let nix = lower_wat(
+        r#"
+        (module
+          (memory 1)
+          (func (export "load") (param i32) (result i32)
+            (i32.load offset=4294967295 (local.get 0))))
+        "#,
+    );
+    assert!(nix.contains("heap_oob"));
 }
 
 #[test]

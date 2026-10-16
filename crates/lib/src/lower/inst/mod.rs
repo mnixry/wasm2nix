@@ -6,6 +6,8 @@ mod compare;
 mod convert;
 mod memory;
 
+use std::collections::BTreeSet;
+
 pub(super) use arith::is_bit_op;
 use cranelift_codegen::ir::{self, Inst, InstructionData, Opcode, types::I8};
 
@@ -99,8 +101,9 @@ impl LoweredInst {
 
 pub(super) fn lower_inst(
     module: &NixModule, func: &ir::Function, inst: Inst, st_name: &str, vmctx: ir::Value,
+    offset_adds: &BTreeSet<Inst>,
 ) -> Result<LoweredInst> {
-    InstCtx::new(module, func, inst, st_name, vmctx).lower()
+    InstCtx::new(module, func, inst, st_name, vmctx, offset_adds).lower()
 }
 
 struct InstCtx<'a> {
@@ -112,12 +115,13 @@ struct InstCtx<'a> {
     results: &'a [ir::Value],
     st_name: &'a str,
     vmctx: ir::Value,
+    offset_adds: &'a BTreeSet<Inst>,
 }
 
 impl<'a> InstCtx<'a> {
     fn new(
         module: &'a NixModule, func: &'a ir::Function, inst: Inst, st_name: &'a str,
-        vmctx: ir::Value,
+        vmctx: ir::Value, offset_adds: &'a BTreeSet<Inst>,
     ) -> Self {
         let data = &func.dfg.insts[inst];
         let op = data.opcode();
@@ -131,6 +135,7 @@ impl<'a> InstCtx<'a> {
             results,
             st_name,
             vmctx,
+            offset_adds,
         }
     }
 

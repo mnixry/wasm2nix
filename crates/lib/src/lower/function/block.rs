@@ -24,6 +24,7 @@ pub(super) struct BlockLowering<'a> {
     pub(super) func: &'a ir::Function,
     pub(super) vmctx: ir::Value,
     pub(super) cfg: &'a ControlFlow,
+    pub(super) offset_adds: &'a BTreeSet<Inst>,
     /// Single-edge blocks that were called instead of inlined because the
     /// nesting limit was reached.
     pub(super) spilled: RefCell<Vec<Block>>,
@@ -99,7 +100,14 @@ impl BlockLowering<'_> {
         let mut st_name = "st".to_string();
 
         for inst in insts {
-            let lowered = lower_inst(self.module, self.func, inst, &st_name, self.vmctx)?;
+            let lowered = lower_inst(
+                self.module,
+                self.func,
+                inst,
+                &st_name,
+                self.vmctx,
+                self.offset_adds,
+            )?;
             if let Some(step) = lowered.step {
                 steps.push(step);
             }

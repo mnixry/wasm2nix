@@ -1,6 +1,7 @@
 //! Lowering of one function: control-flow analysis, blocks, terminators and
 //! the single-use inliner.
 
+mod address;
 mod block;
 mod cfg;
 mod inline;
@@ -10,6 +11,7 @@ use std::cell::RefCell;
 
 use cranelift_codegen::ir::{self, ArgumentPurpose, Block};
 use snafu::prelude::*;
+use wasm2nix_runtime::RuntimeFunction;
 
 use crate::{
     lower::{
@@ -22,7 +24,6 @@ use crate::{
     translator::NixModule,
 };
 
-#[allow(clippy::too_many_lines)]
 pub(super) fn lower_function(
     module: &NixModule, func_index: u32, func: &ir::Function,
 ) -> Result<Expr> {
@@ -49,12 +50,14 @@ pub(super) fn lower_function(
     let cfg = ControlFlow::analyze(func, entry, vmctx);
 
     // Blocks call their forward successors directly and return either a done
-    // record or, on a loop back edge, a jump record for the trampoline below.
+    // record or, on a loop back edge, a jump record for `rt.trampoline`.
+    let offset_adds = address::offset_adds(func);
     let lowering = BlockLowering {
         module,
         func,
         vmctx,
         cfg: &cfg,
+        offset_adds: &offset_adds,
         spilled: RefCell::new(Vec::new()),
     };
     let blocks_attrset = Expr::attrset(true, lowering.lower_blocks(entry)?);
@@ -89,37 +92,14 @@ pub(super) fn lower_function(
         ));
     }
 
-    let entry_with_key = lower_jump_record(entry, entry_args, nix!(st), Some(0));
-    let apply_args = nix!(func: args: builtins."foldl'"(f: arg: f(arg), func, args));
-    let apply_block = nix!(block: args: blockSt:
-        (applyArgs(builtins.getAttr(block, blocks), args))(blockSt)
-    );
-    let force_step = nix!(nextKey == #{nix!(nextKey / 1024)} * 1024);
-    let step_next = nix!(let
-        next = applyBlock(current.block, current.args, current.st);
-        nextKey = current.key + 1;
-        nextKeyed = merge(next, { key = nextKey; });
-        forceStep = #{force_step};
-    in if forceStep then builtins.deepSeq(nextKeyed, nextKeyed) else nextKeyed);
-    let step_item =
-        nix!(current: if current.tag == "done" then [] else #{Expr::list(vec![step_next])});
-    let trace_expr = nix!(builtins.genericClosure({
-        startSet = [#{entry_with_key}];
-        operator = stepItem;
-    }));
-    let result_index = nix!(builtins.length(trace) - 1);
-    let body = nix!(let
-        blocks = #{blocks_attrset};
-        applyArgs = #{apply_args};
-        applyBlock = #{apply_block};
-        stepItem = #{step_item};
-        trace = #{trace_expr};
-        result = builtins.elemAt(trace, #{result_index});
-    in {
-        st = result.st;
-        results = result.results;
-    });
-    Ok(lambda_chain(&params, body))
+    let entry_record = lower_jump_record(entry, entry_args, nix!(st));
+    let run = RuntimeFunction::Trampoline.call(vec![nix!(blocks), entry_record]);
+    Ok(lambda_chain(
+        &params,
+        nix!(let
+            blocks = #{blocks_attrset};
+        in #{run}),
+    ))
 }
 
 fn block_name(b: Block) -> String {

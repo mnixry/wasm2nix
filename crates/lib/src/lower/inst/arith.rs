@@ -89,6 +89,13 @@ impl InstCtx<'_> {
             return Ok(self.pure_bind(out, e));
         }
 
+        // Heap addresses start with `iadd heap_base, index`, and the base is 0.
+        if self.op == Opcode::Iadd && out_ty == I32 && self.const_int(args[0]) == Some(0) {
+            return Ok(self.pure_bind(out, b));
+        }
+        if self.offset_adds.contains(&self.inst) {
+            return Ok(self.pure_bind(out, nix!(#{a} + #{b})));
+        }
         if let Some(e) = inline_int_binary(
             self.op,
             out_ty,
@@ -97,9 +104,6 @@ impl InstCtx<'_> {
             self.const_int(args[1]),
         ) {
             return Ok(self.pure_bind(out, e));
-        }
-        if self.op == Opcode::Iadd && out_ty == I32 && self.const_int(args[0]) == Some(0) {
-            return Ok(self.pure_bind(out, b));
         }
         let Some(function) = binary_function(self.op, out_ty) else {
             return self.unsupported_opcode();

@@ -12,6 +12,75 @@
     expected = { };
   };
 
+  # A counting loop that outlasts several inner fuel rounds of the trampoline.
+  test_trampoline_runs_until_done = {
+    expr =
+      (rt.trampoline
+        {
+          loop =
+            n: st:
+            if n == 5000 then
+              {
+                tag = "done";
+                inherit st;
+                results = [ n ];
+              }
+            else
+              {
+                tag = "jump";
+                block = "loop";
+                args = [ (n + 1) ];
+                inherit st;
+              };
+        }
+        {
+          tag = "jump";
+          block = "loop";
+          args = [ 0 ];
+          st = { };
+        }
+      ).results;
+    expected = [ 5000 ];
+  };
+  # A loop that never touches its state, run past the 2^17-step round after
+  # which the trampoline deep-forces the record.
+  test_trampoline_long_loop_keeps_state_forced = {
+    expr =
+      (rt.trampoline
+        {
+          loop =
+            n: st:
+            if n == 300000 then
+              {
+                tag = "done";
+                inherit st;
+                results = [ n ];
+              }
+            else
+              {
+                tag = "jump";
+                block = "loop";
+                args = [ (n + 1) ];
+                inherit st;
+              };
+        }
+        {
+          tag = "jump";
+          block = "loop";
+          args = [ 0 ];
+          st = { };
+        }
+      ).results;
+    expected = [ 300000 ];
+  };
+  # Stores with no loads in between must not leave a chain of pending updates.
+  test_mem_store_run_without_loads_stays_shallow = {
+    expr = rt.mem.load_u8 19999 (
+      builtins.foldl' (st: addr: rt.mem.store_u8 1 addr st) st0 (builtins.genList (i: i) 20000)
+    );
+    expected = 1;
+  };
+
   # i32.add (wasm spec: i32.add)
   test_i32_add_0_0 = {
     expr = rt.i32.add 0 0;
@@ -418,6 +487,72 @@
       in
       rt.mem.load_u16 0 st1;
     expected = 65535;
+  };
+  test_mem_aligned_i64_round_trips_through_both_words = {
+    expr =
+      let
+        st1 = rt.mem.store_i64 (-4294967294) 8 st0;
+      in
+      [
+        (rt.mem.load_i64 8 st1)
+        (rt.mem.load_i32 8 st1)
+        (rt.mem.load_i32 12 st1)
+      ];
+    expected = [
+      (-4294967294)
+      2
+      4294967295
+    ];
+  };
+  # Words 127 and 128 sit in different chunks.
+  test_mem_i64_across_chunks_round_trips = {
+    expr =
+      let
+        st1 = rt.mem.store_i64 (-4294967294) 508 st0;
+      in
+      [
+        (rt.mem.load_i64 508 st1)
+        (rt.mem.load_i32 512 st1)
+      ];
+    expected = [
+      (-4294967294)
+      4294967295
+    ];
+  };
+  # Words 4095 and 4096 sit in different groups.
+  test_mem_i64_across_groups_round_trips = {
+    expr =
+      let
+        st1 = rt.mem.store_i64 (-4294967294) 16380 st0;
+      in
+      [
+        (rt.mem.load_i64 16380 st1)
+        (rt.mem.load_i32 16384 st1)
+      ];
+    expected = [
+      (-4294967294)
+      4294967295
+    ];
+  };
+  test_mem_store_bytes_across_groups_keeps_neighbours = {
+    expr =
+      let
+        st1 = rt.mem.store_i32 4294967295 16376 st0;
+        st2 = rt.mem.store_bytes [ 1 2 3 4 5 6 ] 16379 st1;
+      in
+      rt.mem.load_bytes 16376 10 st2;
+    expected = [
+      255
+      255
+      255
+      1
+      2
+      3
+      4
+      5
+      6
+      0
+    ];
   };
 
   # Unaligned i32 load within a page should work (wasm spec allows unaligned accesses).

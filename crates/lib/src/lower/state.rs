@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use cranelift_codegen::ir::{self};
 use cranelift_entity::EntityRef;
-use wasm2nix_runtime::{MEMORY_CHUNK_WORDS, RuntimeFunction};
+use wasm2nix_runtime::{MEMORY_CHUNK_WORDS, MEMORY_GROUP_CHUNKS, RuntimeFunction};
 
 use crate::{
     lower::{
@@ -62,8 +62,9 @@ fn lower_initial_memory(module: &NixModule) -> Expr {
     }
 }
 
-/// Lays out active data segments as the runtime's two-level page attrset:
-/// chunks of [`MEMORY_CHUNK_WORDS`] little-endian u32 words.
+/// Lays out active data segments as the runtime's three-level page attrset:
+/// groups of [`MEMORY_GROUP_CHUNKS`] chunks of [`MEMORY_CHUNK_WORDS`]
+/// little-endian u32 words, each level keyed by its global index.
 fn lower_initial_memory_pages(module: &NixModule) -> Expr {
     let mut words: BTreeMap<u64, u32> = BTreeMap::new();
 
@@ -83,23 +84,29 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
         }
     }
 
-    let mut chunks: BTreeMap<u64, Vec<(AttrKey, Expr)>> = BTreeMap::new();
+    let mut groups: BTreeMap<u64, BTreeMap<u64, Vec<(AttrKey, Expr)>>> = BTreeMap::new();
     for (idx, word) in words {
-        chunks.entry(idx / MEMORY_CHUNK_WORDS).or_default().push((
-            AttrKey::string((idx % MEMORY_CHUNK_WORDS).to_string()),
-            Expr::int(i64::from(word)),
-        ));
+        let chunk = idx / MEMORY_CHUNK_WORDS;
+        groups
+            .entry(chunk / MEMORY_GROUP_CHUNKS)
+            .or_default()
+            .entry(chunk)
+            .or_default()
+            .push((AttrKey::string(idx.to_string()), Expr::int(i64::from(word))));
     }
+    keyed_attrset(groups.into_iter().map(|(group, chunks)| {
+        let chunks = chunks
+            .into_iter()
+            .map(|(chunk, words)| (chunk, Expr::attrset(false, words)));
+        (group, keyed_attrset(chunks))
+    }))
+}
+
+fn keyed_attrset(entries: impl Iterator<Item = (u64, Expr)>) -> Expr {
     Expr::attrset(
         false,
-        chunks
-            .into_iter()
-            .map(|(chunk, slots)| {
-                (
-                    AttrKey::string(chunk.to_string()),
-                    Expr::attrset(false, slots),
-                )
-            })
+        entries
+            .map(|(key, value)| (AttrKey::string(key.to_string()), value))
             .collect(),
     )
 }
