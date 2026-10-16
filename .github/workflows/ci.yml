@@ -12,7 +12,7 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@main
-      - uses: NixOS/nix-installer-action@main
+      - uses: DeterminateSystems/nix-installer-action@main
       - uses: Mic92/niks3-action@main
         with:
           server-url: https://${{ secrets.NIKS3_SERVER_HOST }}
