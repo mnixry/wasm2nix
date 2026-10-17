@@ -15,10 +15,7 @@
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    determinate = {
-      url = "https://flakehub.com/f/DeterminateSystems/nix-src/*";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    determinate.url = "https://flakehub.com/f/DeterminateSystems/nix-src/*";
     crane.url = "github:ipetkov/crane";
   };
 
@@ -131,9 +128,9 @@
                   )
                 )
                 {
-                  "NixOS/nix" = pkgs.nix;
-                  "lix-project/lix" = pkgs.lix;
-                  "DeterminateSystems/nix-src" = inputs.determinate.packages.${system}.default;
+                  "NixOS/nix" = pkgs.nixVersions.latest;
+                  "lix-project/lix" = pkgs.lixPackageSets.latest.lix;
+                  "DeterminateSystems/nix-src" = inputs.determinate.packages.${system}.nix-cli;
                 }
           );
           packages.default = craneLib.buildPackage (
