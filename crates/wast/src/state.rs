@@ -21,11 +21,11 @@ use crate::{
         TargetMissingStateSnafu, TranslateWasmSnafu, UnknownModuleSnafu,
         UnsupportedAssertReturnResultSnafu, UnsupportedInvokeArgumentSnafu,
     },
-    support_core::{
+    eval::{eval_initial_state, eval_instantiate, nix_u64, state_expr},
+    script::{
         HarnessContext, HarnessModule, active_initializer_traps, validate_imports_for_linking,
         write_generated_module,
     },
-    support_eval::{eval_initial_state, eval_instantiate, nix_u64, state_expr},
 };
 
 pub fn apply_trapping_module_side_effects(

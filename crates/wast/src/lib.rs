@@ -1,12 +1,12 @@
 //! WAST specification test harness package.
 
 pub mod error;
-mod support_core;
-mod support_eval;
-mod support_state;
+mod eval;
+mod script;
+mod state;
 
 pub use error::{Error, Result};
-pub use support_core::{WastHarness, WastHarnessOptions, run_wast_script};
+pub use script::{WastHarness, WastHarnessOptions, run_wast_script};
 
 #[must_use]
 pub const fn harness_nix() -> &'static str {

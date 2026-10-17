@@ -14,8 +14,8 @@ use crate::{
         DecodeEvalJsonSnafu, EvalNixFailedSnafu, EvalNixSnafu, NixIntegerOverflowSnafu, Result,
         UnknownModuleSnafu,
     },
-    support_core::{HarnessContext, HarnessModule},
-    support_state::{json_to_nix_expr, wast_arg_to_nix},
+    script::{HarnessContext, HarnessModule},
+    state::{json_to_nix_expr, wast_arg_to_nix},
 };
 
 pub struct InvokeResult {

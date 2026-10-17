@@ -27,11 +27,11 @@ use crate::{
         Result, TranslateWasmSnafu, UnknownImportModuleSnafu, UnknownImportSnafu,
         UnknownModuleSnafu, WriteTempFileSnafu,
     },
-    support_eval::{
+    eval::{
         eval_get, eval_instantiate, eval_invoke, eval_nix_json, nix_optional_u64, nix_u64,
         state_expr,
     },
-    support_state::{
+    state::{
         apply_trapping_module_side_effects, expected_results_json, json_number_to_u64,
         merge_imported_table_initializers, results_match, sync_global_imports_from_targets,
         sync_global_imports_to_targets, sync_memory_imports_to_targets,
