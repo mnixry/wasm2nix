@@ -20,7 +20,6 @@ wast.workspace             = true
 [build-dependencies]
 proc-macro2.workspace = true
 quote.workspace       = true
-snafu.workspace       = true
 
 [lints]
 workspace = true

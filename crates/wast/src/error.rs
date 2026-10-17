@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use snafu::Snafu;
 
 #[derive(Debug, Snafu)]
@@ -18,25 +20,23 @@ impl From<Error> for HarnessResolverError {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
+    #[snafu(display("{count} WAST case(s) failed:\n{report}"))]
+    Failures { count: usize, report: String },
+
+    #[snafu(display("{at}: {source}"))]
+    Directive {
+        at: String,
+        #[snafu(source(from(Error, Box::new)))]
+        source: Box<Self>,
+    },
+
     #[snafu(display("failed to create temporary directory"))]
     CreateTempDir { source: std::io::Error },
 
-    #[snafu(display("failed to create temporary {kind} Nix file"))]
-    CreateTempFile {
-        kind: String,
+    #[snafu(display("failed to write {}", path.display()))]
+    WriteFile {
+        path: PathBuf,
         source: std::io::Error,
-    },
-
-    #[snafu(display("failed to write temporary {kind} Nix file"))]
-    WriteTempFile {
-        kind: String,
-        source: std::io::Error,
-    },
-
-    #[snafu(display("failed to keep temporary {kind} Nix file"))]
-    KeepTempFile {
-        kind: String,
-        source: tempfile::PersistError,
     },
 
     #[snafu(display("failed to parse WAST script"))]
@@ -76,21 +76,8 @@ pub enum Error {
     #[snafu(display("failed to decode nix eval JSON"))]
     DecodeEvalJson { source: serde_json::Error },
 
-    #[snafu(display("failed to encode JSON as Nix expression"))]
+    #[snafu(display("failed to encode JSON"))]
     EncodeJson { source: serde_json::Error },
-
-    #[snafu(display("directive {directive_index}: {source}"))]
-    Directive {
-        directive_index: usize,
-        source: Box<Self>,
-    },
-
-    #[snafu(display("directive {directive_index}: invoke {name} failed: {source}"))]
-    Invoke {
-        directive_index: usize,
-        name: String,
-        source: Box<Self>,
-    },
 
     #[snafu(display("module access before module"))]
     ModuleAccessBeforeModule,
@@ -119,68 +106,35 @@ pub enum Error {
         field_name: String,
     },
 
+    #[snafu(display("imported table {module_name}.{field_name} has no table export"))]
+    MissingTableExport {
+        module_name: String,
+        field_name: String,
+    },
+
     #[snafu(display("unsupported imported offset global {module_name}.{field_name}"))]
     UnsupportedImportedOffsetGlobal {
         module_name: String,
         field_name: String,
     },
 
-    #[snafu(display("module instantiation trapped during active segment initialization"))]
+    #[snafu(display("module instantiation traps during active segment initialization"))]
     ModuleInstantiationTrapped,
 
-    #[snafu(display("assert_trap module instantiated successfully"))]
-    TrapModuleInstantiated,
-
-    #[snafu(display("assert_return module execution is not supported by this harness slice"))]
+    #[snafu(display("assert_return module execution is not supported by this harness"))]
     UnsupportedAssertReturnModuleExecution,
 
     #[snafu(display("unsupported WAST directive"))]
     UnsupportedWastDirective,
 
-    #[snafu(display("assert_return mismatch: expected {expected}, got {actual}"))]
-    AssertReturnMismatch {
-        expected: String,
-        actual: serde_json::Value,
-    },
-
-    #[snafu(display("assert_trap invoke {name} did not trap"))]
-    InvokeDidNotTrap { name: String },
-
-    #[snafu(display("assert_trap get {global} did not trap"))]
-    GetDidNotTrap { global: String },
-
-    #[snafu(display("{assertion} module was accepted"))]
-    ModuleAccepted { assertion: &'static str },
-
-    #[snafu(display("assert_invalid module translated successfully"))]
-    InvalidModuleTranslated,
-
-    #[snafu(display("assert_unlinkable module instantiated successfully"))]
-    UnlinkableModuleInstantiated,
-
-    #[snafu(display("assert_exhaustion invoke {name} did not fail"))]
-    ExhaustionDidNotFail { name: String },
-
-    #[snafu(display("unsupported invoke argument for this harness slice"))]
+    #[snafu(display("unsupported invoke argument"))]
     UnsupportedInvokeArgument,
 
-    #[snafu(display("unsupported assert_return result for this harness slice"))]
+    #[snafu(display("unsupported assert_return result"))]
     UnsupportedAssertReturnResult,
 
-    #[snafu(display("NaN patterns must be matched by predicate"))]
-    NanPatternRequiresPredicate,
-
-    #[snafu(display("actual results must be a JSON array"))]
-    ActualResultsNotArray,
-
-    #[snafu(display("expected result array"))]
-    ExpectedResultArray,
-
-    #[snafu(display("expected at least one result"))]
-    ExpectedAtLeastOneResult,
-
-    #[snafu(display("expected numeric result"))]
-    ExpectedNumericResult,
+    #[snafu(display("expected a non-empty result array"))]
+    ExpectedResult,
 
     #[snafu(display("expected integer result"))]
     ExpectedIntegerResult,
@@ -190,33 +144,6 @@ pub enum Error {
 
     #[snafu(display("Nix integer literal overflow for {value}"))]
     NixIntegerOverflow { value: u64 },
-
-    #[snafu(display("target module {key} has no instantiated state"))]
-    TargetMissingState { key: String },
-
-    #[snafu(display("source module {key} has no instantiated state"))]
-    SourceMissingState { key: String },
-
-    #[snafu(display("imported table {module_name}.{field_name} has no table export"))]
-    MissingTableExport {
-        module_name: String,
-        field_name: String,
-    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-pub(crate) fn directive<T>(directive_index: usize, result: Result<T>) -> Result<T> {
-    result.map_err(|source| Error::Directive {
-        directive_index,
-        source: Box::new(source),
-    })
-}
-
-pub(crate) fn invoke<T>(directive_index: usize, name: &str, result: Result<T>) -> Result<T> {
-    result.map_err(|source| Error::Invoke {
-        directive_index,
-        name: name.to_string(),
-        source: Box::new(source),
-    })
-}

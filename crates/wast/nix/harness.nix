@@ -23,6 +23,14 @@ let
     if builtins.hasAttr name attrs then builtins.getAttr name attrs else default;
 
   index = value: builtins.toString value;
+
+  # Trace markers the harness reads back from Nix's JSON log.
+  marker =
+    event: id:
+    builtins.toJSON {
+      wast = event;
+      inherit id;
+    };
 in
 rec {
   # Test-only imports for WebAssembly spec WAST files. This file is deliberately
@@ -185,16 +193,32 @@ rec {
       };
     };
 
-  syncMemoryState =
-    {
-      dstSt,
-      srcSt,
-      srcMemoryIndex ? 0,
-    }:
-    dstSt // { mem = srcSt.mem; };
+  syncMemoryState = { dstSt, srcSt }: dstSt // { mem = srcSt.mem; };
 
-  fail = builtins.abort;
-  trace = builtins.trace;
-  toJSON = builtins.toJSON;
-  fromJSON = builtins.fromJSON;
+  # Runs one batched step. Traps are `throw`s, which `tryEval` catches; the
+  # step/done traces locate a step whose failure aborts the whole evaluation.
+  attempt =
+    id: value:
+    let
+      result = builtins.tryEval (builtins.deepSeq value value);
+    in
+    builtins.trace (marker "step" id) (builtins.seq result (builtins.trace (marker "done" id) result));
+
+  # `attempt` without `tryEval`, to surface why a step failed.
+  unguarded =
+    id: value:
+    builtins.trace (marker "step" id) (
+      builtins.deepSeq value {
+        success = true;
+        inherit value;
+      }
+    );
+
+  # A module state forced for output, or null when it cannot be evaluated.
+  settle =
+    st:
+    let
+      result = builtins.tryEval (builtins.deepSeq st st);
+    in
+    if result.success then result.value else null;
 }
