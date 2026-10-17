@@ -12,7 +12,11 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@main
-      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: NixOS/nix-installer-action@main
+        with:
+          extra-conf: |
+            access-tokens = github.com=${{ github.token }}
+            extra-substituters = https://install.determinate.systems?trusted=true
       - uses: Mic92/niks3-action@main
         with:
           server-url: https://${{ secrets.NIKS3_SERVER_HOST }}
