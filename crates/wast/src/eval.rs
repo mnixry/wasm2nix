@@ -3,7 +3,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -17,8 +17,8 @@ use wast::{WastArg, core::WastArgCore};
 use crate::{
     error::{
         CreateTempDirSnafu, DecodeEvalJsonSnafu, EncodeJsonSnafu, EvalNixFailedSnafu, EvalNixSnafu,
-        NixIntegerOverflowSnafu, Result, UnknownModuleSnafu, UnsupportedInvokeArgumentSnafu,
-        WriteFileSnafu,
+        InvalidEvalCmdSnafu, NixIntegerOverflowSnafu, Result, UnknownModuleSnafu,
+        UnsupportedInvokeArgumentSnafu, WriteFileSnafu,
     },
     expect::Expected,
     script::{HarnessModule, resolve_alias},
@@ -27,6 +27,20 @@ use crate::{
 /// Steps per `nix eval`. Every step's state stays reachable until the
 /// evaluation ends, so this bounds evaluator memory.
 pub const MAX_BATCH_STEPS: usize = 1024;
+
+/// Overrides [`DEFAULT_EVAL_CMD`] with a shell-quoted command, so
+/// other Nix implementations can run the suite.
+const EVAL_CMD_VAR: &str = "WASM2NIX_TEST_EVAL_CMD";
+
+/// The `nix eval` invocation, before the flags the output parsing relies on.
+const DEFAULT_EVAL_CMD: &[&str] = &[
+    "nix",
+    "--extra-experimental-features",
+    "nix-command flakes",
+    "eval",
+    "--store",
+    "dummy://",
+];
 
 /// The Nix files of one script run: the embedded runtime and harness, the
 /// generated modules, settled states, and the evaluated program.
@@ -89,10 +103,17 @@ impl Nix {
         let program = Expr::let_in(all, nix!(builtins.toJSON(#{body})));
         let path = self.dir.path().join("eval.nix");
         write_file(&path, &program.render())?;
-        let output = Command::new("nix")
-            .args(["--extra-experimental-features", "nix-command flakes"])
-            .args(["eval", "--store", "dummy://", "--raw", "--impure"])
-            .args(["--log-format", "internal-json", "-f"])
+        let cmd = env::var(EVAL_CMD_VAR).map_or_else(
+            |_| Some(DEFAULT_EVAL_CMD.iter().copied().map(Into::into).collect()),
+            |cmd| shlex::split(&cmd),
+        );
+        let (program, args) = cmd
+            .as_deref()
+            .and_then(<[String]>::split_first)
+            .context(InvalidEvalCmdSnafu)?;
+        let output = Command::new(program)
+            .args(args)
+            .args(["--raw", "--impure", "--log-format", "internal-json", "-f"])
             .arg(&path)
             .output()
             .context(EvalNixSnafu)?;

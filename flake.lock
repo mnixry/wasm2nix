@@ -131,6 +131,29 @@
         "url": "https://flakehub.com/f/cachix/git-hooks.nix/0.1.941"
       }
     },
+    "iets": {
+      "inputs": {
+        "crane": [
+          "crane"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1792282487,
+        "narHash": "sha256-1W+Kg/pviKwFxCzWAMr5uRJ+OMrMASP98Me/J+vyxKQ=",
+        "owner": "numtide",
+        "repo": "iets",
+        "rev": "79c4346887c450eb684bb66402cb16fd5c9bbd77",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "iets",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1787962033,
@@ -198,6 +221,7 @@
         "crane": "crane",
         "determinate": "determinate",
         "flake-parts": "flake-parts_2",
+        "iets": "iets",
         "nixpkgs": "nixpkgs_2",
         "rust-overlay": "rust-overlay",
         "treefmt-nix": "treefmt-nix"

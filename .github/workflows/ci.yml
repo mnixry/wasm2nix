@@ -16,7 +16,7 @@ jobs:
         with:
           extra-conf: |
             access-tokens = github.com=${{ github.token }}
-            extra-substituters = https://install.determinate.systems?trusted=true
+            extra-substituters = https://install.determinate.systems?trusted=true https://cache.numtide.com?trusted=true
       - uses: Mic92/niks3-action@main
         with:
           server-url: https://${{ secrets.NIKS3_SERVER_HOST }}

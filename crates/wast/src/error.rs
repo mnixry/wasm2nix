@@ -67,6 +67,9 @@ pub enum Error {
         source: wasm2nix::instantiation::InstantiationError<HarnessResolverError>,
     },
 
+    #[snafu(display("WASM2NIX_TEST_EVAL_CMD is not a non-empty shell command"))]
+    InvalidEvalCmd,
+
     #[snafu(display("failed to spawn nix eval"))]
     EvalNix { source: std::io::Error },
 

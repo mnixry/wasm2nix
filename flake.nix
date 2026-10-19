@@ -17,6 +17,11 @@
     };
     determinate.url = "https://flakehub.com/f/DeterminateSystems/nix-src/*";
     crane.url = "github:ipetkov/crane";
+    iets = {
+      url = "github:numtide/iets";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.crane.follows = "crane";
+    };
   };
 
   outputs =
@@ -116,21 +121,19 @@
             //
               lib.mapAttrs'
                 (
-                  name: nixImpl:
+                  name: args:
                   lib.nameValuePair "tests@${name}" (
-                    craneLib.cargoNextest (
-                      craneCommonArgs
-                      // {
-                        inherit cargoArtifacts;
-                        nativeBuildInputs = [ nixImpl ];
-                      }
-                    )
+                    craneLib.cargoNextest (craneCommonArgs // { inherit cargoArtifacts; } // args)
                   )
                 )
                 {
-                  "NixOS/nix" = pkgs.nixVersions.latest;
-                  "lix-project/lix" = pkgs.lixPackageSets.latest.lix;
-                  "DeterminateSystems/nix-src" = inputs.determinate.packages.${system}.nix-cli;
+                  "NixOS/nix".nativeBuildInputs = [ pkgs.nixVersions.latest ];
+                  "lix-project/lix".nativeBuildInputs = [ pkgs.lixPackageSets.latest.lix ];
+                  "DeterminateSystems/nix-src".nativeBuildInputs = [ inputs.determinate.packages.${system}.default ];
+                  "numtide/iets" = {
+                    nativeBuildInputs = [ inputs.iets.packages.${system}.default ];
+                    WASM2NIX_TEST_EVAL_CMD = "iets nix --extra-experimental-features 'nix-command flakes' eval --store unix:///nonexistent";
+                  };
                 }
           );
           packages.default = craneLib.buildPackage (
