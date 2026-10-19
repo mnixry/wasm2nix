@@ -84,6 +84,7 @@
                 package = rustfmt;
               };
               programs.yamlfmt.enable = true;
+              programs.actionlint.enable = true;
             };
           devShells.default = pkgs.mkShell {
             inputsFrom = [ config.treefmt.build.devShell ];
@@ -123,7 +124,11 @@
                 (
                   name: args:
                   lib.nameValuePair "tests@${name}" (
-                    craneLib.cargoNextest (craneCommonArgs // { inherit cargoArtifacts; } // args)
+                    (craneLib.cargoNextest (craneCommonArgs // { inherit cargoArtifacts; } // args)).overrideAttrs (
+                      { pname, ... }: {
+                        pname = "${pname}-${name}";
+                      }
+                    )
                   )
                 )
                 {
@@ -132,7 +137,7 @@
                   "DeterminateSystems/nix-src".nativeBuildInputs = [ inputs.determinate.packages.${system}.default ];
                   "numtide/iets" = {
                     nativeBuildInputs = [ inputs.iets.packages.${system}.default ];
-                    WASM2NIX_TEST_EVAL_CMD = "iets nix --extra-experimental-features 'nix-command flakes' eval --store unix:///nonexistent";
+                    env.WASM2NIX_TEST_EVAL_CMD = "iets nix --extra-experimental-features 'nix-command flakes' eval --store unix:///nonexistent";
                   };
                 }
           );

@@ -25,4 +25,4 @@ jobs:
           path: ~/.cache/nix
           key: nix-cache-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
           restore-keys: nix-cache-${{ runner.os }}-${{ runner.arch }}-
-      - run: nix flake check --print-build-logs
+      - run: nix flake check --print-build-logs --max-jobs 1
