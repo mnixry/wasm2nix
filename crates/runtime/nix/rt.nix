@@ -2481,7 +2481,9 @@ let
     # wasm2nix:runtime-fn mem.fill(dst, value, len, st) -> state
     fill =
       dst: value: len: st:
-      storeBytes "memory.fill" (builtins.genList (_: builtins.bitAnd value 255) len) dst st;
+      builtins.seq (checkAccess "memory.fill" len dst st) (
+        storeBytes "memory.fill" (builtins.genList (_: builtins.bitAnd value 255) len) dst st
+      );
     # wasm2nix:runtime-fn mem.copy(dst, src, len, st) -> state
     copy =
       dst: src: len: st:
