@@ -68,3 +68,32 @@ fn macro_builds_binary_ops() {
         .render()
     );
 }
+
+#[test]
+fn macro_chains_postfix_selects_and_calls() {
+    let f = Expr::ident("f");
+    assert_eq!(nix!(#{f}(x).a(y).b).render(), "((f x).a y).b");
+    assert_eq!(nix!(f(x)(y)).render(), "f x y");
+    assert_eq!(nix!((a).b.c).render(), "a.b.c");
+}
+
+#[test]
+fn macro_splits_merge_arguments_with_interpolations() {
+    let lhs = Expr::ident("a");
+    let rhs = nix!({
+        b = 1;
+    });
+    assert_eq!(nix!(merge(#{lhs}, #{rhs})).render(), "a // { b = 1; }");
+    assert_eq!(nix!(merge(f(x, y), [1, 2])).render(), "f x y // [ 1 2 ]");
+}
+
+#[test]
+fn macro_builds_empty_and_nested_collections() {
+    assert_eq!(nix!([]).render(), "[ ]");
+    assert_eq!(nix!({}).render(), "{ }");
+    assert_eq!(nix!(rec {}).render(), "rec { }");
+    assert_eq!(
+        nix!([[1, 2], [], f(x, y)]).render(),
+        "[ [ 1 2 ] [ ] (f x y) ]"
+    );
+}

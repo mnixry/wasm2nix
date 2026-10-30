@@ -1,5 +1,7 @@
 use super::*;
+use crate::AttrBind;
 use crate::AttrKey;
+use crate::BinOp;
 use crate::Expr;
 use crate::LetBind;
 use crate::RenderStyle;
@@ -7,20 +9,14 @@ use crate::RenderStyle;
 #[test]
 fn renders_attrset_and_let() {
     let e = Expr::let_in(
-        vec![
-            ("x".into(), Expr::int(1)),
-            (
-                "y".into(),
-                Expr::bin(BinOp::Add, Expr::ident("x"), Expr::int(2)),
-            ),
+        [
+            LetBind::new("x", Expr::int(1)),
+            LetBind::new("y", Expr::bin(BinOp::Add, Expr::ident("x"), Expr::int(2))),
         ],
-        Expr::attrset(
-            false,
-            vec![
-                (AttrKey::ident("x"), Expr::ident("x")),
-                (AttrKey::ident("y"), Expr::ident("y")),
-            ],
-        ),
+        Expr::attrset([
+            AttrBind::new(AttrKey::ident("x"), Expr::ident("x")),
+            AttrBind::new(AttrKey::ident("y"), Expr::ident("y")),
+        ]),
     );
 
     assert_eq!(e.render(), "let x = 1; y = x + 2; in { x = x; y = y; }");
@@ -28,13 +24,10 @@ fn renders_attrset_and_let() {
 
 #[test]
 fn wraps_with_render_width() {
-    let e = Expr::attrset(
-        false,
-        vec![
-            (AttrKey::ident("alpha"), Expr::int(1)),
-            (AttrKey::ident("beta"), Expr::int(2)),
-        ],
-    );
+    let e = Expr::attrset([
+        AttrBind::new(AttrKey::ident("alpha"), Expr::int(1)),
+        AttrBind::new(AttrKey::ident("beta"), Expr::int(2)),
+    ]);
 
     assert_eq!(
         e.render_with(&RenderOptions {
@@ -48,13 +41,10 @@ fn wraps_with_render_width() {
 
 #[test]
 fn compact_style_does_not_wrap_with_width() {
-    let e = Expr::attrset(
-        false,
-        vec![
-            (AttrKey::ident("alpha"), Expr::int(1)),
-            (AttrKey::ident("beta"), Expr::int(2)),
-        ],
-    );
+    let e = Expr::attrset([
+        AttrBind::new(AttrKey::ident("alpha"), Expr::int(1)),
+        AttrBind::new(AttrKey::ident("beta"), Expr::int(2)),
+    ]);
 
     assert_eq!(
         e.render_with(&RenderOptions {
@@ -126,7 +116,7 @@ fn flattens_apply_and_select_constructors() {
 fn renders_large_flat_let_without_recursive_doc_chain() {
     const BIND_COUNT: usize = 50_000;
 
-    let binds = (0..BIND_COUNT)
+    let binds: Vec<_> = (0..BIND_COUNT)
         .map(|i| {
             LetBind::new(
                 format!("v{i}"),
@@ -135,7 +125,7 @@ fn renders_large_flat_let_without_recursive_doc_chain() {
         })
         .collect();
     let last_name = format!("v{}", BIND_COUNT - 1);
-    let e = Expr::let_binds(binds, Expr::ident(last_name.clone()));
+    let e = Expr::let_in(binds, Expr::ident(last_name.clone()));
 
     let rendered = e.render();
     let rendered = rendered.trim();
@@ -150,7 +140,7 @@ fn escapes_interpolation_in_strings() {
     assert_eq!(Expr::string("${x}").render(), r#""\${x}""#);
     assert_eq!(Expr::string("$${x} $ {").render(), r#""$\${x} $ {""#);
     assert_eq!(
-        Expr::attrset(false, vec![(AttrKey::string("${k}"), Expr::int(1))]).render(),
+        Expr::attrset([AttrBind::new(AttrKey::string("${k}"), Expr::int(1))]).render(),
         r#"{ "\${k}" = 1; }"#
     );
 }

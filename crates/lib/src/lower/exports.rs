@@ -4,6 +4,7 @@ use wasm2nix_runtime::RuntimeNamespace;
 
 use crate::lower::error::Result;
 use crate::lower::error::UnsupportedGlobalTypeSnafu;
+use crate::nix::AttrBind;
 use crate::nix::AttrKey;
 use crate::nix::Expr;
 use crate::nix::nix;
@@ -16,7 +17,7 @@ pub(super) enum ExportKeyMode {
 }
 
 pub(super) fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> Result<Expr> {
-    let mut binds: Vec<(AttrKey, Expr)> = Vec::new();
+    let mut binds: Vec<AttrBind> = Vec::new();
 
     for (func_index, func_decl) in &module.info.functions {
         if func_decl.export_names.is_empty() {
@@ -30,7 +31,7 @@ pub(super) fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> 
             };
             // Use string keys for safety (names can contain characters invalid
             // in identifiers).
-            binds.push((AttrKey::string(key), f_expr.clone()));
+            binds.push(AttrBind::new(AttrKey::string(key), f_expr.clone()));
         }
     }
 
@@ -39,7 +40,7 @@ pub(super) fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> 
             let Some(key) = export_attr_key(export_name, mode) else {
                 continue;
             };
-            binds.push((
+            binds.push(AttrBind::new(
                 AttrKey::string(key),
                 lower_memory_export(memory_index.as_u32()),
             ));
@@ -51,7 +52,7 @@ pub(super) fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> 
             let Some(key) = export_attr_key(export_name, mode) else {
                 continue;
             };
-            binds.push((
+            binds.push(AttrBind::new(
                 AttrKey::string(key),
                 lower_table_export(table_index.as_u32()),
             ));
@@ -63,14 +64,14 @@ pub(super) fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> 
             let Some(key) = export_attr_key(export_name, mode) else {
                 continue;
             };
-            binds.push((
+            binds.push(AttrBind::new(
                 AttrKey::string(key),
                 lower_global_export(global_index.as_u32(), global_decl.entity.wasm_ty)?,
             ));
         }
     }
 
-    Ok(Expr::attrset(false, binds))
+    Ok(Expr::attrset(binds))
 }
 
 fn export_attr_key(export_name: &str, mode: ExportKeyMode) -> Option<String> {

@@ -1,22 +1,23 @@
 use crate::BinOp;
 use crate::Expr;
 
+/// Binding strength, weakest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Prec {
-    Top     = 0,
-    Implies = 30,
-    Or      = 40,
-    And     = 50,
-    Equal   = 60,
-    Compare = 70,
-    Update  = 80,
-    Prefix  = 90,
-    Add     = 100,
-    Mul     = 110,
-    Concat  = 120,
-    Apply   = 130,
-    Select  = 140,
-    Atom    = 150,
+    Top,
+    Implies,
+    Or,
+    And,
+    Equal,
+    Compare,
+    Update,
+    Prefix,
+    Add,
+    Mul,
+    Concat,
+    Apply,
+    Select,
+    Atom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,9 +27,15 @@ pub(super) enum Assoc {
     None,
 }
 
-impl From<BinOp> for Prec {
-    fn from(val: BinOp) -> Self {
-        match val {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChildSide {
+    Left,
+    Right,
+}
+
+impl Prec {
+    pub(super) const fn of_binop(op: BinOp) -> Self {
+        match op {
             BinOp::Implies => Self::Implies,
             BinOp::Or => Self::Or,
             BinOp::And => Self::And,
@@ -40,33 +47,18 @@ impl From<BinOp> for Prec {
             BinOp::Concat => Self::Concat,
         }
     }
-}
 
-impl From<BinOp> for Assoc {
-    fn from(val: BinOp) -> Self {
-        match val {
-            BinOp::Update | BinOp::Concat | BinOp::Implies => Self::Right,
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::And | BinOp::Or => {
-                Self::Left
-            }
-            BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Self::None,
-        }
-    }
-}
-
-impl From<&Expr> for Prec {
-    fn from(val: &Expr) -> Self {
-        match val {
+    pub(super) const fn of(expr: &Expr) -> Self {
+        match expr {
             Expr::LetIn { .. }
             | Expr::IfThenElse { .. }
             | Expr::Assert { .. }
             | Expr::Lambda { .. } => Self::Top,
-            Expr::BinOp { op, .. } => (*op).into(),
+            Expr::BinOp { op, .. } => Self::of_binop(*op),
             Expr::UnOp { .. } => Self::Prefix,
             Expr::Apply { .. } => Self::Apply,
             Expr::Select { .. } => Self::Select,
             Expr::Ident(_)
-            | Expr::Raw(_)
             | Expr::Path(_)
             | Expr::Int(_)
             | Expr::Bool(_)
@@ -78,8 +70,14 @@ impl From<&Expr> for Prec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ChildSide {
-    Left,
-    Right,
+impl Assoc {
+    pub(super) const fn of_binop(op: BinOp) -> Self {
+        match op {
+            BinOp::Update | BinOp::Concat | BinOp::Implies => Self::Right,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::And | BinOp::Or => {
+                Self::Left
+            }
+            BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Self::None,
+        }
+    }
 }

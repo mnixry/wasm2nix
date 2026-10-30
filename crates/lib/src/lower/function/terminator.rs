@@ -12,6 +12,7 @@ use crate::lower::function::block_name;
 use crate::lower::inst::truthy_value_expr;
 use crate::nix::AttrKey;
 use crate::nix::Expr;
+use crate::nix::LetBind;
 use crate::nix::nix;
 
 impl BlockLowering<'_> {
@@ -106,9 +107,9 @@ impl BlockLowering<'_> {
         );
 
         Ok(Expr::let_in(
-            vec![
-                (index_name, self.value_expr(arg, st_name)),
-                (targets_name, Expr::list(targets)),
+            [
+                LetBind::new(index_name, self.value_expr(arg, st_name)),
+                LetBind::new(targets_name, Expr::list(targets)),
             ],
             nix!(if #{in_range} then #{selected} else #{default}),
         ))
@@ -137,9 +138,10 @@ impl BlockLowering<'_> {
                     .block_params(target)
                     .into_iter()
                     .zip(args)
+                    .map(|(name, value)| LetBind::new(name, value))
                     .collect::<Vec<_>>();
                 if st_name != "st" {
-                    binds.push(("st".into(), Expr::ident(st_name)));
+                    binds.push(LetBind::new("st", Expr::ident(st_name)));
                 }
                 return Ok(Expr::let_in(
                     binds,

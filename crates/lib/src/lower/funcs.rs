@@ -4,6 +4,7 @@ use crate::lower::error::Result;
 use crate::lower::function::lower_function;
 use crate::lower::imports::lower_imported_extern_state;
 use crate::lower::lambda_chain;
+use crate::nix::AttrBind;
 use crate::nix::AttrKey;
 use crate::nix::Expr;
 use crate::nix::nix;
@@ -32,24 +33,24 @@ pub(super) fn lower_start_state(module: &NixModule) -> Expr {
 }
 
 pub(super) fn lower_funcs_rec_attrset(module: &NixModule) -> Result<Expr> {
-    let mut binds: Vec<(AttrKey, Expr)> = Vec::new();
+    let mut binds: Vec<AttrBind> = Vec::new();
 
     for (idx, (module_name, field_name)) in module.info.imported_funcs.iter().enumerate() {
         let func_index = cranelift_wasm::FuncIndex::from_u32(idx as u32);
         let sig_index = module.info.functions[func_index].entity;
         let imported =
             lower_imported_func(module_name, field_name, &module.info.signatures[sig_index]);
-        binds.push((AttrKey::ident(format!("f{idx}")), imported));
+        binds.push(AttrBind::new(AttrKey::ident(format!("f{idx}")), imported));
     }
 
     for (defined_idx, func) in &module.info.function_bodies {
         let func_index = module.num_func_imports() as u32 + defined_idx.as_u32();
         let name = format!("f{func_index}");
         let lowered = lower_function(module, func_index, func)?;
-        binds.push((AttrKey::ident(name), lowered));
+        binds.push(AttrBind::new(AttrKey::ident(name), lowered));
     }
 
-    Ok(Expr::attrset(true, binds))
+    Ok(Expr::rec_attrset(binds))
 }
 
 fn lower_imported_func(module_name: &str, field_name: &str, sig: &ir::Signature) -> Expr {

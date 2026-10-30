@@ -1,177 +1,112 @@
-//! `nix!` rules for binary operators, by precedence from `||` down to `*`.
+//! `nix!` rules for binary operators. Each precedence tier, from `||` down
+//! to `*`, splits at its first operator and hands an operator-free run to the
+//! next tier.
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __nix_parse_or {
-    ($($tokens:tt)+) => {
-        $crate::__nix_parse_or_acc!([] $($tokens)+)
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __nix_parse_or_acc {
-    ([$($lhs:tt)+] || $($rhs:tt)+) => {
-        $crate::Expr::bin($crate::BinOp::Or, $crate::nix!($($lhs)+), $crate::__nix_parse_or!($($rhs)+))
-    };
-    ([$($lhs:tt)*] $next:tt $($rest:tt)*) => {
-        $crate::__nix_parse_or_acc!([$($lhs)* $next] $($rest)*)
-    };
-    ([$($all:tt)+]) => {
-        $crate::__nix_parse_and!($($all)+)
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __nix_parse_and {
-    ($($tokens:tt)+) => {
-        $crate::__nix_parse_and_acc!([] $($tokens)+)
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __nix_parse_and_acc {
-    ([$($lhs:tt)+] && $($rhs:tt)+) => {
-        $crate::Expr::bin($crate::BinOp::And, $crate::nix!($($lhs)+), $crate::__nix_parse_and!($($rhs)+))
-    };
-    ([$($lhs:tt)*] $next:tt $($rest:tt)*) => {
-        $crate::__nix_parse_and_acc!([$($lhs)* $next] $($rest)*)
-    };
-    ([$($all:tt)+]) => {
-        $crate::__nix_parse_cmp!($($all)+)
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __nix_parse_cmp {
-    ($($tokens:tt)+) => {
-        $crate::__nix_parse_cmp_acc!([] $($tokens)+)
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __nix_parse_cmp_acc {
-    ([$($lhs:tt)+] == $($rhs:tt)+) => {
-        $crate::Expr::bin($crate::BinOp::Eq, $crate::nix!($($lhs)+), $crate::nix!($($rhs)+))
-    };
-    ([$($lhs:tt)+] != $($rhs:tt)+) => {
-        $crate::Expr::bin($crate::BinOp::Neq, $crate::nix!($($lhs)+), $crate::nix!($($rhs)+))
-    };
-    ([$($lhs:tt)+] <= $($rhs:tt)+) => {
-        $crate::Expr::bin($crate::BinOp::Le, $crate::nix!($($lhs)+), $crate::nix!($($rhs)+))
-    };
-    ([$($lhs:tt)+] >= $($rhs:tt)+) => {
-        $crate::Expr::bin($crate::BinOp::Ge, $crate::nix!($($lhs)+), $crate::nix!($($rhs)+))
-    };
-    ([$($lhs:tt)+] < $($rhs:tt)+) => {
-        $crate::Expr::bin($crate::BinOp::Lt, $crate::nix!($($lhs)+), $crate::nix!($($rhs)+))
-    };
-    ([$($lhs:tt)+] > $($rhs:tt)+) => {
-        $crate::Expr::bin($crate::BinOp::Gt, $crate::nix!($($lhs)+), $crate::nix!($($rhs)+))
-    };
-    ([$($lhs:tt)*] $next:tt $($rest:tt)*) => {
-        $crate::__nix_parse_cmp_acc!([$($lhs)* $next] $($rest)*)
-    };
-    ([$($all:tt)+]) => {
-        $crate::__nix_parse_add!($($all)+)
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __nix_parse_add {
-    ($($tokens:tt)+) => {
-        $crate::__nix_parse_add_acc!([] $($tokens)+)
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __nix_parse_add_acc {
-    ([] - $($rest:tt)+) => {
-        $crate::__nix_parse_add_acc!([-] $($rest)+)
-    };
-    ([$($lhs:tt)+] + $($rhs:tt)+) => {
-        $crate::__nix_fold_add!($crate::nix!($($lhs)+); Add [] $($rhs)+)
-    };
-    ([$($lhs:tt)+] - $($rhs:tt)+) => {
-        $crate::__nix_fold_add!($crate::nix!($($lhs)+); Sub [] $($rhs)+)
-    };
-    ([$($lhs:tt)*] $next:tt $($rest:tt)*) => {
-        $crate::__nix_parse_add_acc!([$($lhs)* $next] $($rest)*)
-    };
-    ([$($all:tt)+]) => {
-        $crate::__nix_parse_mul!($($all)+)
-    };
-}
-
-/// Folds a `+`/`-` chain left to right, so `a - b - c` is `(a - b) - c`.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __nix_fold_add {
-    ($acc:expr; $op:ident [$($cur:tt)+] + $($rest:tt)+) => {
-        $crate::__nix_fold_add!(
-            $crate::Expr::bin($crate::BinOp::$op, $acc, $crate::nix!($($cur)+)); Add [] $($rest)+
+macro_rules! __nix_binop {
+    (or; [$($lhs:tt)+] || $($rhs:tt)+) => {
+        $crate::Expr::bin(
+            $crate::BinOp::Or,
+            $crate::nix!($($lhs)+),
+            $crate::__nix_binop!(or; [] $($rhs)+),
         )
     };
-    ($acc:expr; $op:ident [$($cur:tt)+] - $($rest:tt)+) => {
-        $crate::__nix_fold_add!(
-            $crate::Expr::bin($crate::BinOp::$op, $acc, $crate::nix!($($cur)+)); Sub [] $($rest)+
+    (or; [$($all:tt)+]) => {
+        $crate::__nix_binop!(and; [] $($all)+)
+    };
+
+    (and; [$($lhs:tt)+] && $($rhs:tt)+) => {
+        $crate::Expr::bin(
+            $crate::BinOp::And,
+            $crate::nix!($($lhs)+),
+            $crate::__nix_binop!(and; [] $($rhs)+),
         )
     };
-    ($acc:expr; $op:ident [$($cur:tt)*] $next:tt $($rest:tt)*) => {
-        $crate::__nix_fold_add!($acc; $op [$($cur)* $next] $($rest)*)
+    (and; [$($all:tt)+]) => {
+        $crate::__nix_binop!(cmp; [] $($all)+)
     };
-    ($acc:expr; $op:ident [$($cur:tt)+]) => {
-        $crate::Expr::bin($crate::BinOp::$op, $acc, $crate::nix!($($cur)+))
-    };
-}
 
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __nix_parse_mul {
-    ($($tokens:tt)+) => {
-        $crate::__nix_parse_mul_acc!([] $($tokens)+)
+    (cmp; [$($lhs:tt)+] == $($rhs:tt)+) => {
+        $crate::__nix_cmp!(Eq; [$($lhs)+] $($rhs)+)
     };
-}
+    (cmp; [$($lhs:tt)+] != $($rhs:tt)+) => {
+        $crate::__nix_cmp!(Neq; [$($lhs)+] $($rhs)+)
+    };
+    (cmp; [$($lhs:tt)+] <= $($rhs:tt)+) => {
+        $crate::__nix_cmp!(Le; [$($lhs)+] $($rhs)+)
+    };
+    (cmp; [$($lhs:tt)+] >= $($rhs:tt)+) => {
+        $crate::__nix_cmp!(Ge; [$($lhs)+] $($rhs)+)
+    };
+    (cmp; [$($lhs:tt)+] < $($rhs:tt)+) => {
+        $crate::__nix_cmp!(Lt; [$($lhs)+] $($rhs)+)
+    };
+    (cmp; [$($lhs:tt)+] > $($rhs:tt)+) => {
+        $crate::__nix_cmp!(Gt; [$($lhs)+] $($rhs)+)
+    };
+    (cmp; [$($all:tt)+]) => {
+        $crate::__nix_binop!(add; [] $($all)+)
+    };
 
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __nix_parse_mul_acc {
-    ([$($lhs:tt)+] * $($rhs:tt)+) => {
-        $crate::__nix_fold_mul!($crate::nix!($($lhs)+); Mul [] $($rhs)+)
+    (add; [] - $($rest:tt)+) => {
+        $crate::__nix_binop!(add; [-] $($rest)+)
     };
-    ([$($lhs:tt)+] / $($rhs:tt)+) => {
-        $crate::__nix_fold_mul!($crate::nix!($($lhs)+); Div [] $($rhs)+)
+    (add; [$($lhs:tt)+] + $($rhs:tt)+) => {
+        $crate::__nix_fold!(add; $crate::nix!($($lhs)+); Add [] $($rhs)+)
     };
-    ([$($lhs:tt)*] $next:tt $($rest:tt)*) => {
-        $crate::__nix_parse_mul_acc!([$($lhs)* $next] $($rest)*)
+    (add; [$($lhs:tt)+] - $($rhs:tt)+) => {
+        $crate::__nix_fold!(add; $crate::nix!($($lhs)+); Sub [] $($rhs)+)
     };
-    ([$($all:tt)+]) => {
+    (add; [$($all:tt)+]) => {
+        $crate::__nix_binop!(mul; [] $($all)+)
+    };
+
+    (mul; [$($lhs:tt)+] * $($rhs:tt)+) => {
+        $crate::__nix_fold!(mul; $crate::nix!($($lhs)+); Mul [] $($rhs)+)
+    };
+    (mul; [$($lhs:tt)+] / $($rhs:tt)+) => {
+        $crate::__nix_fold!(mul; $crate::nix!($($lhs)+); Div [] $($rhs)+)
+    };
+    (mul; [$($all:tt)+]) => {
         $crate::__nix_atom!($($all)+)
     };
+
+    ($tier:ident; [$($lhs:tt)*] $next:tt $($rest:tt)*) => {
+        $crate::__nix_binop!($tier; [$($lhs)* $next] $($rest)*)
+    };
 }
 
-/// Folds a `*`/`/` chain left to right, so `a / b / c` is `(a / b) / c`.
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __nix_fold_mul {
-    ($acc:expr; $op:ident [$($cur:tt)+] * $($rest:tt)+) => {
-        $crate::__nix_fold_mul!(
-            $crate::Expr::bin($crate::BinOp::$op, $acc, $crate::nix!($($cur)+)); Mul [] $($rest)+
-        )
+macro_rules! __nix_cmp {
+    ($op:ident; [$($lhs:tt)+] $($rhs:tt)+) => {
+        $crate::Expr::bin($crate::BinOp::$op, $crate::nix!($($lhs)+), $crate::nix!($($rhs)+))
     };
-    ($acc:expr; $op:ident [$($cur:tt)+] / $($rest:tt)+) => {
-        $crate::__nix_fold_mul!(
-            $crate::Expr::bin($crate::BinOp::$op, $acc, $crate::nix!($($cur)+)); Div [] $($rest)+
-        )
+}
+
+/// Folds a `+`/`-` or `*`/`/` chain left to right, so `a - b - c` is
+/// `(a - b) - c`. `$op` is the operator before the accumulated operand.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __nix_fold {
+    (add; $acc:expr; $op:ident [$($cur:tt)+] + $($rest:tt)+) => {
+        $crate::__nix_fold!(add; $crate::__nix_fold!($acc; $op [$($cur)+]); Add [] $($rest)+)
     };
-    ($acc:expr; $op:ident [$($cur:tt)*] $next:tt $($rest:tt)*) => {
-        $crate::__nix_fold_mul!($acc; $op [$($cur)* $next] $($rest)*)
+    (add; $acc:expr; $op:ident [$($cur:tt)+] - $($rest:tt)+) => {
+        $crate::__nix_fold!(add; $crate::__nix_fold!($acc; $op [$($cur)+]); Sub [] $($rest)+)
+    };
+    (mul; $acc:expr; $op:ident [$($cur:tt)+] * $($rest:tt)+) => {
+        $crate::__nix_fold!(mul; $crate::__nix_fold!($acc; $op [$($cur)+]); Mul [] $($rest)+)
+    };
+    (mul; $acc:expr; $op:ident [$($cur:tt)+] / $($rest:tt)+) => {
+        $crate::__nix_fold!(mul; $crate::__nix_fold!($acc; $op [$($cur)+]); Div [] $($rest)+)
+    };
+    ($tier:ident; $acc:expr; $op:ident [$($cur:tt)*] $next:tt $($rest:tt)*) => {
+        $crate::__nix_fold!($tier; $acc; $op [$($cur)* $next] $($rest)*)
+    };
+    ($tier:ident; $acc:expr; $op:ident [$($cur:tt)+]) => {
+        $crate::__nix_fold!($acc; $op [$($cur)+])
     };
     ($acc:expr; $op:ident [$($cur:tt)+]) => {
         $crate::Expr::bin($crate::BinOp::$op, $acc, $crate::nix!($($cur)+))

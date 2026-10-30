@@ -3,15 +3,11 @@
 
 use crate::AttrKey;
 use crate::Expr;
-use crate::visit::Visit;
-use crate::visit::VisitMut;
-use crate::visit::walk_expr;
-use crate::visit::walk_expr_mut;
 
 impl Expr {
     /// Whether this node binds `name` for its whole subtree: a lambda
-    /// parameter, any `let` binding (`let` is recursive), or the first key of
-    /// a `rec` attribute binding.
+    /// parameter, any `let` binding (`let` is recursive), or a `rec`
+    /// attribute key.
     #[must_use]
     pub fn binds(&self, name: &str) -> bool {
         match self {
@@ -20,11 +16,9 @@ impl Expr {
             Self::AttrSet {
                 recursive: true,
                 binds,
-            } => binds.iter().any(|bind| {
-                bind.path.iter().next().is_some_and(
-                    |key| matches!(key, AttrKey::Ident(key) | AttrKey::Str(key) if key == name),
-                )
-            }),
+            } => binds.iter().any(
+                |bind| matches!(&bind.key, AttrKey::Ident(key) | AttrKey::Str(key) if key == name),
+            ),
             _ => false,
         }
     }
@@ -33,51 +27,31 @@ impl Expr {
     /// an inner binding.
     #[must_use]
     pub fn free_uses(&self, name: &str) -> usize {
-        let mut uses = FreeUses { name, count: 0 };
-        uses.visit_expr(self);
-        uses.count
+        match self {
+            Self::Ident(ident) if ident == name => 1,
+            _ if self.binds(name) => 0,
+            _ => {
+                let mut count = 0;
+                self.for_each_child(|child| count += child.free_uses(name));
+                count
+            }
+        }
     }
 
     /// Replaces every free occurrence of the variable `name` with
     /// `replacement`.
     pub fn substitute_free(&mut self, name: &str, replacement: &Self) {
-        Substitute { name, replacement }.visit_expr_mut(self);
-    }
-}
-
-struct FreeUses<'a> {
-    name: &'a str,
-    count: usize,
-}
-
-impl<'ast> Visit<'ast> for FreeUses<'_> {
-    fn visit_expr(&mut self, expr: &'ast Expr) {
-        match expr {
-            Expr::Ident(ident) if ident == self.name => self.count += 1,
-            _ if expr.binds(self.name) => {}
-            _ => walk_expr(self, expr),
-        }
-    }
-}
-
-struct Substitute<'a> {
-    name: &'a str,
-    replacement: &'a Expr,
-}
-
-impl VisitMut for Substitute<'_> {
-    fn visit_expr_mut(&mut self, expr: &mut Expr) {
-        if matches!(expr, Expr::Ident(ident) if ident == self.name) {
-            *expr = self.replacement.clone();
-        } else if !expr.binds(self.name) {
-            walk_expr_mut(self, expr);
+        if matches!(self, Self::Ident(ident) if ident == name) {
+            *self = replacement.clone();
+        } else if !self.binds(name) {
+            self.for_each_child_mut(|child| child.substitute_free(name, replacement));
         }
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::vec_init_then_push)] // `nix!` expansions build lists with `push`.
 mod tests {
+    use crate::AttrBind;
     use crate::AttrKey;
     use crate::Expr;
     use crate::nix;
@@ -103,13 +77,10 @@ mod tests {
             .free_uses("x"),
             1
         );
-        let quoted = Expr::attrset(
-            true,
-            vec![
-                (AttrKey::string("x"), Expr::int(1)),
-                (AttrKey::ident("y"), nix!(x)),
-            ],
-        );
+        let quoted = Expr::rec_attrset([
+            AttrBind::new(AttrKey::string("x"), Expr::int(1)),
+            AttrBind::new(AttrKey::ident("y"), nix!(x)),
+        ]);
         assert_eq!(quoted.free_uses("x"), 0);
     }
 

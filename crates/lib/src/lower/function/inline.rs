@@ -4,8 +4,6 @@ use crate::lower::inst::is_bit_op;
 use crate::nix::BinOp;
 use crate::nix::Expr;
 use crate::nix::LetBind;
-use crate::nix::visit::Visit;
-use crate::nix::visit::walk_expr;
 
 pub(super) struct LoweredBlockBody {
     pub(super) binds: Vec<LetBind>,
@@ -104,8 +102,7 @@ fn is_inline_candidate(expr: &Expr) -> bool {
         }
         Expr::UnOp { expr, .. } => is_inline_candidate(expr),
         Expr::Apply { func, args } => is_bit_op(func) && args.iter().all(is_inline_candidate),
-        Expr::Raw(_)
-        | Expr::Path(_)
+        Expr::Path(_)
         | Expr::List(_)
         | Expr::AttrSet { .. }
         | Expr::Select { .. }
@@ -148,25 +145,13 @@ fn uses_in_forces(forces: &[Force], name: &str) -> usize {
 /// Those positions stay unevaluated, so an expression inlined there would be
 /// carried as a thunk instead of being forced in this block.
 fn is_used_lazily(expr: &Expr, name: &str) -> bool {
-    let mut lazy = LazyUse { name, found: false };
-    lazy.visit_expr(expr);
-    lazy.found
-}
-
-struct LazyUse<'a> {
-    name: &'a str,
-    found: bool,
-}
-
-impl<'ast> Visit<'ast> for LazyUse<'_> {
-    fn visit_expr(&mut self, expr: &'ast Expr) {
-        if self.found {
-            return;
-        }
-        match expr {
-            Expr::List(_) | Expr::AttrSet { .. } => self.found = expr.free_uses(self.name) != 0,
-            _ if expr.binds(self.name) => {}
-            _ => walk_expr(self, expr),
+    match expr {
+        Expr::List(_) | Expr::AttrSet { .. } => expr.free_uses(name) != 0,
+        _ if expr.binds(name) => false,
+        _ => {
+            let mut found = false;
+            expr.for_each_child(|child| found = found || is_used_lazily(child, name));
+            found
         }
     }
 }

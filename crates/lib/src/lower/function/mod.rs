@@ -64,7 +64,7 @@ pub(super) fn lower_function(
         offset_adds: &offset_adds,
         spilled: RefCell::new(Vec::new()),
     };
-    let blocks_attrset = Expr::attrset(true, lowering.lower_blocks(entry)?);
+    let blocks_attrset = Expr::rec_attrset(lowering.lower_blocks(entry)?);
 
     let mut entry_args: Vec<Expr> = func
         .dfg

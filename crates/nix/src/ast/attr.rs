@@ -16,18 +16,7 @@ impl AttrKey {
     }
 }
 
-impl From<&str> for AttrKey {
-    fn from(value: &str) -> Self {
-        Self::ident(value)
-    }
-}
-
-impl From<String> for AttrKey {
-    fn from(value: String) -> Self {
-        Self::ident(value)
-    }
-}
-
+/// The attribute path of a select, `a.b.c`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttrPath(Vec<AttrKey>);
 
@@ -46,25 +35,16 @@ impl AttrPath {
     }
 }
 
-impl From<AttrKey> for AttrPath {
-    fn from(value: AttrKey) -> Self {
-        Self::one(value)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttrBind {
-    pub path: AttrPath,
+    pub key: AttrKey,
     pub value: Expr,
 }
 
 impl AttrBind {
     #[must_use]
-    pub fn new(path: impl Into<AttrPath>, value: Expr) -> Self {
-        Self {
-            path: path.into(),
-            value,
-        }
+    pub const fn new(key: AttrKey, value: Expr) -> Self {
+        Self { key, value }
     }
 }
 

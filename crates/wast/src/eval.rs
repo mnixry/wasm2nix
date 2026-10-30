@@ -15,8 +15,10 @@ use std::process::ExitStatus;
 use serde_json::Value as JsonValue;
 use snafu::prelude::*;
 use tempfile::TempDir;
+use wasm2nix::nix::AttrBind;
 use wasm2nix::nix::AttrKey;
 use wasm2nix::nix::Expr;
+use wasm2nix::nix::LetBind;
 use wasm2nix::nix::nix;
 use wast::WastArg;
 use wast::core::WastArgCore;
@@ -108,15 +110,10 @@ impl Nix {
     }
 
     /// Evaluates `body` to JSON with `rt` and `harness` in scope.
-    fn eval(
-        &self, binds: Vec<(String, Expr)>, body: Expr,
-    ) -> Result<Result<JsonValue, EvalFailure>> {
+    fn eval(&self, binds: Vec<LetBind>, body: Expr) -> Result<Result<JsonValue, EvalFailure>> {
         let mut all = vec![
-            ("rt".into(), import_expr(&self.rt_path(), nix!({}))),
-            (
-                "harness".into(),
-                import_expr(&self.harness_path(), nix!({})),
-            ),
+            LetBind::new("rt", import_expr(&self.rt_path(), nix!({}))),
+            LetBind::new("harness", import_expr(&self.harness_path(), nix!({}))),
         ];
         all.extend(binds);
         let program = Expr::let_in(all, nix!(builtins.toJSON(#{body})));
@@ -251,7 +248,7 @@ pub struct Flushed {
 /// states derived from them.
 #[derive(Default)]
 pub struct Batch {
-    binds: Vec<(String, Expr)>,
+    binds: Vec<LetBind>,
     steps: Vec<Step>,
 }
 
@@ -267,7 +264,7 @@ impl Batch {
     /// Binds `expr` to a fresh variable and returns the variable.
     pub fn bind(&mut self, expr: Expr) -> Expr {
         let var = format!("v{}", self.binds.len());
-        self.binds.push((var.clone(), expr));
+        self.binds.push(LetBind::new(var.clone(), expr));
         Expr::ident(var)
     }
 
@@ -299,18 +296,14 @@ impl Batch {
             self.steps
                 .iter()
                 .map(|step| {
-                    let var = Expr::ident(self.binds[step.bind].0.as_str());
+                    let var = Expr::ident(self.binds[step.bind].name.as_str());
                     nix!(if #{var.clone()}.success then #{var}.value.results else null)
                 })
                 .collect(),
         );
-        let states = Expr::attrset(
-            false,
-            states
-                .into_iter()
-                .map(|(key, state)| (AttrKey::string(key), nix!(harness.settle(#{state}))))
-                .collect(),
-        );
+        let states = Expr::attrset(states.into_iter().map(|(key, state)| {
+            AttrBind::new(AttrKey::string(key), nix!(harness.settle(#{state})))
+        }));
         let body = nix!({
             outcomes = #{outcomes};
             states = #{states};
@@ -329,7 +322,7 @@ impl Batch {
                             status: failure.status,
                             stderr: failure.error.clone(),
                         })?;
-                    self.binds[self.steps[step].bind].1 = nix!({
+                    self.binds[self.steps[step].bind].value = nix!({
                         success = false;
                         value = null;
                     });
@@ -349,8 +342,9 @@ impl Batch {
         });
         if let Some(id) = unexpected {
             let step = &self.steps[id];
-            let var = Expr::ident(self.binds[step.bind].0.as_str());
-            self.binds[step.bind].1 = nix!(harness.unguarded(#{step_id(id)}, #{step.expr.clone()}));
+            let var = Expr::ident(self.binds[step.bind].name.as_str());
+            self.binds[step.bind].value =
+                nix!(harness.unguarded(#{step_id(id)}, #{step.expr.clone()}));
             if let Err(failure) = nix.eval(self.binds.clone(), nix!(#{var}.success))? {
                 errors.insert(id, failure.error);
             }
@@ -425,7 +419,7 @@ fn new_module_expr(
 ) -> Expr {
     let roots = imports.iter().map(|name| resolve_alias(aliases, name));
     let (mut binds, _) = world(modules, aliases, roots);
-    binds.push(("m_new".into(), import_module_expr(path, key)));
+    binds.push(LetBind::new("m_new", import_module_expr(path, key)));
     Expr::let_in(binds, body)
 }
 
@@ -441,7 +435,7 @@ pub fn invoke_expr(
     args.push(Expr::ident("st_in"));
     export_expr(key, name, modules, aliases, |export| {
         (
-            ("call".into(), Expr::app(export, args)),
+            LetBind::new("call", Expr::app(export, args)),
             nix!({
                 results = call.results;
                 st = call.st;
@@ -457,7 +451,7 @@ pub fn get_expr(
 ) -> Result<Expr> {
     export_expr(key, name, modules, aliases, |export| {
         (
-            ("value".into(), nix!(#{export}.get(st_in))),
+            LetBind::new("value", nix!(#{export}.get(st_in))),
             nix!({
                 results = [value];
                 st = st_in;
@@ -471,7 +465,7 @@ pub fn get_expr(
 /// binding.
 fn export_expr(
     key: &str, name: &str, modules: &BTreeMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>, use_export: impl FnOnce(Expr) -> ((String, Expr), Expr),
+    aliases: &HashMap<String, String>, use_export: impl FnOnce(Expr) -> (LetBind, Expr),
 ) -> Result<Expr> {
     let state = modules
         .get(key)
@@ -482,7 +476,7 @@ fn export_expr(
     let module = Expr::ident(vars[key].as_str());
     let export_key = format!("__wasm2nix_export_{}", hex::encode(name.as_bytes()));
     let (bind, body) = use_export(nix!(#{module}."__wasm2nix"."exportsByName".(export_key)));
-    binds.push(("st_in".into(), state));
+    binds.push(LetBind::new("st_in", state));
     binds.push(bind);
     Ok(Expr::let_in(binds, body))
 }
@@ -494,7 +488,7 @@ fn export_expr(
 fn world(
     modules: &BTreeMap<String, HarnessModule>, aliases: &HashMap<String, String>,
     roots: impl IntoIterator<Item = String>,
-) -> (Vec<(String, Expr)>, HashMap<String, String>) {
+) -> (Vec<LetBind>, HashMap<String, String>) {
     let mut neighbours = HashMap::<&str, Vec<&str>>::new();
     for (key, module) in modules {
         for name in &module.imports {
@@ -520,26 +514,21 @@ fn world(
         .enumerate()
         .map(|(i, key)| ((*key).to_string(), format!("m{i}_import")))
         .collect::<HashMap<_, _>>();
+    let func_registry = Expr::attrset(component.iter().map(|key| {
+        let module = Expr::ident(vars[*key].as_str());
+        AttrBind::new(AttrKey::string(*key), nix!(#{module}."__wasm2nix"."funcs"))
+    }));
     let mut binds = vec![
-        ("imports".into(), imports_expr(aliases, &vars)),
-        (
-            "funcRegistry".into(),
-            Expr::attrset(
-                false,
-                component
-                    .iter()
-                    .map(|key| {
-                        let module = Expr::ident(vars[*key].as_str());
-                        (AttrKey::string(*key), nix!(#{module}."__wasm2nix"."funcs"))
-                    })
-                    .collect(),
-            ),
-        ),
+        LetBind::new("imports", imports_expr(aliases, &vars)),
+        LetBind::new("funcRegistry", func_registry),
     ];
     for (i, key) in component.iter().enumerate() {
         let raw = format!("m{i}");
-        binds.push((raw.clone(), import_module_expr(&modules[*key].path, key)));
-        binds.push((
+        binds.push(LetBind::new(
+            raw.clone(),
+            import_module_expr(&modules[*key].path, key),
+        ));
+        binds.push(LetBind::new(
             vars[*key].clone(),
             nix!(merge(#{Expr::ident(raw)}, {
                 "__wasm2nixState" = #{modules[*key].state.clone()};
@@ -564,11 +553,9 @@ fn imports_expr(aliases: &HashMap<String, String>, vars: &HashMap<String, String
         }
     }
     Expr::attrset(
-        false,
         fields
             .into_iter()
-            .map(|(name, value)| (AttrKey::string(name), value))
-            .collect(),
+            .map(|(name, value)| AttrBind::new(AttrKey::string(name), value)),
     )
 }
 

@@ -17,6 +17,7 @@ use crate::lower::inst::lower_inst;
 use crate::lower::inst::value_expr;
 use crate::lower::inst::value_name;
 use crate::lower::lambda_chain;
+use crate::nix::AttrBind;
 use crate::nix::AttrKey;
 use crate::nix::Expr;
 use crate::translator::NixModule;
@@ -41,7 +42,7 @@ impl BlockLowering<'_> {
     /// Lowers every block that needs its own function: the entry, blocks with
     /// several incoming edges, loop headers and blocks spilled at the nesting
     /// limit. Every other block is inlined into its only predecessor.
-    pub(super) fn lower_blocks(&self, entry: Block) -> Result<Vec<(AttrKey, Expr)>> {
+    pub(super) fn lower_blocks(&self, entry: Block) -> Result<Vec<AttrBind>> {
         let mut pending: Vec<Block> = self
             .func
             .layout
@@ -56,7 +57,10 @@ impl BlockLowering<'_> {
             if !emitted.insert(block) {
                 continue;
             }
-            binds.push((AttrKey::ident(block_name(block)), self.lower_block(block)?));
+            binds.push(AttrBind::new(
+                AttrKey::ident(block_name(block)),
+                self.lower_block(block)?,
+            ));
             pending.extend(self.spilled.borrow_mut().drain(..).rev());
         }
         Ok(binds)
@@ -128,7 +132,7 @@ impl BlockLowering<'_> {
         let conds = lowered.forces.into_iter().map(Force::condition).collect();
         let expr = Expr::asserts(conds, lowered.body);
 
-        Ok(Expr::let_binds(lowered.binds, expr))
+        Ok(Expr::let_in(lowered.binds, expr))
     }
 
     pub(super) fn value_expr(&self, v: ir::Value, st_name: &str) -> Expr {

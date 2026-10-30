@@ -10,8 +10,10 @@ use crate::lower::const_expr::lower_const_expr;
 use crate::lower::error::Result;
 use crate::lower::imports::lower_attr_or;
 use crate::lower::imports::lower_imported_extern;
+use crate::nix::AttrBind;
 use crate::nix::AttrKey;
 use crate::nix::Expr;
+use crate::nix::LetBind;
 use crate::nix::nix;
 use crate::translator::NixModule;
 
@@ -85,7 +87,7 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
         }
     }
 
-    let mut groups: BTreeMap<u64, BTreeMap<u64, Vec<(AttrKey, Expr)>>> = BTreeMap::new();
+    let mut groups: BTreeMap<u64, BTreeMap<u64, Vec<AttrBind>>> = BTreeMap::new();
     for (idx, word) in words {
         let chunk = idx / MEMORY_CHUNK_WORDS;
         groups
@@ -93,45 +95,37 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
             .or_default()
             .entry(chunk)
             .or_default()
-            .push((AttrKey::string(idx.to_string()), Expr::int(i64::from(word))));
+            .push(AttrBind::new(
+                AttrKey::string(idx.to_string()),
+                Expr::int(i64::from(word)),
+            ));
     }
     keyed_attrset(groups.into_iter().map(|(group, chunks)| {
         let chunks = chunks
             .into_iter()
-            .map(|(chunk, words)| (chunk, Expr::attrset(false, words)));
+            .map(|(chunk, words)| (chunk, Expr::attrset(words)));
         (group, keyed_attrset(chunks))
     }))
 }
 
 fn keyed_attrset(entries: impl Iterator<Item = (u64, Expr)>) -> Expr {
     Expr::attrset(
-        false,
-        entries
-            .map(|(key, value)| (AttrKey::string(key.to_string()), value))
-            .collect(),
+        entries.map(|(key, value)| AttrBind::new(AttrKey::string(key.to_string()), value)),
     )
 }
 
 fn lower_data_segments(module: &NixModule) -> Expr {
-    Expr::attrset(
-        false,
-        module
-            .info
-            .data_segments
-            .iter()
-            .map(|(idx, data)| {
-                (
-                    AttrKey::string(idx.as_u32().to_string()),
-                    Expr::list(
-                        data.iter()
-                            .copied()
-                            .map(|byte| Expr::int(i64::from(byte)))
-                            .collect(),
-                    ),
-                )
-            })
-            .collect(),
-    )
+    Expr::attrset(module.info.data_segments.iter().map(|(idx, data)| {
+        AttrBind::new(
+            AttrKey::string(idx.as_u32().to_string()),
+            Expr::list(
+                data.iter()
+                    .copied()
+                    .map(|byte| Expr::int(i64::from(byte)))
+                    .collect(),
+            ),
+        )
+    }))
 }
 
 fn lower_initial_globals(module: &NixModule) -> Result<Expr> {
@@ -155,18 +149,18 @@ fn lower_initial_globals(module: &NixModule) -> Result<Expr> {
             nix!(throw("wasm2nix: global has no initializer"))
         };
 
-        binds.push((bind_name.clone(), value));
-        global_attrs.push((
+        binds.push(LetBind::new(bind_name.clone(), value));
+        global_attrs.push(AttrBind::new(
             AttrKey::string(idx.as_u32().to_string()),
             Expr::ident(bind_name),
         ));
     }
 
-    Ok(Expr::let_in(binds, Expr::attrset(false, global_attrs)))
+    Ok(Expr::let_in(binds, Expr::attrset(global_attrs)))
 }
 
 fn lower_initial_tables(module: &NixModule) -> Expr {
-    let mut table_binds: Vec<(AttrKey, Expr)> = Vec::new();
+    let mut table_binds: Vec<AttrBind> = Vec::new();
 
     for (table_index, table_decl) in &module.info.tables {
         let mut elems: BTreeMap<u64, Expr> = BTreeMap::new();
@@ -182,11 +176,9 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
         }
 
         let elems_expr = Expr::attrset(
-            false,
             elems
                 .into_iter()
-                .map(|(idx, entry)| (AttrKey::string(idx.to_string()), entry))
-                .collect(),
+                .map(|(idx, entry)| AttrBind::new(AttrKey::string(idx.to_string()), entry)),
         );
 
         let table_expr = if let Some((module_name, field_name)) =
@@ -216,36 +208,28 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
             })
         };
 
-        table_binds.push((
+        table_binds.push(AttrBind::new(
             AttrKey::string(table_index.as_u32().to_string()),
             table_expr,
         ));
     }
 
-    Expr::attrset(false, table_binds)
+    Expr::attrset(table_binds)
 }
 
 fn lower_element_segments(module: &NixModule) -> Expr {
-    Expr::attrset(
-        false,
-        module
-            .info
-            .element_segments
-            .iter()
-            .map(|(idx, elements)| {
-                (
-                    AttrKey::string(idx.as_u32().to_string()),
-                    Expr::list(
-                        elements
-                            .iter()
-                            .copied()
-                            .map(|func_index| lower_table_entry(module, func_index))
-                            .collect(),
-                    ),
-                )
-            })
-            .collect(),
-    )
+    Expr::attrset(module.info.element_segments.iter().map(|(idx, elements)| {
+        AttrBind::new(
+            AttrKey::string(idx.as_u32().to_string()),
+            Expr::list(
+                elements
+                    .iter()
+                    .copied()
+                    .map(|func_index| lower_table_entry(module, func_index))
+                    .collect(),
+            ),
+        )
+    }))
 }
 
 pub(super) fn lower_table_entry(module: &NixModule, func_index: cranelift_wasm::FuncIndex) -> Expr {

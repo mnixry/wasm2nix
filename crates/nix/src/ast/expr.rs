@@ -6,13 +6,11 @@ use super::AttrPath;
 use super::BinOp;
 use super::LetBind;
 use super::UnOp;
-use crate::print::Printer;
 use crate::print::RenderOptions;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Ident(String),
-    Raw(String),
     Path(String),
     Int(i64),
     Bool(bool),
@@ -69,10 +67,6 @@ impl Expr {
         Self::Ident(name.into())
     }
 
-    pub fn raw(expr: impl Into<String>) -> Self {
-        Self::Raw(expr.into())
-    }
-
     pub fn path(path: impl Into<String>) -> Self {
         Self::Path(path.into())
     }
@@ -101,14 +95,18 @@ impl Expr {
         Self::List(items)
     }
 
-    #[must_use]
-    pub fn attrset(recursive: bool, binds: Vec<(AttrKey, Self)>) -> Self {
-        Self::attrs(recursive, binds.into_iter().map(AttrBind::from).collect())
+    pub fn attrset(binds: impl IntoIterator<Item = AttrBind>) -> Self {
+        Self::AttrSet {
+            recursive: false,
+            binds: binds.into_iter().collect(),
+        }
     }
 
-    #[must_use]
-    pub const fn attrs(recursive: bool, binds: Vec<AttrBind>) -> Self {
-        Self::AttrSet { recursive, binds }
+    pub fn rec_attrset(binds: impl IntoIterator<Item = AttrBind>) -> Self {
+        Self::AttrSet {
+            recursive: true,
+            binds: binds.into_iter().collect(),
+        }
     }
 
     #[must_use]
@@ -132,13 +130,9 @@ impl Expr {
         }
     }
 
-    #[must_use]
-    pub fn let_in(binds: Vec<(String, Self)>, body: Self) -> Self {
-        Self::let_binds(binds.into_iter().map(LetBind::from).collect(), body)
-    }
-
-    #[must_use]
-    pub fn let_binds(binds: Vec<LetBind>, body: Self) -> Self {
+    /// A `let` over `binds`; just `body` when there are none.
+    pub fn let_in(binds: impl IntoIterator<Item = LetBind>, body: Self) -> Self {
+        let binds = binds.into_iter().collect::<Vec<_>>();
         if binds.is_empty() {
             return body;
         }
@@ -218,11 +212,122 @@ impl Expr {
 
     #[must_use]
     pub fn render_with(&self, options: &RenderOptions) -> String {
-        let mut printer = Printer::new(options);
-        printer.expr(self);
-        printer.finish()
+        crate::print::render(self, options)
     }
 }
+
+/// Calls `$f` on every direct child of `$expr`; `mut` borrows them mutably.
+macro_rules! for_each_child {
+    ($expr:expr, $f:ident $(, $mut:tt)?) => {
+        match $expr {
+            Expr::Ident(_)
+            | Expr::Path(_)
+            | Expr::Int(_)
+            | Expr::Bool(_)
+            | Expr::Str(_)
+            | Expr::Null => {}
+            Expr::List(items) => {
+                for item in items {
+                    $f(item);
+                }
+            }
+            Expr::AttrSet { binds, .. } => {
+                for bind in binds {
+                    $f(& $($mut)? bind.value);
+                }
+            }
+            Expr::Select { expr, .. } | Expr::UnOp { expr, .. } => $f(expr),
+            Expr::Lambda { body, .. } => $f(body),
+            Expr::LetIn { binds, body } => {
+                for bind in binds {
+                    $f(& $($mut)? bind.value);
+                }
+                $f(body);
+            }
+            Expr::IfThenElse {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                $f(cond);
+                $f(then_expr);
+                $f(else_expr);
+            }
+            Expr::Assert { conds, body } => {
+                for cond in conds {
+                    $f(cond);
+                }
+                $f(body);
+            }
+            Expr::Apply { func, args } => {
+                $f(func);
+                for arg in args {
+                    $f(arg);
+                }
+            }
+            Expr::BinOp { lhs, rhs, .. } => {
+                $f(lhs);
+                $f(rhs);
+            }
+        }
+    };
+}
+
+impl Expr {
+    /// Calls `f` on every direct child expression.
+    pub fn for_each_child<'a>(&'a self, mut f: impl FnMut(&'a Self)) {
+        for_each_child!(self, f);
+    }
+
+    /// Calls `f` on every direct child expression, mutably.
+    pub fn for_each_child_mut(&mut self, mut f: impl FnMut(&mut Self)) {
+        for_each_child!(self, f, mut);
+    }
+}
+
+impl From<bool> for Expr {
+    fn from(value: bool) -> Self {
+        Self::bool(value)
+    }
+}
+
+impl From<&str> for Expr {
+    fn from(value: &str) -> Self {
+        Self::string(value)
+    }
+}
+
+impl From<String> for Expr {
+    fn from(value: String) -> Self {
+        Self::string(value)
+    }
+}
+
+impl From<&String> for Expr {
+    fn from(value: &String) -> Self {
+        Self::string(value.as_str())
+    }
+}
+
+impl<T: Into<Self>> From<Option<T>> for Expr {
+    fn from(value: Option<T>) -> Self {
+        value.map_or_else(Self::null, Into::into)
+    }
+}
+
+macro_rules! impl_from_int {
+    ($($ty:ty),*) => {
+        $(
+            impl From<$ty> for Expr {
+                fn from(value: $ty) -> Self {
+                    Self::int(i64::from(value))
+                }
+            }
+        )*
+    };
+}
+
+impl_from_int!(i8, i16, i32, i64, u8, u16, u32);
 
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

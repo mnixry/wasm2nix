@@ -1,6 +1,5 @@
 use pretty::BoxDoc;
 
-use crate::AttrBind;
 use crate::AttrKey;
 
 pub(super) type Doc = BoxDoc<'static, ()>;
@@ -10,10 +9,6 @@ pub(super) fn attr_key(key: &AttrKey) -> Doc {
         AttrKey::Ident(s) => text(s.clone()),
         AttrKey::Str(s) => string_doc(s),
     }
-}
-
-pub(super) fn attr_path(bind: &AttrBind) -> Doc {
-    join(bind.path.iter().map(attr_key), &text("."))
 }
 
 pub(super) fn text(s: impl Into<String>) -> Doc {
@@ -28,12 +23,11 @@ pub(super) fn string_doc(s: &str) -> Doc {
     text(format!("\"{}\"", escape_string(s)))
 }
 
+/// Joins `docs` with `sep`, pairing neighbours level by level so the result
+/// is a balanced tree: a left-leaning chain of 50k binds would overflow the
+/// stack when rendered.
 pub(super) fn join(docs: impl IntoIterator<Item = Doc>, sep: &Doc) -> Doc {
     let mut docs = docs.into_iter().collect::<Vec<_>>();
-    if docs.is_empty() {
-        return Doc::nil();
-    }
-
     while docs.len() > 1 {
         let mut next = Vec::with_capacity(docs.len().div_ceil(2));
         let mut pairs = docs.into_iter();
@@ -47,7 +41,7 @@ pub(super) fn join(docs: impl IntoIterator<Item = Doc>, sep: &Doc) -> Doc {
         docs = next;
     }
 
-    docs.pop().expect("non-empty docs")
+    docs.pop().unwrap_or_else(Doc::nil)
 }
 
 pub(super) fn escape_string(s: &str) -> String {
