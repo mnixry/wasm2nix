@@ -70,11 +70,20 @@ pub enum Error {
     #[snafu(display("WASM2NIX_TEST_EVAL_CMD is not a non-empty shell command"))]
     InvalidEvalCmd,
 
+    #[snafu(display("WASM2NIX_TEST_EVAL_CMD is not valid Unicode"))]
+    EvalCmdNotUnicode,
+
     #[snafu(display("failed to spawn nix eval"))]
     EvalNix { source: std::io::Error },
 
-    #[snafu(display("nix eval failed: {stderr}"))]
-    EvalNixFailed { stderr: String },
+    #[snafu(display("nix eval failed ({status}): {stderr}"))]
+    EvalNixFailed {
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
+
+    #[snafu(display("nix eval output has no well-formed `{field}`"))]
+    MalformedEvalOutput { field: &'static str },
 
     #[snafu(display("failed to decode nix eval JSON"))]
     DecodeEvalJson { source: serde_json::Error },

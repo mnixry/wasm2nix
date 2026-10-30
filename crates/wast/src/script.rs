@@ -15,6 +15,7 @@ use wasm2nix::linking::FuncType;
 use wasm2nix::linking::GlobalType;
 use wasm2nix::linking::ImportResolver;
 use wasm2nix::linking::Limits;
+use wasm2nix::linking::LinkError;
 use wasm2nix::linking::ModuleInterface;
 use wasm2nix::linking::TableType;
 use wasm2nix::linking::{self};
@@ -309,13 +310,8 @@ impl Session {
                 self.invoke(&invoke, case(at, &what, Check::Return(expected)))
             }
             WastExecute::Get { module, global, .. } => {
-                let key = self.select(module)?;
-                self.sync_global_imports_from_targets();
-                let expr = get_expr(&key, global, &self.modules, &self.aliases)?;
                 let what = format!("assert_return (get {global:?})");
-                self.batch
-                    .step(expr, case(at, &what, Check::Return(expected)));
-                Ok(())
+                self.get(module, global, case(at, &what, Check::Return(expected)))
             }
             WastExecute::Wat(_) => UnsupportedAssertReturnModuleExecutionSnafu.fail(),
         }
@@ -336,13 +332,20 @@ impl Session {
                 self.batch.step(expr, case(at, &what, Check::Fail));
             }
             WastExecute::Get { module, global, .. } => {
-                let key = self.select(module)?;
-                let expr = get_expr(&key, global, &self.modules, &self.aliases)?;
                 let what = format!("assert_trap (get {global:?})");
-                self.batch.step(expr, case(at, &what, Check::Fail));
+                self.get(module, global, case(at, &what, Check::Fail))?;
             }
             WastExecute::Wat(wat) => self.assert_trap_module(wat, at)?,
         }
+        Ok(())
+    }
+
+    /// Queues a read of a global export.
+    fn get(&mut self, module: Option<wast::token::Id<'_>>, global: &str, case: Case) -> Result<()> {
+        let key = self.select(module)?;
+        self.sync_global_imports_from_targets();
+        let expr = get_expr(&key, global, &self.modules, &self.aliases)?;
+        self.batch.step(expr, case);
         Ok(())
     }
 
@@ -396,8 +399,12 @@ impl Session {
 
     fn assert_unlinkable(&mut self, mut module: Wat<'_>, at: &str) -> Result<()> {
         let translated = translate(&module.encode().context(EncodeWatSnafu)?)?;
-        if self.validate_imports(&translated).is_err() {
-            return Ok(());
+        match self.validate_imports(&translated) {
+            Ok(()) => {}
+            Err(Error::Link {
+                source: LinkError::MissingImport { .. } | LinkError::IncompatibleImport { .. },
+            }) => return Ok(()),
+            Err(err) => return Err(err),
         }
         let path = self.write_module(&translated)?;
         let imports = import_modules(&translated);

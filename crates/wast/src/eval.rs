@@ -5,10 +5,12 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::env;
+use std::env::VarError;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::process::ExitStatus;
 
 use serde_json::Value as JsonValue;
 use snafu::prelude::*;
@@ -22,9 +24,11 @@ use wast::core::WastArgCore;
 use crate::error::CreateTempDirSnafu;
 use crate::error::DecodeEvalJsonSnafu;
 use crate::error::EncodeJsonSnafu;
+use crate::error::EvalCmdNotUnicodeSnafu;
 use crate::error::EvalNixFailedSnafu;
 use crate::error::EvalNixSnafu;
 use crate::error::InvalidEvalCmdSnafu;
+use crate::error::MalformedEvalOutputSnafu;
 use crate::error::NixIntegerOverflowSnafu;
 use crate::error::Result;
 use crate::error::UnknownModuleSnafu;
@@ -57,13 +61,18 @@ const DEFAULT_EVAL_CMD: &[&str] = &[
 pub struct Nix {
     dir: TempDir,
     files: usize,
+    program: String,
+    args: Vec<String>,
 }
 
 impl Nix {
     pub fn new() -> Result<Self> {
+        let (program, args) = eval_cmd()?;
         let nix = Self {
             dir: TempDir::new().context(CreateTempDirSnafu)?,
             files: 0,
+            program,
+            args,
         };
         write_file(&nix.rt_path(), wasm2nix_runtime::runtime_nix())?;
         write_file(&nix.harness_path(), include_str!("../nix/harness.nix"))?;
@@ -113,24 +122,17 @@ impl Nix {
         let program = Expr::let_in(all, nix!(builtins.toJSON(#{body})));
         let path = self.dir.path().join("eval.nix");
         write_file(&path, &program.render())?;
-        let cmd = env::var(EVAL_CMD_VAR).map_or_else(
-            |_| Some(DEFAULT_EVAL_CMD.iter().copied().map(Into::into).collect()),
-            |cmd| shlex::split(&cmd),
-        );
-        let (program, args) = cmd
-            .as_deref()
-            .and_then(<[String]>::split_first)
-            .context(InvalidEvalCmdSnafu)?;
-        let output = Command::new(program)
-            .args(args)
+        let output = Command::new(&self.program)
+            .args(&self.args)
             .args(["--raw", "--impure", "--log-format", "internal-json", "-f"])
             .arg(&path)
             .output()
             .context(EvalNixSnafu)?;
         if !output.status.success() {
-            return Ok(Err(EvalFailure::from_log(&String::from_utf8_lossy(
-                &output.stderr,
-            ))));
+            return Ok(Err(EvalFailure::from_log(
+                output.status,
+                &String::from_utf8_lossy(&output.stderr),
+            )));
         }
         serde_json::from_slice(&output.stdout)
             .context(DecodeEvalJsonSnafu)
@@ -138,8 +140,21 @@ impl Nix {
     }
 }
 
+/// The eval command: [`EVAL_CMD_VAR`] when set, else [`DEFAULT_EVAL_CMD`].
+fn eval_cmd() -> Result<(String, Vec<String>)> {
+    let cmd = match env::var(EVAL_CMD_VAR) {
+        Ok(cmd) => shlex::split(&cmd).context(InvalidEvalCmdSnafu)?,
+        Err(VarError::NotPresent) => DEFAULT_EVAL_CMD.iter().map(ToString::to_string).collect(),
+        Err(VarError::NotUnicode(_)) => return EvalCmdNotUnicodeSnafu.fail(),
+    };
+    let mut cmd = cmd.into_iter();
+    let program = cmd.next().context(InvalidEvalCmdSnafu)?;
+    Ok((program, cmd.collect()))
+}
+
 /// A failed evaluation, read from Nix's `internal-json` log.
 struct EvalFailure {
+    status: ExitStatus,
     /// The step that was started but never finished.
     aborted_step: Option<usize>,
     /// The innermost error message.
@@ -147,7 +162,7 @@ struct EvalFailure {
 }
 
 impl EvalFailure {
-    fn from_log(log: &str) -> Self {
+    fn from_log(status: ExitStatus, log: &str) -> Self {
         let mut open = Vec::new();
         let mut error = None;
         let records = log
@@ -180,6 +195,7 @@ impl EvalFailure {
             }
         }
         Self {
+            status,
             aborted_step: open.last().copied(),
             error: error.unwrap_or_else(|| log.to_string()),
         }
@@ -302,7 +318,7 @@ impl Batch {
         });
 
         let mut errors = BTreeMap::new();
-        let value = loop {
+        let mut value = loop {
             match nix.eval(self.binds.clone(), body.clone())? {
                 Ok(value) => break value,
                 Err(failure) => {
@@ -310,6 +326,7 @@ impl Batch {
                         .aborted_step
                         .filter(|step| !errors.contains_key(step))
                         .context(EvalNixFailedSnafu {
+                            status: failure.status,
                             stderr: failure.error.clone(),
                         })?;
                     self.binds[self.steps[step].bind].1 = nix!({
@@ -320,7 +337,10 @@ impl Batch {
                 }
             }
         };
-        let results = value["outcomes"].as_array().cloned().unwrap_or_default();
+        let results = match value["outcomes"].take() {
+            JsonValue::Array(results) if results.len() == self.steps.len() => results,
+            _ => return MalformedEvalOutputSnafu { field: "outcomes" }.fail(),
+        };
 
         let unexpected = self.steps.iter().enumerate().position(|(id, step)| {
             step.case.check.wants_success()
@@ -347,14 +367,13 @@ impl Batch {
                 error: errors.remove(&id),
             })
             .collect();
-        let states = value["states"]
-            .as_object()
-            .map(|states| states.clone().into_iter().collect())
-            .unwrap_or_default();
+        let JsonValue::Object(states) = value["states"].take() else {
+            return MalformedEvalOutputSnafu { field: "states" }.fail();
+        };
         Ok(Flushed {
             outcomes,
-            states,
-            query: value["query"].clone(),
+            states: states.into_iter().collect(),
+            query: value["query"].take(),
         })
     }
 }

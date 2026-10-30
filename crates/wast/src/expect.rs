@@ -47,10 +47,11 @@ impl Expected {
 
     fn matches(&self, actual: &JsonValue) -> bool {
         let bits = || json_number_to_u64(actual).ok();
+        let bits32 = || bits().and_then(|bits| u32::try_from(bits).ok());
         match self {
             Self::Exact(expected) => expected == actual,
-            Self::CanonicalNan32 => bits().is_some_and(|bits| f32_canonical_nan(bits as u32)),
-            Self::ArithmeticNan32 => bits().is_some_and(|bits| f32_arithmetic_nan(bits as u32)),
+            Self::CanonicalNan32 => bits32().is_some_and(f32_canonical_nan),
+            Self::ArithmeticNan32 => bits32().is_some_and(f32_arithmetic_nan),
             Self::CanonicalNan64 => bits().is_some_and(f64_canonical_nan),
             Self::ArithmeticNan64 => bits().is_some_and(f64_arithmetic_nan),
         }
