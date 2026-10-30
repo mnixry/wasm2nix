@@ -32,7 +32,7 @@ use cranelift_wasm::WasmResult;
 use cranelift_wasm::WasmValType;
 use cranelift_wasm::translate_module;
 use target_lexicon::PointerWidth;
-use wasm2nix_runtime::intrinsics as intr;
+use wasm2nix_runtime::intrinsics::UserName;
 
 use crate::func_env::NixFuncEnvironment;
 
@@ -399,10 +399,11 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         let mut func_environ = NixFuncEnvironment::new(&self.info);
         let sig = func_environ.vmctx_sig(sigidx);
 
-        let mut func = ir::Function::with_name_signature(
-            UserFuncName::user(intr::UserNamespace::Func.into(), func_index.as_u32()),
-            sig,
-        );
+        let name = UserName::Func(func_index)
+            .to_parts()
+            .map_err(|err| WasmError::User(err.to_string()))?;
+        let mut func =
+            ir::Function::with_name_signature(UserFuncName::user(name.namespace, name.index), sig);
         self.trans
             .translate_body(&mut validator, body, &mut func, &mut func_environ)?;
         self.info.function_bodies.push(func);

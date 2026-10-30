@@ -97,7 +97,7 @@ pub(super) fn lower_function(
     }
 
     let entry_record = lower_jump_record(entry, entry_args, nix!(st));
-    let run = RuntimeFunction::Trampoline.call(vec![nix!(blocks), entry_record]);
+    let run = RuntimeFunction::Trampoline.call([nix!(blocks), entry_record]);
     Ok(lambda_chain(
         &params,
         nix!(let

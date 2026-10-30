@@ -27,11 +27,10 @@ pub enum LowerError {
     #[snafu(display("unsupported external name {name}"))]
     UnsupportedExternalName { name: String },
 
-    #[snafu(display("unknown external name namespace {namespace}"))]
-    UnknownExternalNamespace { namespace: u32 },
-
-    #[snafu(display("unknown intrinsic index {index}"))]
-    UnknownIntrinsic { index: u32 },
+    #[snafu(display("invalid external function name"))]
+    InvalidUserName {
+        source: wasm2nix_runtime::intrinsics::UserNameError,
+    },
 
     #[snafu(display("missing type index {type_index}"))]
     MissingType { type_index: u32 },

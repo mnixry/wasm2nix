@@ -30,10 +30,7 @@ impl InstCtx<'_> {
             nix!(if #{a} then 1 else 0)
         } else {
             // For now, rely on runtime for non-bool extensions.
-            Expr::app(
-                RuntimeFunction::ConvUextend.expr(),
-                vec![a, Expr::string(out_ty.to_string())],
-            )
+            RuntimeFunction::ConvUextend.call([a, Expr::string(out_ty.to_string())])
         };
         self.pure_bind(out, e)
     }
@@ -44,12 +41,12 @@ impl InstCtx<'_> {
         let out_ty = self.func.dfg.value_type(out);
         let a = self.value_expr(arg);
         let e = match (in_ty, out_ty) {
-            (I8, I32) => RuntimeFunction::ConvSignExtend8.call(vec![a]),
-            (I16, I32) => RuntimeFunction::ConvSignExtend16.call(vec![a]),
-            (I8, I64) => RuntimeFunction::ConvSignExtend8I64.call(vec![a]),
-            (I16, I64) => RuntimeFunction::ConvSignExtend16I64.call(vec![a]),
-            (I32, I64) => RuntimeFunction::ConvSignExtend32.call(vec![a]),
-            _ => RuntimeFunction::ConvSextend.call(vec![a]),
+            (I8, I32) => RuntimeFunction::ConvSignExtend8.call([a]),
+            (I16, I32) => RuntimeFunction::ConvSignExtend16.call([a]),
+            (I8, I64) => RuntimeFunction::ConvSignExtend8I64.call([a]),
+            (I16, I64) => RuntimeFunction::ConvSignExtend16I64.call([a]),
+            (I32, I64) => RuntimeFunction::ConvSignExtend32.call([a]),
+            _ => RuntimeFunction::ConvSextend.call([a]),
         };
         self.pure_bind(out, e)
     }
@@ -61,7 +58,7 @@ impl InstCtx<'_> {
         let Some(function) = float_to_int_conv_function(self.op, in_ty, out_ty) else {
             return self.unsupported_opcode();
         };
-        let e = function.call(vec![self.value_expr(arg)]);
+        let e = function.call([self.value_expr(arg)]);
         Ok(self.pure_bind(out, e))
     }
 
@@ -72,7 +69,7 @@ impl InstCtx<'_> {
         let Some(function) = int_to_float_conv_function(self.op, in_ty, out_ty) else {
             return self.unsupported_opcode();
         };
-        let e = function.call(vec![self.value_expr(arg)]);
+        let e = function.call([self.value_expr(arg)]);
         Ok(self.pure_bind(out, e))
     }
 
@@ -82,7 +79,7 @@ impl InstCtx<'_> {
         } else {
             RuntimeFunction::F32DemoteF64
         };
-        self.bind_result(function.call(vec![self.value_expr(arg)]))
+        self.bind_result(function.call([self.value_expr(arg)]))
     }
 }
 

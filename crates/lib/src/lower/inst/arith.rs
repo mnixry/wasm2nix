@@ -34,20 +34,18 @@ impl InstCtx<'_> {
         match self.op {
             Opcode::Uextend => Ok(self.lower_uextend(arg)),
             Opcode::Sextend => Ok(self.lower_sextend(arg)),
-            Opcode::Ireduce => Ok(self.bind_result(Expr::app(
-                RuntimeFunction::ConvIreduce.expr(),
-                vec![self.value_expr(arg)],
-            ))),
+            Opcode::Ireduce => {
+                Ok(self.bind_result(RuntimeFunction::ConvIreduce.call([self.value_expr(arg)])))
+            }
             Opcode::FcvtToSint
             | Opcode::FcvtToUint
             | Opcode::FcvtToSintSat
             | Opcode::FcvtToUintSat => self.lower_float_to_int(arg),
             Opcode::FcvtFromSint | Opcode::FcvtFromUint => self.lower_int_to_float(arg),
             Opcode::Fpromote | Opcode::Fdemote => Ok(self.lower_float_resize(arg)),
-            Opcode::Bnot => Ok(self.bind_result(Expr::app(
-                RuntimeFunction::IntBnot.expr(),
-                vec![self.value_expr(arg)],
-            ))),
+            Opcode::Bnot => {
+                Ok(self.bind_result(RuntimeFunction::IntBnot.call([self.value_expr(arg)])))
+            }
             Opcode::Ineg => Ok(self.bind_result(Expr::un(UnOp::Neg, self.value_expr(arg)))),
             Opcode::Clz | Opcode::Ctz | Opcode::Popcnt => self.lower_int_unary(arg),
             Opcode::Fneg
@@ -67,7 +65,7 @@ impl InstCtx<'_> {
         let Some(function) = int_unary_function(self.op, out_ty) else {
             return self.unsupported_opcode();
         };
-        Ok(self.pure_bind(out, function.call(vec![self.value_expr(arg)])))
+        Ok(self.pure_bind(out, function.call([self.value_expr(arg)])))
     }
 
     fn lower_float_unary(&self, arg: ir::Value) -> Result<LoweredInst> {
@@ -76,7 +74,7 @@ impl InstCtx<'_> {
         let Some(function) = float_unary_function(self.op, out_ty) else {
             return self.unsupported_opcode();
         };
-        Ok(self.pure_bind(out, function.call(vec![self.value_expr(arg)])))
+        Ok(self.pure_bind(out, function.call([self.value_expr(arg)])))
     }
 
     pub(super) fn lower_binary(&self, args: [ir::Value; 2]) -> Result<LoweredInst> {
@@ -113,7 +111,7 @@ impl InstCtx<'_> {
         let Some(function) = binary_function(self.op, out_ty) else {
             return self.unsupported_opcode();
         };
-        Ok(self.pure_bind(out, function.call(vec![a, b])))
+        Ok(self.pure_bind(out, function.call([a, b])))
     }
 
     pub(super) fn lower_binary_imm(&self, arg: ir::Value, imm64: i64) -> LoweredInst {
@@ -141,7 +139,7 @@ impl InstCtx<'_> {
         let Some(function) = binary_imm_function(self.op, out_ty) else {
             return self.unsupported(format!("wasm2nix: unimplemented binary-imm op {}", self.op));
         };
-        self.pure_bind(out, function.call(vec![self.value_expr(arg), imm_expr]))
+        self.pure_bind(out, function.call([self.value_expr(arg), imm_expr]))
     }
 
     pub(super) fn lower_select(&self, args: [ir::Value; 3]) -> LoweredInst {

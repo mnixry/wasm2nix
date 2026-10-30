@@ -1,12 +1,15 @@
 use cranelift_codegen::ir::{self};
+use snafu::OptionExt;
+use snafu::ResultExt;
 use wasm2nix_runtime::RuntimeFunction;
 use wasm2nix_runtime::RuntimeResultKind;
-use wasm2nix_runtime::intrinsics as intr;
+use wasm2nix_runtime::intrinsics::Intrinsic;
+use wasm2nix_runtime::intrinsics::UserName;
+use wasm2nix_runtime::intrinsics::UserNameParts;
 
+use crate::lower::error::InvalidUserNameSnafu;
 use crate::lower::error::MissingTypeSnafu;
 use crate::lower::error::Result;
-use crate::lower::error::UnknownExternalNamespaceSnafu;
-use crate::lower::error::UnknownIntrinsicSnafu;
 use crate::lower::error::UnsupportedExternalNameSnafu;
 use crate::lower::inst::InstCtx;
 use crate::lower::inst::LoweredInst;
@@ -24,7 +27,7 @@ impl InstCtx<'_> {
             return Ok(self.unsupported("wasm2nix: unsupported call kind"));
         };
 
-        let callee = self.func.dfg.ext_funcs[fref].name.clone();
+        let callee = &self.func.dfg.ext_funcs[fref].name;
         let (callee_expr, call_kind) = resolve_callee(self.module, self.func, callee)?;
 
         match call_kind {
@@ -100,71 +103,63 @@ enum CallKind {
 }
 
 fn resolve_callee(
-    module: &NixModule, func: &ir::Function, name: ir::ExternalName,
+    module: &NixModule, func: &ir::Function, name: &ir::ExternalName,
 ) -> Result<(Expr, CallKind)> {
-    match name {
-        ir::ExternalName::User(user_ref) => {
-            let user = &func.params.user_named_funcs()[user_ref];
-            match intr::UserNamespace::try_from(user.namespace) {
-                Ok(intr::UserNamespace::Func) => {
-                    // wasm function: f{index}
-                    Ok((
-                        Expr::ident(format!("f{}", user.index)),
-                        CallKind::StatefulRecord,
-                    ))
-                }
-                Ok(intr::UserNamespace::Intrinsic) => {
-                    let intrinsic = intr::Intrinsic::try_from(user.index)
-                        .map_err(|_| UnknownIntrinsicSnafu { index: user.index }.build())?;
-                    resolve_intrinsic_callee(module, intrinsic, user.index)
-                }
-                Ok(intr::UserNamespace::Symbol) | Err(_) => UnknownExternalNamespaceSnafu {
-                    namespace: user.namespace,
-                }
-                .fail(),
-            }
+    let ir::ExternalName::User(user_ref) = name else {
+        return UnsupportedExternalNameSnafu {
+            name: format!("{name:?}"),
         }
-        other => UnsupportedExternalNameSnafu {
-            name: format!("{other:?}"),
+        .fail();
+    };
+    let user = &func.params.user_named_funcs()[*user_ref];
+    let parts = UserNameParts {
+        namespace: user.namespace,
+        index: user.index,
+    };
+    match UserName::from_parts(parts).context(InvalidUserNameSnafu)? {
+        UserName::Func(func_index) => Ok((
+            Expr::ident(format!("f{}", func_index.as_u32())),
+            CallKind::StatefulRecord,
+        )),
+        UserName::Intrinsic(intrinsic) => resolve_intrinsic_callee(module, intrinsic),
+        UserName::MemoryBase(_) => UnsupportedExternalNameSnafu {
+            name: format!("{name:?}"),
         }
         .fail(),
     }
 }
 
-fn resolve_intrinsic_callee(
-    module: &NixModule, intrinsic: intr::Intrinsic, encoded_index: u32,
-) -> Result<(Expr, CallKind)> {
-    if let Some(function) = intrinsic.runtime_function() {
-        let kind = intrinsic
-            .runtime_result_kind()
-            .expect("fixed runtime intrinsic has result kind");
-        return Ok((function.expr(), runtime_result_to_call_kind(kind)));
-    }
-
+fn resolve_intrinsic_callee(module: &NixModule, intrinsic: Intrinsic) -> Result<(Expr, CallKind)> {
     match intrinsic {
-        intr::Intrinsic::RefFunc { func_index } => {
+        Intrinsic::Fixed(fixed) => {
+            let function = fixed.runtime_function();
+            Ok((
+                function.expr(),
+                runtime_result_to_call_kind(function.result_kind()),
+            ))
+        }
+        Intrinsic::RefFunc { func_index } => {
             Ok((lower_table_entry(module, func_index), CallKind::Pure))
         }
-        intr::Intrinsic::CallIndirect {
+        Intrinsic::CallIndirect {
             table_index,
             type_index,
         } => {
-            let sig_index = cranelift_wasm::TypeIndex::from_u32(type_index);
-            let Some(sig) = module.info.signatures.get(sig_index) else {
-                return MissingTypeSnafu { type_index }.fail();
-            };
+            let sig = module
+                .info
+                .signatures
+                .get(type_index)
+                .context(MissingTypeSnafu {
+                    type_index: type_index.as_u32(),
+                })?;
             Ok((
                 RuntimeFunction::TableCall.expr(),
                 CallKind::Indirect {
-                    table_index,
+                    table_index: table_index.as_u32(),
                     type_id: signature_id(sig),
                 },
             ))
         }
-        _ => UnknownIntrinsicSnafu {
-            index: encoded_index,
-        }
-        .fail(),
     }
 }
 

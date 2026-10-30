@@ -51,7 +51,7 @@ fn lower_initial_memory(module: &NixModule) -> Expr {
         in {
             pageCount = #{lower_attr_or(nix!(importedMem), "pageCount", declared_min)};
             maxPageCount = #{lower_attr_or(nix!(importedMem), "maxPageCount", declared_max)};
-            pages = #{RuntimeFunction::MemOverlayPages.call(vec![
+            pages = #{RuntimeFunction::MemOverlayPages.call([
                 lower_attr_or(nix!(importedMem), "pages", nix!({})),
                 overlay_pages,
             ])};

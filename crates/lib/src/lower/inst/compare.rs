@@ -18,10 +18,7 @@ impl InstCtx<'_> {
         if let Some(e) = inline_int_compare(is_i64, cond, lhs.clone(), rhs.clone()) {
             return self.bind_result(e);
         }
-        self.bind_result(Expr::app(
-            int_compare_function(is_i64, cond).expr(),
-            vec![lhs, rhs],
-        ))
+        self.bind_result(int_compare_function(is_i64, cond).call([lhs, rhs]))
     }
 
     pub(super) fn lower_int_compare_imm(
@@ -37,10 +34,7 @@ impl InstCtx<'_> {
         if let Some(e) = inline_int_compare(ty == I64, cond, lhs.clone(), imm_expr.clone()) {
             return self.bind_result(e);
         }
-        self.bind_result(Expr::app(
-            int_compare_function(ty == I64, cond).expr(),
-            vec![lhs, imm_expr],
-        ))
+        self.bind_result(int_compare_function(ty == I64, cond).call([lhs, imm_expr]))
     }
 
     pub(super) fn lower_float_compare(
@@ -50,10 +44,7 @@ impl InstCtx<'_> {
         let Some(function) = float_compare_function(ty, cond) else {
             return self.unsupported_opcode();
         };
-        Ok(self.bind_result(Expr::app(
-            function.expr(),
-            vec![self.value_expr(args[0]), self.value_expr(args[1])],
-        )))
+        Ok(self.bind_result(function.call([self.value_expr(args[0]), self.value_expr(args[1])])))
     }
 }
 

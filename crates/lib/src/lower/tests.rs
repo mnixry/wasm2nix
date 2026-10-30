@@ -65,7 +65,7 @@ fn generated_module_inlines_single_use_immediates_into_bindings() {
     );
 
     let expected = RuntimeFunction::I32Mul
-        .call(vec![Expr::int(40), Expr::int(2)])
+        .call([Expr::int(40), Expr::int(2)])
         .render();
     assert!(nix.contains(&expected));
     assert!(

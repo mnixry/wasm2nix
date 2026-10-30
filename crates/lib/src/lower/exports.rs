@@ -1,6 +1,7 @@
 use cranelift_wasm::WasmValType;
-use wasm2nix_runtime::RuntimeFunction;
+use snafu::OptionExt;
 use wasm2nix_runtime::RuntimeNamespace;
+use wasm2nix_runtime::intrinsics::global_accessors;
 
 use crate::lower::error::Result;
 use crate::lower::error::UnsupportedGlobalTypeSnafu;
@@ -96,33 +97,19 @@ fn lower_table_export(table_index: u32) -> Expr {
 }
 
 fn lower_global_export(global_index: u32, ty: WasmValType) -> Result<Expr> {
-    let get = global_get_function(ty)?;
-    let set = global_set_function(ty)?;
+    let accessors =
+        global_accessors(&ty).context(UnsupportedGlobalTypeSnafu { ty: ty.to_string() })?;
     let index = i64::from(global_index);
-    let get_call = get.call(vec![Expr::int(index), nix!(st)]);
-    let set_call = set.call(vec![Expr::int(index), nix!(value), nix!(st)]);
+    let get_call = accessors
+        .get
+        .runtime_function()
+        .call([Expr::int(index), nix!(st)]);
+    let set_call = accessors
+        .set
+        .runtime_function()
+        .call([Expr::int(index), nix!(value), nix!(st)]);
     Ok(nix!({
         get = st: #{get_call};
         set = value: st: #{set_call};
     }))
-}
-
-fn global_get_function(ty: WasmValType) -> Result<RuntimeFunction> {
-    match ty {
-        WasmValType::I32 | WasmValType::Ref(_) => Ok(RuntimeFunction::GlobalGetI32),
-        WasmValType::I64 => Ok(RuntimeFunction::GlobalGetI64),
-        WasmValType::F32 => Ok(RuntimeFunction::GlobalGetF32),
-        WasmValType::F64 => Ok(RuntimeFunction::GlobalGetF64),
-        WasmValType::V128 => UnsupportedGlobalTypeSnafu { ty: ty.to_string() }.fail(),
-    }
-}
-
-fn global_set_function(ty: WasmValType) -> Result<RuntimeFunction> {
-    match ty {
-        WasmValType::I32 | WasmValType::Ref(_) => Ok(RuntimeFunction::GlobalSetI32),
-        WasmValType::I64 => Ok(RuntimeFunction::GlobalSetI64),
-        WasmValType::F32 => Ok(RuntimeFunction::GlobalSetF32),
-        WasmValType::F64 => Ok(RuntimeFunction::GlobalSetF64),
-        WasmValType::V128 => UnsupportedGlobalTypeSnafu { ty: ty.to_string() }.fail(),
-    }
 }

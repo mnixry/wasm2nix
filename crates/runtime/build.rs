@@ -1,165 +1,180 @@
+//! Generates `RuntimeFunction` from the `# wasm2nix:runtime-fn` annotations
+//! in `nix/rt.nix`.
+
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::env;
-use std::error::Error;
 use std::fs;
+use std::io;
+use std::path::Path;
 use std::path::PathBuf;
 
 use proc_macro2::Ident;
-use proc_macro2::Literal;
 use proc_macro2::TokenStream;
 use quote::format_ident;
 use quote::quote;
+use snafu::OptionExt;
+use snafu::ResultExt;
+use snafu::Snafu;
+use snafu::ensure;
 
-#[derive(Debug, Clone)]
+const ANNOTATION: &str = "# wasm2nix:runtime-fn ";
+
+#[derive(Debug, Snafu)]
+enum Error {
+    #[snafu(display("failed to read {}", path.display()))]
+    Read { path: PathBuf, source: io::Error },
+
+    #[snafu(display("failed to write {}", path.display()))]
+    Write { path: PathBuf, source: io::Error },
+
+    #[snafu(display("OUT_DIR must be set"))]
+    MissingOutDir,
+
+    #[snafu(display("rt.nix contains no runtime function annotations"))]
+    NoAnnotations,
+
+    #[snafu(display("invalid runtime function annotation at rt.nix:{line}: {reason}"))]
+    Annotation { line: usize, reason: &'static str },
+
+    #[snafu(display("unknown runtime result kind `{kind}` at rt.nix:{line}"))]
+    UnknownResultKind { line: usize, kind: String },
+
+    #[snafu(display("duplicate runtime path `{path}`"))]
+    DuplicatePath { path: String },
+
+    #[snafu(display("runtime path `{path}` is not a valid Rust variant `{variant}`"))]
+    InvalidVariant {
+        path: String,
+        variant: String,
+        source: syn::Error,
+    },
+
+    #[snafu(display("duplicate runtime enum variant `{variant}`"))]
+    DuplicateVariant { variant: String },
+}
+
 struct RuntimeFn {
     path: Vec<String>,
-    args: Vec<String>,
-    result: RuntimeResult,
+    variant: Ident,
+    arity: usize,
+    /// The `RuntimeResultKind` variant.
+    result: Ident,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuntimeResult {
-    Value,
-    State,
-    Record,
-}
-
-impl RuntimeResult {
-    fn parse(s: &str) -> Result<Self, String> {
-        match s {
-            "value" => Ok(Self::Value),
-            "state" => Ok(Self::State),
-            "record" => Ok(Self::Record),
-            other => Err(format!("unknown runtime result kind `{other}`")),
-        }
-    }
-
-    fn tokens(self) -> TokenStream {
-        match self {
-            Self::Value => quote!(crate::RuntimeResultKind::Value),
-            Self::State => quote!(crate::RuntimeResultKind::State),
-            Self::Record => quote!(crate::RuntimeResultKind::Record),
-        }
-    }
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
-    let runtime_path = manifest_dir.join("nix/rt.nix");
+fn main() -> Result<(), Error> {
+    let runtime_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("nix/rt.nix");
     println!("cargo:rerun-if-changed={}", runtime_path.display());
     println!("cargo:rerun-if-changed=build.rs");
 
-    let runtime = fs::read_to_string(&runtime_path)?;
-    let mut functions = parse_runtime_functions(&runtime)?;
-    functions.sort_by(|lhs, rhs| lhs.path.cmp(&rhs.path));
-    validate(&functions)?;
+    let runtime = fs::read_to_string(&runtime_path).context(ReadSnafu {
+        path: &runtime_path,
+    })?;
+    let functions = parse_runtime_functions(&runtime)?;
 
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR must be set")?);
-
-    let generated = runtime_calls_tokens(&functions);
-    syn::parse2::<syn::File>(generated.clone())?;
-    fs::write(out_dir.join("runtime_calls.rs"), generated.to_string())?;
-
-    Ok(())
+    let out_path =
+        PathBuf::from(env::var_os("OUT_DIR").context(MissingOutDirSnafu)?).join("runtime_calls.rs");
+    let generated = runtime_calls_tokens(&functions).to_string();
+    fs::write(&out_path, generated).context(WriteSnafu { path: out_path })
 }
 
-fn parse_runtime_functions(source: &str) -> Result<Vec<RuntimeFn>, Box<dyn Error>> {
-    let mut functions = Vec::new();
-    for (line_index, line) in source.lines().enumerate() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("# wasm2nix:runtime-fn ") else {
+/// Parses every annotation, sorted by path.
+fn parse_runtime_functions(source: &str) -> Result<Vec<RuntimeFn>, Error> {
+    let mut functions = BTreeMap::new();
+    let mut variants = BTreeSet::new();
+    for (line, annotation) in (1..).zip(source.lines()) {
+        let Some(annotation) = annotation.trim().strip_prefix(ANNOTATION) else {
             continue;
         };
-        functions.push(parse_runtime_function(rest).map_err(|err| {
-            format!(
-                "invalid runtime function annotation at rt.nix:{}: {err}",
-                line_index + 1
-            )
-        })?);
+        let function = parse_runtime_function(line, annotation)?;
+        let path = function.path.join(".");
+        ensure!(!functions.contains_key(&path), DuplicatePathSnafu { path });
+        let variant = function.variant.to_string();
+        ensure!(
+            !variants.contains(&variant),
+            DuplicateVariantSnafu { variant }
+        );
+        variants.insert(variant);
+        functions.insert(path, function);
     }
-    if functions.is_empty() {
-        return Err("rt.nix contains no runtime function annotations".into());
-    }
-    Ok(functions)
+    ensure!(!functions.is_empty(), NoAnnotationsSnafu);
+    Ok(functions.into_values().collect())
 }
 
-fn parse_runtime_function(annotation: &str) -> Result<RuntimeFn, String> {
-    let (head, result) = annotation
+/// Parses `a.b.c(arg, …) -> kind`.
+fn parse_runtime_function(line: usize, annotation: &str) -> Result<RuntimeFn, Error> {
+    let malformed = |reason| AnnotationSnafu { line, reason };
+    let (head, kind) = annotation
         .split_once(" -> ")
-        .ok_or("missing ` -> result-kind`")?;
-    let result = RuntimeResult::parse(result.trim())?;
-    let open = head.find('(').ok_or("missing argument list")?;
-    let close = head.rfind(')').ok_or("missing closing `)`")?;
-    if close != head.len() - 1 {
-        return Err("unexpected trailing content after argument list".into());
-    }
+        .context(malformed("missing ` -> result-kind`"))?;
+    let result = match kind.trim() {
+        "value" => format_ident!("Value"),
+        "state" => format_ident!("State"),
+        "record" => format_ident!("Record"),
+        kind => return UnknownResultKindSnafu { line, kind }.fail(),
+    };
+    let (path, args) = head
+        .strip_suffix(')')
+        .and_then(|head| head.split_once('('))
+        .context(malformed("expected `path(args)`"))?;
 
-    let path = head[..open]
-        .split('.')
-        .map(str::trim)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if path.is_empty() || path.iter().any(String::is_empty) {
-        return Err("runtime path must contain non-empty segments".into());
-    }
-
-    let args = head[open + 1..close].trim();
-    let args = if args.is_empty() {
-        Vec::new()
+    let path = path.split('.').map(str::trim).collect::<Vec<_>>();
+    ensure!(
+        !path.iter().any(|segment| segment.is_empty()),
+        malformed("runtime path must contain non-empty segments")
+    );
+    let args = args.trim();
+    let arity = if args.is_empty() {
+        0
     } else {
-        args.split(',')
-            .map(str::trim)
-            .map(str::to_string)
-            .collect::<Vec<_>>()
+        args.split(',').count()
     };
 
-    for arg in &args {
-        validate_rust_ident(arg).map_err(|err| format!("invalid arg `{arg}`: {err}"))?;
-    }
-
-    Ok(RuntimeFn { path, args, result })
+    let variant = variant_name(&path);
+    let variant = syn::parse_str::<Ident>(&variant).context(InvalidVariantSnafu {
+        path: path.join("."),
+        variant,
+    })?;
+    Ok(RuntimeFn {
+        path: path.into_iter().map(str::to_string).collect(),
+        variant,
+        arity,
+        result,
+    })
 }
 
-fn validate(functions: &[RuntimeFn]) -> Result<(), Box<dyn Error>> {
-    let mut paths = std::collections::BTreeSet::new();
-    let mut variants = std::collections::BTreeSet::new();
-
-    for function in functions {
-        let path = function.path.join(".");
-        if !paths.insert(path.clone()) {
-            return Err(format!("duplicate runtime path `{path}`").into());
-        }
-
-        let variant = variant_name(&function.path);
-        validate_rust_ident(&variant)?;
-        if !variants.insert(variant.clone()) {
-            return Err(format!("duplicate runtime enum variant `{variant}`").into());
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_rust_ident(s: &str) -> Result<(), String> {
-    syn::parse_str::<syn::Ident>(s)
-        .map(|_| ())
-        .map_err(|err| err.to_string())
+/// `i32.trunc_sat_f32_s` becomes `I32TruncSatF32S`.
+fn variant_name(path: &[&str]) -> String {
+    path.iter()
+        .flat_map(|segment| segment.split('_'))
+        .flat_map(|word| {
+            // Leading digits stay; the first letter after them is uppercased.
+            let letter = word
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(word.len());
+            let (digits, rest) = word.split_at(letter);
+            let mut rest = rest.chars();
+            let upper = rest.next().map(|c| c.to_ascii_uppercase());
+            digits.chars().chain(upper).chain(rest)
+        })
+        .collect()
 }
 
 fn runtime_calls_tokens(functions: &[RuntimeFn]) -> TokenStream {
-    let variants = functions
-        .iter()
-        .map(|function| format_ident!("{}", variant_name(&function.path)))
-        .collect::<Vec<_>>();
-    let path_arms = functions
-        .iter()
-        .zip(&variants)
-        .map(|(function, variant)| {
-            let segments = string_literals(&function.path);
-            quote!(Self::#variant => &[#(#segments),*])
-        })
-        .collect::<Vec<_>>();
-    let arity_arms = grouped_arity_arms(functions, &variants);
-    let result_arms = grouped_result_arms(functions, &variants);
+    let variants = functions.iter().map(|function| &function.variant);
+    let path_arms = functions.iter().map(|function| {
+        let variant = &function.variant;
+        let segments = &function.path;
+        quote!(Self::#variant => &[#(#segments),*])
+    });
+    let arity_arms = grouped_arms(functions, |function| {
+        let arity = function.arity;
+        quote!(#arity)
+    });
+    let result_arms = grouped_arms(functions, |function| {
+        let kind = &function.result;
+        quote!(crate::RuntimeResultKind::#kind)
+    });
     quote! {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub enum RuntimeFunction {
@@ -188,93 +203,37 @@ fn runtime_calls_tokens(functions: &[RuntimeFn]) -> TokenStream {
                 }
             }
 
+            /// `rt.<path>`.
             #[must_use]
             pub fn expr(self) -> wasm2nix_ast::Expr {
-                let mut expr = wasm2nix_ast::Expr::ident("rt");
-                for segment in self.path() {
-                    expr = wasm2nix_ast::Expr::select(expr, wasm2nix_ast::AttrKey::ident(*segment));
-                }
-                expr
+                crate::rt_path(self.path())
             }
 
+            /// Calls this runtime function with exactly [`Self::arity`] arguments.
             #[must_use]
-            #[doc = "Builds a Nix expression that calls this runtime function."]
-            #[doc = ""]
-            #[doc = "# Panics"]
-            #[doc = ""]
-            #[doc = "Panics when `args.len()` does not match this runtime function's arity."]
-            pub fn call(self, args: Vec<wasm2nix_ast::Expr>) -> wasm2nix_ast::Expr {
-                assert_eq!(
-                    args.len(),
-                    self.arity(),
-                    "runtime call argument count mismatch for {self:?}"
-                );
+            pub fn call<const N: usize>(self, args: [wasm2nix_ast::Expr; N]) -> wasm2nix_ast::Expr {
+                debug_assert_eq!(N, self.arity(), "runtime call arity mismatch for {self:?}");
                 wasm2nix_ast::Expr::app(self.expr(), args)
             }
         }
     }
 }
 
-fn grouped_arity_arms(functions: &[RuntimeFn], variants: &[Ident]) -> Vec<TokenStream> {
-    let mut variants_by_arity = std::collections::BTreeMap::<usize, Vec<&Ident>>::new();
-    for (function, variant) in functions.iter().zip(variants) {
-        variants_by_arity
-            .entry(function.args.len())
-            .or_default()
-            .push(variant);
+/// Match arms grouping variants by the tokens `value` renders for them.
+fn grouped_arms(
+    functions: &[RuntimeFn], value: impl Fn(&RuntimeFn) -> TokenStream,
+) -> Vec<TokenStream> {
+    let mut groups = BTreeMap::<String, (TokenStream, Vec<&Ident>)>::new();
+    for function in functions {
+        let tokens = value(function);
+        groups
+            .entry(tokens.to_string())
+            .or_insert_with(|| (tokens, Vec::new()))
+            .1
+            .push(&function.variant);
     }
-
-    variants_by_arity
-        .into_iter()
-        .map(|(arity, variants)| quote!(#(Self::#variants)|* => #arity))
+    groups
+        .into_values()
+        .map(|(value, variants)| quote!(#(Self::#variants)|* => #value))
         .collect()
-}
-
-fn grouped_result_arms(functions: &[RuntimeFn], variants: &[Ident]) -> Vec<TokenStream> {
-    [
-        RuntimeResult::Value,
-        RuntimeResult::State,
-        RuntimeResult::Record,
-    ]
-    .into_iter()
-    .filter_map(|result| {
-        let variants = functions
-            .iter()
-            .zip(variants)
-            .filter_map(|(function, variant)| (function.result == result).then_some(variant))
-            .collect::<Vec<_>>();
-        if variants.is_empty() {
-            return None;
-        }
-
-        let result = result.tokens();
-        Some(quote!(#(Self::#variants)|* => #result))
-    })
-    .collect()
-}
-
-fn string_literals(strings: &[String]) -> Vec<Literal> {
-    strings.iter().map(|s| Literal::string(s)).collect()
-}
-
-fn variant_name(path: &[String]) -> String {
-    path.iter()
-        .flat_map(|segment| segment.split('_'))
-        .map(to_pascal_segment)
-        .collect::<String>()
-}
-
-fn to_pascal_segment(segment: &str) -> String {
-    let mut out = String::new();
-    let mut chars = segment.chars();
-    while let Some(ch) = chars.next() {
-        if ch.is_ascii_digit() {
-            out.push(ch);
-            continue;
-        }
-        out.push(ch.to_ascii_uppercase());
-        out.extend(chars);
-        break;
-    }
-    out
 }

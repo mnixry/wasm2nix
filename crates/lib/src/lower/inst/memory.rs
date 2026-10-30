@@ -18,20 +18,18 @@ impl InstCtx<'_> {
         let out = self.results[0];
         let out_ty = self.func.dfg.value_type(out);
         let addr = self.addr_with_offset(arg, offset);
-        let e = Expr::app(
-            load_function(self.op, out_ty)?.expr(),
-            vec![addr, Expr::ident(self.st_name)],
-        );
+        let e = load_function(self.op, out_ty)?.call([addr, Expr::ident(self.st_name)]);
         Ok(self.pure_bind(out, e))
     }
 
     pub(super) fn lower_store(&self, args: [ir::Value; 2], offset: i32) -> Result<LoweredInst> {
         let val = self.value_expr(args[0]);
         let addr = self.addr_with_offset(args[1], offset);
-        let e = Expr::app(
-            store_function(self.op, self.func.dfg.value_type(args[0]))?.expr(),
-            vec![val, addr, Expr::ident(self.st_name)],
-        );
+        let e = store_function(self.op, self.func.dfg.value_type(args[0]))?.call([
+            val,
+            addr,
+            Expr::ident(self.st_name),
+        ]);
         Ok(self.stateful_state_step(e))
     }
 }

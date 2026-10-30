@@ -200,13 +200,12 @@ impl Session {
                 continue;
             }
             let offset = nix_u64(init.offset)?;
-            let bytes = RuntimeFunction::MemLoadBytes.call(vec![
+            let bytes = RuntimeFunction::MemLoadBytes.call([
                 offset.clone(),
                 nix_u64(len)?,
                 source_state.clone(),
             ]);
-            let state =
-                RuntimeFunction::MemStoreBytes.call(vec![bytes, offset, target.state.clone()]);
+            let state = RuntimeFunction::MemStoreBytes.call([bytes, offset, target.state.clone()]);
             self.set_state(&target_key, state);
         }
         Ok(())

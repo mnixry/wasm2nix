@@ -13,6 +13,7 @@ snafu.workspace          = true
 [build-dependencies]
 proc-macro2.workspace = true
 quote.workspace       = true
+snafu.workspace       = true
 syn.workspace         = true
 
 [lints]

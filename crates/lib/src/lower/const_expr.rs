@@ -46,7 +46,7 @@ pub(super) fn lower_const_expr(
                     ConstOp::I64Sub => RuntimeFunction::I64Sub,
                     _ => RuntimeFunction::I64Mul,
                 };
-                stack.push(function.call(vec![lhs, rhs]));
+                stack.push(function.call([lhs, rhs]));
             }
             _ => {
                 return MalformedConstExprSnafu {

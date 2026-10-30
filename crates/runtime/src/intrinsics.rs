@@ -1,50 +1,119 @@
+//! The functions and symbols the translator declares in Cranelift IR, and
+//! their `UserExternalName { namespace, index }` encoding. Every kind has its
+//! own namespace, so the encoding is lossless.
+
 use cranelift_wasm::FuncIndex;
+use cranelift_wasm::MemoryIndex;
+use cranelift_wasm::TableIndex;
 use cranelift_wasm::TypeIndex;
+use cranelift_wasm::WasmValType;
+use snafu::OptionExt;
 use snafu::Snafu;
 
 use crate::RuntimeFunction;
-use crate::RuntimeResultKind;
 
 #[derive(Debug, Snafu)]
-pub enum IntrinsicCastError {
-    #[snafu(display("user namespace cast failed, unexpected value: {value}"))]
-    UserNamespaceCast { value: u32 },
-    #[snafu(display("intrinsic index cast failed, unexpected value: {value}"))]
-    IntrinsicIndexCast { value: u32 },
+pub enum UserNameError {
+    #[snafu(display("unknown intrinsic code {code}"))]
+    UnknownIntrinsic { code: u32 },
+
+    #[snafu(display("table index {table_index:?} exceeds the call_indirect namespaces"))]
+    TableIndexOverflow { table_index: TableIndex },
 }
 
+/// A Cranelift user external name declared by the translator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UserNamespace {
-    Func,
-    Intrinsic,
-    Symbol,
+pub enum UserName {
+    /// A Wasm function.
+    Func(FuncIndex),
+    /// The symbolic base address of a linear memory, which lowers as 0.
+    MemoryBase(MemoryIndex),
+    Intrinsic(Intrinsic),
 }
 
-impl TryFrom<u32> for UserNamespace {
-    type Error = IntrinsicCastError;
+/// The raw parts of a [`UserName`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserNameParts {
+    pub namespace: u32,
+    pub index: u32,
+}
 
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::Func),
-            1 => Ok(Self::Intrinsic),
-            2 => Ok(Self::Symbol),
-            _ => UserNamespaceCastSnafu { value }.fail(),
-        }
+const FUNC_NAMESPACE: u32 = 0;
+const FIXED_INTRINSIC_NAMESPACE: u32 = 1;
+const MEMORY_BASE_NAMESPACE: u32 = 2;
+const REF_FUNC_NAMESPACE: u32 = 3;
+/// `call_indirect` through table `t` uses namespace `CALL_INDIRECT_NAMESPACE +
+/// t`.
+const CALL_INDIRECT_NAMESPACE: u32 = 4;
+
+impl UserName {
+    /// # Errors
+    ///
+    /// Returns an error when a `call_indirect` table index does not fit the
+    /// namespace range.
+    pub fn to_parts(self) -> Result<UserNameParts, UserNameError> {
+        let (namespace, index) = match self {
+            Self::Func(func) => (FUNC_NAMESPACE, func.as_u32()),
+            Self::MemoryBase(memory) => (MEMORY_BASE_NAMESPACE, memory.as_u32()),
+            Self::Intrinsic(Intrinsic::Fixed(fixed)) => (FIXED_INTRINSIC_NAMESPACE, fixed as u32),
+            Self::Intrinsic(Intrinsic::RefFunc { func_index }) => {
+                (REF_FUNC_NAMESPACE, func_index.as_u32())
+            }
+            Self::Intrinsic(Intrinsic::CallIndirect {
+                table_index,
+                type_index,
+            }) => (
+                CALL_INDIRECT_NAMESPACE
+                    .checked_add(table_index.as_u32())
+                    .context(TableIndexOverflowSnafu { table_index })?,
+                type_index.as_u32(),
+            ),
+        };
+        Ok(UserNameParts { namespace, index })
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error for a fixed intrinsic code that does not exist.
+    pub fn from_parts(parts: UserNameParts) -> Result<Self, UserNameError> {
+        let UserNameParts { namespace, index } = parts;
+        Ok(match namespace {
+            FUNC_NAMESPACE => Self::Func(FuncIndex::from_u32(index)),
+            MEMORY_BASE_NAMESPACE => Self::MemoryBase(MemoryIndex::from_u32(index)),
+            FIXED_INTRINSIC_NAMESPACE => Self::Intrinsic(Intrinsic::Fixed(
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|code| FixedIntrinsic::ALL.get(code))
+                    .copied()
+                    .context(UnknownIntrinsicSnafu { code: index })?,
+            )),
+            REF_FUNC_NAMESPACE => Self::Intrinsic(Intrinsic::RefFunc {
+                func_index: FuncIndex::from_u32(index),
+            }),
+            table => Self::Intrinsic(Intrinsic::CallIndirect {
+                table_index: TableIndex::from_u32(table - CALL_INDIRECT_NAMESPACE),
+                type_index: TypeIndex::from_u32(index),
+            }),
+        })
     }
 }
 
-impl From<UserNamespace> for u32 {
-    fn from(val: UserNamespace) -> Self {
-        match val {
-            UserNamespace::Func => 0,
-            UserNamespace::Intrinsic => 1,
-            UserNamespace::Symbol => 2,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Intrinsic {
+    /// A runtime function with a fixed signature.
+    Fixed(FixedIntrinsic),
+    CallIndirect {
+        table_index: TableIndex,
+        type_index: TypeIndex,
+    },
+    RefFunc {
+        func_index: FuncIndex,
+    },
+}
+
+/// The intrinsics without operands. The discriminant is the encoded code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FixedIntrinsic {
     MemGrow,
     MemSize,
     MemCopy,
@@ -67,142 +136,138 @@ pub enum Intrinsic {
     TableFill,
     TableSize,
     TableGrow,
-    CallIndirect { table_index: u32, type_index: u32 },
-    RefFunc { func_index: FuncIndex },
 }
 
-impl Intrinsic {
-    pub const CALL_INDIRECT_BASE: u32 = 1000;
-    pub const CALL_INDIRECT_STRIDE: u32 = 10000;
-    pub const REF_FUNC_BASE: u32 = 1_000_000_000;
+impl FixedIntrinsic {
+    /// Every variant, in discriminant order.
+    const ALL: [Self; 22] = [
+        Self::MemGrow,
+        Self::MemSize,
+        Self::MemCopy,
+        Self::MemFill,
+        Self::MemInit,
+        Self::DataDrop,
+        Self::GlobalGetI32,
+        Self::GlobalGetI64,
+        Self::GlobalGetF32,
+        Self::GlobalGetF64,
+        Self::GlobalSetI32,
+        Self::GlobalSetI64,
+        Self::GlobalSetF32,
+        Self::GlobalSetF64,
+        Self::TableCopy,
+        Self::TableInit,
+        Self::ElemDrop,
+        Self::TableGet,
+        Self::TableSet,
+        Self::TableFill,
+        Self::TableSize,
+        Self::TableGrow,
+    ];
 
+    /// The runtime function implementing this intrinsic.
     #[must_use]
-    pub fn call_indirect(table_index: cranelift_wasm::TableIndex, type_index: TypeIndex) -> Self {
-        Self::CallIndirect {
-            table_index: table_index.as_u32(),
-            type_index: type_index.as_u32(),
-        }
-    }
-
-    #[must_use]
-    pub const fn ref_func(func_index: FuncIndex) -> Self {
-        Self::RefFunc { func_index }
-    }
-
-    #[must_use]
-    pub const fn runtime_function(self) -> Option<RuntimeFunction> {
+    pub const fn runtime_function(self) -> RuntimeFunction {
         match self {
-            Self::MemGrow => Some(RuntimeFunction::MemGrow),
-            Self::MemSize => Some(RuntimeFunction::MemSize),
-            Self::MemCopy => Some(RuntimeFunction::MemCopy),
-            Self::MemFill => Some(RuntimeFunction::MemFill),
-            Self::MemInit => Some(RuntimeFunction::MemInit),
-            Self::DataDrop => Some(RuntimeFunction::MemDataDrop),
-            Self::GlobalGetI32 => Some(RuntimeFunction::GlobalGetI32),
-            Self::GlobalGetI64 => Some(RuntimeFunction::GlobalGetI64),
-            Self::GlobalGetF32 => Some(RuntimeFunction::GlobalGetF32),
-            Self::GlobalGetF64 => Some(RuntimeFunction::GlobalGetF64),
-            Self::GlobalSetI32 => Some(RuntimeFunction::GlobalSetI32),
-            Self::GlobalSetI64 => Some(RuntimeFunction::GlobalSetI64),
-            Self::GlobalSetF32 => Some(RuntimeFunction::GlobalSetF32),
-            Self::GlobalSetF64 => Some(RuntimeFunction::GlobalSetF64),
-            Self::TableCopy => Some(RuntimeFunction::TableCopy),
-            Self::TableInit => Some(RuntimeFunction::TableInit),
-            Self::ElemDrop => Some(RuntimeFunction::TableElemDrop),
-            Self::TableGet => Some(RuntimeFunction::TableGet),
-            Self::TableSet => Some(RuntimeFunction::TableSet),
-            Self::TableFill => Some(RuntimeFunction::TableFill),
-            Self::TableSize => Some(RuntimeFunction::TableSize),
-            Self::TableGrow => Some(RuntimeFunction::TableGrow),
-            Self::CallIndirect { .. } | Self::RefFunc { .. } => None,
-        }
-    }
-
-    #[must_use]
-    pub const fn runtime_result_kind(self) -> Option<RuntimeResultKind> {
-        match self.runtime_function() {
-            Some(function) => Some(function.result_kind()),
-            None => None,
+            Self::MemGrow => RuntimeFunction::MemGrow,
+            Self::MemSize => RuntimeFunction::MemSize,
+            Self::MemCopy => RuntimeFunction::MemCopy,
+            Self::MemFill => RuntimeFunction::MemFill,
+            Self::MemInit => RuntimeFunction::MemInit,
+            Self::DataDrop => RuntimeFunction::MemDataDrop,
+            Self::GlobalGetI32 => RuntimeFunction::GlobalGetI32,
+            Self::GlobalGetI64 => RuntimeFunction::GlobalGetI64,
+            Self::GlobalGetF32 => RuntimeFunction::GlobalGetF32,
+            Self::GlobalGetF64 => RuntimeFunction::GlobalGetF64,
+            Self::GlobalSetI32 => RuntimeFunction::GlobalSetI32,
+            Self::GlobalSetI64 => RuntimeFunction::GlobalSetI64,
+            Self::GlobalSetF32 => RuntimeFunction::GlobalSetF32,
+            Self::GlobalSetF64 => RuntimeFunction::GlobalSetF64,
+            Self::TableCopy => RuntimeFunction::TableCopy,
+            Self::TableInit => RuntimeFunction::TableInit,
+            Self::ElemDrop => RuntimeFunction::TableElemDrop,
+            Self::TableGet => RuntimeFunction::TableGet,
+            Self::TableSet => RuntimeFunction::TableSet,
+            Self::TableFill => RuntimeFunction::TableFill,
+            Self::TableSize => RuntimeFunction::TableSize,
+            Self::TableGrow => RuntimeFunction::TableGrow,
         }
     }
 }
 
-impl From<Intrinsic> for u32 {
-    fn from(val: Intrinsic) -> Self {
-        match val {
-            Intrinsic::MemGrow => 0,
-            Intrinsic::MemSize => 1,
-            Intrinsic::MemCopy => 2,
-            Intrinsic::MemFill => 3,
-            Intrinsic::MemInit => 4,
-            Intrinsic::DataDrop => 5,
-            Intrinsic::GlobalGetI32 => 10,
-            Intrinsic::GlobalGetI64 => 11,
-            Intrinsic::GlobalGetF32 => 12,
-            Intrinsic::GlobalGetF64 => 13,
-            Intrinsic::GlobalSetI32 => 20,
-            Intrinsic::GlobalSetI64 => 21,
-            Intrinsic::GlobalSetF32 => 22,
-            Intrinsic::GlobalSetF64 => 23,
-            Intrinsic::TableCopy => 30,
-            Intrinsic::TableInit => 31,
-            Intrinsic::ElemDrop => 32,
-            Intrinsic::TableGet => 33,
-            Intrinsic::TableSet => 34,
-            Intrinsic::TableFill => 35,
-            Intrinsic::TableSize => 36,
-            Intrinsic::TableGrow => 37,
-            Intrinsic::CallIndirect {
-                table_index,
-                type_index,
-            } => {
-                Intrinsic::CALL_INDIRECT_BASE
-                    + table_index * Intrinsic::CALL_INDIRECT_STRIDE
-                    + type_index
-            }
-            Intrinsic::RefFunc { func_index } => Intrinsic::REF_FUNC_BASE + func_index.as_u32(),
-        }
-    }
+/// The intrinsics reading and writing one global.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobalAccessors {
+    pub get: FixedIntrinsic,
+    pub set: FixedIntrinsic,
 }
 
-impl TryFrom<u32> for Intrinsic {
-    type Error = IntrinsicCastError;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::MemGrow),
-            1 => Ok(Self::MemSize),
-            2 => Ok(Self::MemCopy),
-            3 => Ok(Self::MemFill),
-            4 => Ok(Self::MemInit),
-            5 => Ok(Self::DataDrop),
-            10 => Ok(Self::GlobalGetI32),
-            11 => Ok(Self::GlobalGetI64),
-            12 => Ok(Self::GlobalGetF32),
-            13 => Ok(Self::GlobalGetF64),
-            20 => Ok(Self::GlobalSetI32),
-            21 => Ok(Self::GlobalSetI64),
-            22 => Ok(Self::GlobalSetF32),
-            23 => Ok(Self::GlobalSetF64),
-            30 => Ok(Self::TableCopy),
-            31 => Ok(Self::TableInit),
-            32 => Ok(Self::ElemDrop),
-            33 => Ok(Self::TableGet),
-            34 => Ok(Self::TableSet),
-            35 => Ok(Self::TableFill),
-            36 => Ok(Self::TableSize),
-            37 => Ok(Self::TableGrow),
-            other if other >= Self::REF_FUNC_BASE => Ok(Self::RefFunc {
-                func_index: FuncIndex::from_u32(other - Self::REF_FUNC_BASE),
-            }),
-            other if other >= Self::CALL_INDIRECT_BASE => {
-                let encoded = other - Self::CALL_INDIRECT_BASE;
-                Ok(Self::CallIndirect {
-                    table_index: encoded / Self::CALL_INDIRECT_STRIDE,
-                    type_index: encoded % Self::CALL_INDIRECT_STRIDE,
-                })
-            }
-            _ => IntrinsicIndexCastSnafu { value }.fail(),
+/// The accessors of a global of type `ty`; references are i32 table entries.
+/// `None` for `v128`, which the runtime cannot represent.
+#[must_use]
+pub const fn global_accessors(ty: &WasmValType) -> Option<GlobalAccessors> {
+    let (get, set) = match ty {
+        WasmValType::I32 | WasmValType::Ref(_) => {
+            (FixedIntrinsic::GlobalGetI32, FixedIntrinsic::GlobalSetI32)
         }
+        WasmValType::I64 => (FixedIntrinsic::GlobalGetI64, FixedIntrinsic::GlobalSetI64),
+        WasmValType::F32 => (FixedIntrinsic::GlobalGetF32, FixedIntrinsic::GlobalSetF32),
+        WasmValType::F64 => (FixedIntrinsic::GlobalGetF64, FixedIntrinsic::GlobalSetF64),
+        WasmValType::V128 => return None,
+    };
+    Some(GlobalAccessors { get, set })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_intrinsic_table_follows_discriminants() {
+        for (code, fixed) in (0..).zip(FixedIntrinsic::ALL) {
+            assert_eq!(fixed as u32, code, "{fixed:?}");
+        }
+    }
+
+    #[test]
+    fn user_names_round_trip() {
+        let names = FixedIntrinsic::ALL
+            .into_iter()
+            .map(|fixed| UserName::Intrinsic(Intrinsic::Fixed(fixed)))
+            .chain([
+                UserName::Func(FuncIndex::from_u32(7)),
+                UserName::MemoryBase(MemoryIndex::from_u32(0)),
+                UserName::Intrinsic(Intrinsic::RefFunc {
+                    func_index: FuncIndex::from_u32(999_999),
+                }),
+                UserName::Intrinsic(Intrinsic::CallIndirect {
+                    table_index: TableIndex::from_u32(99),
+                    type_index: TypeIndex::from_u32(999_999),
+                }),
+            ]);
+        for name in names {
+            let parts = name.to_parts().unwrap();
+            assert_eq!(UserName::from_parts(parts).unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_codes_and_overflowing_tables() {
+        let unknown = UserNameParts {
+            namespace: FIXED_INTRINSIC_NAMESPACE,
+            index: 22,
+        };
+        assert!(matches!(
+            UserName::from_parts(unknown),
+            Err(UserNameError::UnknownIntrinsic { code: 22 })
+        ));
+        let overflow = UserName::Intrinsic(Intrinsic::CallIndirect {
+            table_index: TableIndex::from_u32(u32::MAX - 1),
+            type_index: TypeIndex::from_u32(0),
+        });
+        assert!(matches!(
+            overflow.to_parts(),
+            Err(UserNameError::TableIndexOverflow { .. })
+        ));
     }
 }
