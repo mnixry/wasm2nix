@@ -30,7 +30,8 @@ impl Formatter {
     fn expr(&self, expr: &Expr) -> Doc {
         match expr {
             Expr::Ident(s) | Expr::Path(s) => text(s.clone()),
-            // Nix cannot lex `9223372036854775808`, the magnitude of `i64::MIN`.
+            // Nix cannot lex `9223372036854775808`, the magnitude of
+            // `i64::MIN`.
             Expr::Int(i64::MIN) => text("(0 - 9223372036854775807 - 1)"),
             Expr::Int(v) if *v < 0 => parens(text(v.to_string())),
             Expr::Int(v) => text(v.to_string()),
