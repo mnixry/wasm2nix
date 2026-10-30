@@ -2,19 +2,12 @@ use std::path::PathBuf;
 
 use snafu::Snafu;
 
+/// A harness failure while resolving an import or initializer input.
 #[derive(Debug, Snafu)]
-#[snafu(display("WAST harness resolver failed"))]
+#[snafu(display("WAST harness resolver failed"), context(false))]
 pub struct HarnessResolverError {
     #[snafu(source(from(Error, Box::new)))]
     source: Box<Error>,
-}
-
-impl From<Error> for HarnessResolverError {
-    fn from(source: Error) -> Self {
-        Self {
-            source: Box::new(source),
-        }
-    }
 }
 
 #[derive(Debug, Snafu)]
@@ -132,14 +125,14 @@ pub enum Error {
     #[snafu(display("assert_return module execution is not supported by this harness"))]
     UnsupportedAssertReturnModuleExecution,
 
-    #[snafu(display("unsupported WAST directive"))]
-    UnsupportedWastDirective,
+    #[snafu(display("unsupported WAST directive {directive}"))]
+    UnsupportedWastDirective { directive: &'static str },
 
-    #[snafu(display("unsupported invoke argument"))]
-    UnsupportedInvokeArgument,
+    #[snafu(display("unsupported invoke argument {arg}"))]
+    UnsupportedInvokeArgument { arg: String },
 
-    #[snafu(display("unsupported assert_return result"))]
-    UnsupportedAssertReturnResult,
+    #[snafu(display("unsupported assert_return result {result}"))]
+    UnsupportedAssertReturnResult { result: String },
 
     #[snafu(display("expected a non-empty result array"))]
     ExpectedResult,
@@ -151,7 +144,10 @@ pub enum Error {
     LimitsQueryNotObject,
 
     #[snafu(display("Nix integer literal overflow for {value}"))]
-    NixIntegerOverflow { value: u64 },
+    NixIntegerOverflow {
+        value: u64,
+        source: std::num::TryFromIntError,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

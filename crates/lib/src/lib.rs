@@ -8,7 +8,7 @@ pub mod translator;
 use std::path::Path;
 use std::path::PathBuf;
 
-use snafu::prelude::*;
+use snafu::ResultExt;
 pub use wasm2nix_ast as nix;
 use wasm2nix_runtime::DEFAULT_RUNTIME_FILE_NAME;
 
@@ -42,9 +42,18 @@ impl Default for TranspileOptions {
 /// to the Nix AST fails.
 pub fn lower_wasm_to_nix(wasm: &[u8], options: &TranspileOptions) -> error::Result<String> {
     let module = translator::NixModule::translate(wasm).context(error::TranslateWasmSnafu)?;
-    let module = lower::lower_module(&module)
-        .context(error::LowerNixSnafu)?
-        .render_with(&options.render_options);
+    lower_module_to_nix(&module, options).context(error::LowerNixSnafu)
+}
+
+/// Lowers a translated module to a complete Nix module wrapper.
+///
+/// # Errors
+///
+/// Returns an error when a Wasm construct cannot be lowered.
+pub fn lower_module_to_nix(
+    module: &translator::NixModule, options: &TranspileOptions,
+) -> lower::Result<String> {
+    let module = lower::lower_module(module)?.render_with(&options.render_options);
     let separator = if options.render_options.style == nix::RenderStyle::Compact {
         " "
     } else {

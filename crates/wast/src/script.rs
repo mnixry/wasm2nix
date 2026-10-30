@@ -7,9 +7,14 @@ use std::path::PathBuf;
 
 use cranelift_entity::EntityRef;
 use cranelift_entity::PrimaryMap;
+use cranelift_wasm::MemoryIndex;
+use cranelift_wasm::TableIndex;
 use serde_json::Value as JsonValue;
-use snafu::prelude::*;
+use snafu::OptionExt;
+use snafu::ResultExt;
+use snafu::ensure;
 use wasm2nix::instantiation::ActiveInitializerResolver;
+use wasm2nix::instantiation::active_initializers_trap;
 use wasm2nix::linking::ExternType;
 use wasm2nix::linking::FuncType;
 use wasm2nix::linking::GlobalType;
@@ -18,11 +23,12 @@ use wasm2nix::linking::Limits;
 use wasm2nix::linking::LinkError;
 use wasm2nix::linking::ModuleInterface;
 use wasm2nix::linking::TableType;
-use wasm2nix::linking::{self};
+use wasm2nix::linking::validate_imports;
 use wasm2nix::nix::Expr;
 use wasm2nix::nix::nix;
 use wasm2nix::translator::Exportable;
 use wasm2nix::translator::NixModule;
+use wasm2nix::translator::WASM_FEATURES;
 use wast::QuoteWat;
 use wast::Wast;
 use wast::WastDirective;
@@ -33,6 +39,7 @@ use wast::Wat;
 use wast::lexer::Lexer;
 use wast::parser::ParseBuffer;
 use wast::parser::{self};
+use wast::token::Id;
 
 use crate::error::ActiveInitializerSnafu;
 use crate::error::DirectiveSnafu;
@@ -61,16 +68,15 @@ use crate::eval::Batch;
 use crate::eval::Case;
 use crate::eval::Check;
 use crate::eval::MAX_BATCH_STEPS;
+use crate::eval::NewModule;
 use crate::eval::Nix;
 use crate::eval::Outcome;
-use crate::eval::get_expr;
-use crate::eval::initial_state_expr;
-use crate::eval::instantiate_expr;
-use crate::eval::invoke_expr;
+use crate::eval::World;
+use crate::eval::json_number_to_u64;
 use crate::eval::nix_optional_u64;
 use crate::eval::nix_u64;
+use crate::eval::path_expr;
 use crate::expect::Expected;
-use crate::expect::json_number_to_u64;
 use crate::expect::results_label;
 use crate::expect::results_match;
 
@@ -88,9 +94,6 @@ pub fn run_wast_script(script: &str) -> Result<()> {
 
     let mut session = Session::new()?;
     for directive in wast.directives {
-        if session.batch.steps() >= MAX_BATCH_STEPS {
-            session.flush(None)?;
-        }
         let (line, col) = directive.span().linecol_in(script);
         let at = format!("{}:{}", line + 1, col + 1);
         session
@@ -109,12 +112,26 @@ pub fn run_wast_script(script: &str) -> Result<()> {
     Ok(())
 }
 
+/// A module's current state.
+pub enum ModuleState {
+    /// A batch variable, settled into a state file by the next flush.
+    Pending(Expr),
+    /// A state file an earlier flush wrote.
+    Settled(PathBuf),
+}
+
+impl ModuleState {
+    pub fn expr(&self) -> Expr {
+        match self {
+            Self::Pending(state) => state.clone(),
+            Self::Settled(path) => nix!(import(#{path_expr(path)})),
+        }
+    }
+}
+
 pub struct HarnessModule {
     pub path: PathBuf,
-    /// The current state: a batch variable while `pending`, otherwise an
-    /// import of a settled state file.
-    pub state: Expr,
-    pub pending: bool,
+    pub state: ModuleState,
     /// Names of the modules it imports from.
     pub imports: Vec<String>,
     pub imported_tables: Vec<(String, String)>,
@@ -129,13 +146,12 @@ pub struct HarnessModule {
 }
 
 impl HarnessModule {
-    fn new(path: PathBuf, state: Expr, module: &NixModule) -> Self {
+    fn new(module: &NixModule, written: Written, state: Expr) -> Self {
         let info = &module.info;
         Self {
-            path,
-            state,
-            pending: true,
-            imports: import_modules(module),
+            path: written.path,
+            state: ModuleState::Pending(state),
+            imports: written.imports,
             imported_tables: info.imported_tables.clone(),
             imported_globals: info.imported_globals.clone(),
             imported_memories: info.imported_memories.clone(),
@@ -145,6 +161,13 @@ impl HarnessModule {
             memory_exports: export_indices(&info.memories),
         }
     }
+}
+
+/// A module written to a Nix file.
+struct Written {
+    path: PathBuf,
+    /// Names of the modules it imports from.
+    imports: Vec<String>,
 }
 
 fn import_modules(module: &NixModule) -> Vec<String> {
@@ -179,13 +202,6 @@ fn export_indices<K: EntityRef, E>(
         .collect()
 }
 
-pub fn resolve_alias(aliases: &HashMap<String, String>, name: &str) -> String {
-    aliases
-        .get(name)
-        .cloned()
-        .unwrap_or_else(|| name.to_string())
-}
-
 pub struct Session {
     pub nix: Nix,
     pub batch: Batch,
@@ -209,7 +225,17 @@ impl Session {
         })
     }
 
+    pub const fn world(&self) -> World<'_> {
+        World {
+            modules: &self.modules,
+            aliases: &self.aliases,
+        }
+    }
+
     fn directive(&mut self, directive: WastDirective<'_>, at: &str) -> Result<()> {
+        if self.batch.step_count() >= MAX_BATCH_STEPS {
+            self.flush(None)?;
+        }
         match directive {
             WastDirective::Module(module) => self.module(module, at),
             WastDirective::Register { name, module, .. } => {
@@ -226,29 +252,27 @@ impl Session {
             }
             WastDirective::AssertTrap { exec, .. } => self.assert_trap(exec, at),
             WastDirective::AssertExhaustion { call, .. } => {
-                let key = self.select(call.module)?;
-                let expr = invoke_expr(&key, call.name, &call.args, &self.modules, &self.aliases)?;
                 let what = format!("assert_exhaustion {:?}", call.name);
-                self.batch.step(expr, case(at, &what, Check::Fail));
-                Ok(())
+                self.queue_invoke(&call, case(at, &what, Check::Fail))
+                    .map(drop)
             }
             WastDirective::AssertMalformed { module, .. }
             | WastDirective::AssertMalformedCustom { module, .. } => {
-                self.assert_malformed(module, at);
+                self.assert_rejected(module, at, "assert_malformed");
                 Ok(())
             }
             WastDirective::AssertInvalid { module, .. }
             | WastDirective::AssertInvalidCustom { module, .. } => {
-                self.assert_invalid(module, at);
+                self.assert_rejected(module, at, "assert_invalid");
                 Ok(())
             }
             WastDirective::AssertUnlinkable { module, .. } => self.assert_unlinkable(module, at),
-            WastDirective::ModuleDefinition(_)
-            | WastDirective::ModuleInstance { .. }
-            | WastDirective::AssertException { .. }
-            | WastDirective::AssertSuspension { .. }
-            | WastDirective::Thread(_)
-            | WastDirective::Wait { .. } => UnsupportedWastDirectiveSnafu.fail(),
+            WastDirective::ModuleDefinition(_) => unsupported("module definition"),
+            WastDirective::ModuleInstance { .. } => unsupported("module instance"),
+            WastDirective::AssertException { .. } => unsupported("assert_exception"),
+            WastDirective::AssertSuspension { .. } => unsupported("assert_suspension"),
+            WastDirective::Thread(_) => unsupported("thread"),
+            WastDirective::Wait { .. } => unsupported("wait"),
         }
     }
 
@@ -260,40 +284,65 @@ impl Session {
             !self.initializers_trap(&translated)?,
             ModuleInstantiationTrappedSnafu
         );
-        let path = self.write_module(&translated)?;
-        let imports = import_modules(&translated);
+        let written = self.write_module(&translated)?;
         let key = name.unwrap_or_else(|| self.transient_key("anon"));
 
-        let expr = instantiate_expr(&path, &key, &imports, &self.modules, &self.aliases);
-        let step = self.batch.step(expr, case(at, "module", Check::Succeed));
-        let state = self.step_state(&step, None);
-        self.modules
-            .insert(key.clone(), HarnessModule::new(path, state, &translated));
+        let case = case(at, "module", Check::Succeed);
+        let step = self.queue_new_module(&written, &key, NewModule::Instantiate, case);
+        self.register(&translated, written, key.clone(), &step);
         self.merge_imported_table_initializers(&key)?;
-        self.sync_memory_imports_to_targets(&key);
-        self.sync_global_imports_from_targets();
+        self.sync_memory_imports_to_targets(&key)?;
+        self.sync_global_imports_from_targets()?;
         self.current = Some(key);
         Ok(())
     }
 
+    /// Queues a step importing the written module as `key`.
+    fn queue_new_module(
+        &mut self, written: &Written, key: &str, kind: NewModule, case: Case,
+    ) -> Expr {
+        let expr = self
+            .world()
+            .new_module_expr(kind, &written.path, key, &written.imports);
+        self.batch.step(expr, case)
+    }
+
+    /// Adds the module `step` imports as `key`, and returns its state.
+    fn register(&mut self, module: &NixModule, written: Written, key: String, step: &Expr) -> Expr {
+        let state = self.step_state(step, None);
+        self.modules
+            .insert(key, HarnessModule::new(module, written, state.clone()));
+        state
+    }
+
+    /// Queues an invocation; returns the module key and the step variable.
+    fn queue_invoke(&mut self, invoke: &WastInvoke<'_>, case: Case) -> Result<(String, Expr)> {
+        let key = self.select(invoke.module)?;
+        let expr = self.world().invoke_expr(&key, invoke.name, &invoke.args)?;
+        let step = self.batch.step(expr, case);
+        Ok((key, step))
+    }
+
     /// Queues an invocation that updates the module state.
     fn invoke(&mut self, invoke: &WastInvoke<'_>, case: Case) -> Result<()> {
-        let key = self.select(invoke.module)?;
-        let expr = invoke_expr(
-            &key,
-            invoke.name,
-            &invoke.args,
-            &self.modules,
-            &self.aliases,
-        )?;
-        let step = self.batch.step(expr, case);
-        let module = self
+        let (key, step) = self.queue_invoke(invoke, case)?;
+        let prev = self
             .modules
             .get(&key)
-            .context(UnknownModuleSnafu { key: key.clone() })?;
-        let state = self.step_state(&step, Some(module.state.clone()));
-        self.set_state(&key, state);
-        self.sync_after_call(&key);
+            .context(UnknownModuleSnafu { key: key.as_str() })?
+            .state
+            .expr();
+        let state = self.step_state(&step, Some(prev));
+        self.set_state(&key, state)?;
+        self.sync_after_call(&key)
+    }
+
+    /// Queues a read of a global export.
+    fn get(&mut self, module: Option<Id<'_>>, global: &str, case: Case) -> Result<()> {
+        let key = self.select(module)?;
+        self.sync_global_imports_from_targets()?;
+        let expr = self.world().get_expr(&key, global)?;
+        self.batch.step(expr, case);
         Ok(())
     }
 
@@ -320,33 +369,16 @@ impl Session {
     fn assert_trap(&mut self, exec: WastExecute<'_>, at: &str) -> Result<()> {
         match exec {
             WastExecute::Invoke(invoke) => {
-                let key = self.select(invoke.module)?;
-                let expr = invoke_expr(
-                    &key,
-                    invoke.name,
-                    &invoke.args,
-                    &self.modules,
-                    &self.aliases,
-                )?;
                 let what = format!("assert_trap {:?}", invoke.name);
-                self.batch.step(expr, case(at, &what, Check::Fail));
+                self.queue_invoke(&invoke, case(at, &what, Check::Fail))
+                    .map(drop)
             }
             WastExecute::Get { module, global, .. } => {
                 let what = format!("assert_trap (get {global:?})");
-                self.get(module, global, case(at, &what, Check::Fail))?;
+                self.get(module, global, case(at, &what, Check::Fail))
             }
-            WastExecute::Wat(wat) => self.assert_trap_module(wat, at)?,
+            WastExecute::Wat(wat) => self.assert_trap_module(wat, at),
         }
-        Ok(())
-    }
-
-    /// Queues a read of a global export.
-    fn get(&mut self, module: Option<wast::token::Id<'_>>, global: &str, case: Case) -> Result<()> {
-        let key = self.select(module)?;
-        self.sync_global_imports_from_targets();
-        let expr = get_expr(&key, global, &self.modules, &self.aliases)?;
-        self.batch.step(expr, case);
-        Ok(())
     }
 
     /// A module whose instantiation traps still applies the active segments
@@ -355,45 +387,31 @@ impl Session {
         let translated = translate(&wat.encode().context(EncodeWatSnafu)?)?;
         self.validate_imports(&translated)?;
         let initializers_trap = self.initializers_trap(&translated)?;
-        let path = self.write_module(&translated)?;
-        let imports = import_modules(&translated);
+        let written = self.write_module(&translated)?;
         let key = self.transient_key("trap");
 
         if !initializers_trap {
-            let expr = instantiate_expr(&path, &key, &imports, &self.modules, &self.aliases);
-            self.batch
-                .step(expr, case(at, "assert_trap module", Check::Fail));
+            let case = case(at, "assert_trap module", Check::Fail);
+            self.queue_new_module(&written, &key, NewModule::Instantiate, case);
         }
-        let expr = initial_state_expr(&path, &key, &imports, &self.modules, &self.aliases);
-        let step = self.batch.step(
-            expr,
-            case(at, "assert_trap module initial state", Check::Succeed),
-        );
-        let state = self.step_state(&step, None);
-        self.modules
-            .insert(key, HarnessModule::new(path, state.clone(), &translated));
-        self.apply_trapping_table_side_effects(&translated, &state);
+        let case = case(at, "assert_trap module initial state", Check::Succeed);
+        let step = self.queue_new_module(&written, &key, NewModule::InitialState, case);
+        let state = self.register(&translated, written, key, &step);
+        self.apply_trapping_table_side_effects(&translated, &state)?;
         self.apply_trapping_memory_side_effects(&translated, &state)
     }
 
-    fn assert_malformed(&mut self, mut module: QuoteWat<'_>, at: &str) {
+    /// `assert_malformed` and `assert_invalid`: validation or translation
+    /// must reject the module. Text that does not encode is rejected too.
+    fn assert_rejected(&mut self, mut module: QuoteWat<'_>, at: &str, directive: &str) {
         let Ok(wasm) = module.encode() else {
             return;
         };
-        let valid = wasmparser::Validator::new_with_features(wasm2nix::translator::WASM_FEATURES)
+        let valid = wasmparser::Validator::new_with_features(WASM_FEATURES)
             .validate_all(&wasm)
             .is_ok();
         if valid && NixModule::translate(&wasm).is_ok() {
-            self.fail(at, "assert_malformed: module was accepted");
-        }
-    }
-
-    fn assert_invalid(&mut self, mut module: QuoteWat<'_>, at: &str) {
-        let Ok(wasm) = module.encode() else {
-            return;
-        };
-        if NixModule::translate(&wasm).is_ok() {
-            self.fail(at, "assert_invalid: module translated successfully");
+            self.fail(at, &format!("{directive}: module was accepted"));
         }
     }
 
@@ -406,23 +424,21 @@ impl Session {
             }) => return Ok(()),
             Err(err) => return Err(err),
         }
-        let path = self.write_module(&translated)?;
-        let imports = import_modules(&translated);
+        let written = self.write_module(&translated)?;
         let key = self.transient_key("unlinkable");
-        let expr = instantiate_expr(&path, &key, &imports, &self.modules, &self.aliases);
-        self.batch
-            .step(expr, case(at, "assert_unlinkable", Check::Fail));
+        let case = case(at, "assert_unlinkable", Check::Fail);
+        self.queue_new_module(&written, &key, NewModule::Instantiate, case);
         Ok(())
     }
 
     fn fail(&mut self, at: &str, message: &str) {
-        self.failures.push(format!("{at} {message}"));
+        self.failures.push(format!("{at}: {message}"));
     }
 
-    fn select(&self, module: Option<wast::token::Id<'_>>) -> Result<String> {
+    fn select(&self, module: Option<Id<'_>>) -> Result<String> {
         module.map_or_else(
             || self.current.clone().context(ModuleAccessBeforeModuleSnafu),
-            |module| Ok(resolve_alias(&self.aliases, module.name())),
+            |module| Ok(self.world().resolve(module.name()).to_string()),
         )
     }
 
@@ -432,11 +448,14 @@ impl Session {
         key
     }
 
-    fn write_module(&mut self, module: &NixModule) -> Result<PathBuf> {
+    fn write_module(&mut self, module: &NixModule) -> Result<Written> {
         let nix = wasm2nix::lower::lower_module(module)
             .context(LowerNixSnafu)?
             .render();
-        self.nix.write("module", &nix)
+        Ok(Written {
+            path: self.nix.write("module", &nix)?,
+            imports: import_modules(module),
+        })
     }
 
     /// The state after `step`: its result when it succeeded, `prev` (or a
@@ -457,34 +476,30 @@ impl Session {
         let pending = self
             .modules
             .iter()
-            .filter(|(_, module)| module.pending)
-            .map(|(key, module)| (key.clone(), module.state.clone()))
+            .filter_map(|(key, module)| match &module.state {
+                ModuleState::Pending(state) => Some((key.clone(), state.clone())),
+                ModuleState::Settled(_) => None,
+            })
             .collect();
         let flushed = self.batch.flush(&self.nix, pending, query)?;
-        for outcome in flushed.outcomes {
-            if let Some(failure) = failure(&outcome) {
-                self.failures.push(failure);
-            }
-        }
+        self.failures
+            .extend(flushed.outcomes.iter().filter_map(failure));
         for (key, state) in flushed.states {
             let path = self.nix.write_state(&state)?;
-            let module = self
-                .modules
+            self.modules
                 .get_mut(&key)
-                .context(UnknownModuleSnafu { key })?;
-            module.state = nix!(import(#{Expr::path(path.display().to_string())}));
-            module.pending = false;
+                .context(UnknownModuleSnafu { key })?
+                .state = ModuleState::Settled(path);
         }
         Ok(flushed.query)
     }
 
     fn validate_imports(&mut self, module: &NixModule) -> Result<()> {
-        linking::validate_imports(module, &mut Resolver(self)).context(LinkSnafu)
+        validate_imports(module, self).context(LinkSnafu)
     }
 
     fn initializers_trap(&mut self, module: &NixModule) -> Result<bool> {
-        wasm2nix::instantiation::active_initializers_trap(module, &mut Resolver(self))
-            .context(ActiveInitializerSnafu)
+        active_initializers_trap(module, self).context(ActiveInitializerSnafu)
     }
 
     fn lookup_import(&mut self, module_name: &str, field_name: &str) -> Result<ExternType> {
@@ -495,7 +510,7 @@ impl Session {
             });
         }
 
-        let key = resolve_alias(&self.aliases, module_name);
+        let key = self.world().resolve(module_name).to_string();
         let module = self
             .modules
             .get(&key)
@@ -506,7 +521,7 @@ impl Session {
         if let Some(global) = module.interface.globals.get(field_name) {
             return Ok(ExternType::Global(global.clone()));
         }
-        let state = module.state.clone();
+        let state = module.state.expr();
         if let Some(&index) = module.table_exports.get(field_name) {
             let table = module
                 .interface
@@ -519,7 +534,7 @@ impl Session {
                 .clone();
             let query = nix!(harness.dynamicTableLimits({
                 st = #{state};
-                tableIndex = #{i64::from(index)};
+                tableIndex = #{index};
                 staticMin = #{nix_u64(table.limits.min)?};
                 staticMax = #{nix_optional_u64(table.limits.max)?};
             }));
@@ -559,7 +574,66 @@ impl Session {
         Ok(Limits { min, max })
     }
 
-    fn imported_global_i32(&mut self, module_name: &str, field_name: &str) -> Result<u64> {
+    /// The minimum of the limits `limits` reads from the type `import`
+    /// resolves to.
+    fn imported_min(
+        &mut self, (module_name, field_name): &(String, String),
+        limits: fn(ExternType) -> Option<Limits>,
+    ) -> Result<u64> {
+        let import = self.lookup_import(module_name, field_name)?;
+        limits(import)
+            .map(|limits| limits.min)
+            .context(IncompatibleImportTypeSnafu {
+                module_name,
+                field_name,
+            })
+    }
+}
+
+impl ImportResolver for Session {
+    type Error = HarnessResolverError;
+
+    fn resolve_import(
+        &mut self, module_name: &str, field_name: &str,
+    ) -> std::result::Result<Option<ExternType>, Self::Error> {
+        match self.lookup_import(module_name, field_name) {
+            Ok(import) => Ok(Some(import)),
+            Err(Error::UnknownImport { .. } | Error::UnknownImportModule { .. }) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+}
+
+impl ActiveInitializerResolver for Session {
+    type Error = HarnessResolverError;
+
+    fn memory_min_pages(
+        &mut self, module: &NixModule, index: MemoryIndex,
+    ) -> std::result::Result<u64, Self::Error> {
+        let Some(import) = module.info.imported_memories.get(index.index()) else {
+            return Ok(module.info.memories[index].entity.minimum);
+        };
+        Ok(self.imported_min(import, |ty| match ty {
+            ExternType::Memory(limits) => Some(limits),
+            _ => None,
+        })?)
+    }
+
+    fn table_min_elements(
+        &mut self, module: &NixModule, index: TableIndex,
+    ) -> std::result::Result<u64, Self::Error> {
+        let Some(import) = module.info.imported_tables.get(index.index()) else {
+            return Ok(u64::from(module.info.tables[index].entity.minimum));
+        };
+        Ok(self.imported_min(import, |ty| match ty {
+            ExternType::Table(table) => Some(table.limits),
+            _ => None,
+        })?)
+    }
+
+    fn imported_global_i32(
+        &mut self, module_name: &str, field_name: &str,
+    ) -> std::result::Result<u64, Self::Error> {
         if module_name == "spectest" {
             ensure!(
                 field_name == "global_i32",
@@ -570,14 +644,16 @@ impl Session {
             );
             return Ok(666);
         }
-        let key = resolve_alias(&self.aliases, module_name);
+        let key = self.world().resolve(module_name).to_string();
         ensure!(
             self.modules.contains_key(&key),
             UnknownImportModuleSnafu { module_name }
         );
-        let query = get_expr(&key, field_name, &self.modules, &self.aliases)?;
+        let query = self.world().get_expr(&key, field_name)?;
         let value = self.flush(Some(query))?;
-        json_number_to_u64(value["results"].get(0).context(ExpectedResultSnafu)?)
+        Ok(json_number_to_u64(
+            value["results"].get(0).context(ExpectedResultSnafu)?,
+        )?)
     }
 }
 
@@ -613,6 +689,10 @@ fn translate(wasm: &[u8]) -> Result<NixModule> {
     NixModule::translate(wasm).context(TranslateWasmSnafu)
 }
 
+fn unsupported(directive: &'static str) -> Result<()> {
+    UnsupportedWastDirectiveSnafu { directive }.fail()
+}
+
 fn spectest_import(field_name: &str) -> Option<ExternType> {
     let print = |params: &[&str]| {
         let params = params.iter().map(ToString::to_string).collect();
@@ -637,76 +717,5 @@ fn spectest_import(field_name: &str) -> Option<ExternType> {
             Limits::new(10, Some(20)),
         ))),
         _ => None,
-    }
-}
-
-/// Resolves imports and initializer inputs against the session's modules.
-struct Resolver<'a>(&'a mut Session);
-
-impl ImportResolver for Resolver<'_> {
-    type Error = HarnessResolverError;
-
-    fn resolve_import(
-        &mut self, module_name: &str, field_name: &str,
-    ) -> std::result::Result<Option<ExternType>, Self::Error> {
-        match self.0.lookup_import(module_name, field_name) {
-            Ok(import) => Ok(Some(import)),
-            Err(Error::UnknownImport { .. } | Error::UnknownImportModule { .. }) => Ok(None),
-            Err(err) => Err(err.into()),
-        }
-    }
-}
-
-impl ActiveInitializerResolver for Resolver<'_> {
-    type Error = HarnessResolverError;
-
-    fn memory_min_pages(
-        &mut self, module: &NixModule, index: cranelift_wasm::MemoryIndex,
-    ) -> std::result::Result<u64, Self::Error> {
-        let limits = match module.info.imported_memories.get(index.index()) {
-            Some((module_name, field_name)) => {
-                match self.0.lookup_import(module_name, field_name)? {
-                    ExternType::Memory(limits) => limits,
-                    _ => {
-                        return Err(IncompatibleImportTypeSnafu {
-                            module_name,
-                            field_name,
-                        }
-                        .build()
-                        .into());
-                    }
-                }
-            }
-            None => Limits::from(&module.info.memories[index].entity),
-        };
-        Ok(limits.min)
-    }
-
-    fn table_min_elements(
-        &mut self, module: &NixModule, index: cranelift_wasm::TableIndex,
-    ) -> std::result::Result<u64, Self::Error> {
-        let limits = match module.info.imported_tables.get(index.index()) {
-            Some((module_name, field_name)) => {
-                match self.0.lookup_import(module_name, field_name)? {
-                    ExternType::Table(table) => table.limits,
-                    _ => {
-                        return Err(IncompatibleImportTypeSnafu {
-                            module_name,
-                            field_name,
-                        }
-                        .build()
-                        .into());
-                    }
-                }
-            }
-            None => TableType::from(&module.info.tables[index].entity).limits,
-        };
-        Ok(limits.min)
-    }
-
-    fn imported_global_i32(
-        &mut self, module_name: &str, field_name: &str,
-    ) -> std::result::Result<u64, Self::Error> {
-        Ok(self.0.imported_global_i32(module_name, field_name)?)
     }
 }

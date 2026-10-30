@@ -1,14 +1,13 @@
 use std::fmt;
 
 use serde_json::Value as JsonValue;
-use snafu::prelude::*;
 use wast::WastRet;
 use wast::core::NanPattern;
 use wast::core::WastRetCore;
 
-use crate::error::ExpectedIntegerResultSnafu;
 use crate::error::Result;
 use crate::error::UnsupportedAssertReturnResultSnafu;
+use crate::eval::json_number_to_u64;
 
 /// One expected `assert_return` result, in the JSON encoding the harness
 /// returns from Nix.
@@ -23,8 +22,14 @@ pub enum Expected {
 
 impl Expected {
     pub fn from_ret(ret: &WastRet<'_>) -> Result<Self> {
+        let unsupported = || {
+            UnsupportedAssertReturnResultSnafu {
+                result: format!("{ret:?}"),
+            }
+            .fail()
+        };
         let WastRet::Core(ret) = ret else {
-            return UnsupportedAssertReturnResultSnafu.fail();
+            return unsupported();
         };
         Ok(match ret {
             WastRetCore::I32(value) => Self::Exact(value.cast_unsigned().into()),
@@ -41,7 +46,7 @@ impl Expected {
                 Self::Exact(serde_json::json!({ "extern": value }))
             }
             WastRetCore::RefNull(_) => Self::Exact(0.into()),
-            _ => return UnsupportedAssertReturnResultSnafu.fail(),
+            _ => return unsupported(),
         })
     }
 
@@ -81,13 +86,6 @@ pub fn results_match(expected: &[Expected], actual: &JsonValue) -> bool {
 pub fn results_label(expected: &[Expected]) -> String {
     let items = expected.iter().map(ToString::to_string).collect::<Vec<_>>();
     format!("[{}]", items.join(","))
-}
-
-pub fn json_number_to_u64(value: &JsonValue) -> Result<u64> {
-    value
-        .as_u64()
-        .or_else(|| value.as_i64().map(i64::cast_unsigned))
-        .context(ExpectedIntegerResultSnafu)
 }
 
 const fn f32_canonical_nan(bits: u32) -> bool {

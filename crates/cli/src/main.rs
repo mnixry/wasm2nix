@@ -1,20 +1,22 @@
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
 use clap::Parser;
-use snafu::prelude::*;
+use snafu::ResultExt;
+use snafu::Snafu;
 use wasm2nix::TranspileOptions;
 use wasm2nix::default_output_path;
 use wasm2nix::generated_nix_file;
 use wasm2nix::linking::ImportMap;
 use wasm2nix::linking::{self};
-use wasm2nix::lower_wasm_to_nix;
+use wasm2nix::lower_module_to_nix;
 use wasm2nix::runtime_import_expr;
 use wasm2nix::runtime_path_for_output;
 use wasm2nix::translator::NixModule;
 use wasm2nix_runtime::runtime_nix;
 
-#[derive(Debug, Clone, Parser)]
+#[derive(Debug, Parser)]
 struct Args {
     /// Input `.wasm` file path.
     input: PathBuf,
@@ -47,7 +49,6 @@ struct Args {
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub(crate)))]
 enum CliError {
     #[snafu(display("failed to read Wasm input from {}", path.display()))]
     ReadWasm {
@@ -78,7 +79,7 @@ enum CliError {
     },
 
     #[snafu(display("Wasm lowering failed"))]
-    LowerWasm { source: wasm2nix::error::Error },
+    LowerWasm { source: wasm2nix::lower::LowerError },
 
     #[snafu(display("failed to write runtime file to {}", path.display()))]
     WriteRuntime {
@@ -97,21 +98,25 @@ type Result<T, E = CliError> = std::result::Result<T, E>;
 
 #[snafu::report]
 fn main() -> Result<()> {
-    let args = Args::parse();
+    run(&Args::parse())
+}
 
-    let wasm = std::fs::read(&args.input).context(ReadWasmSnafu {
-        path: args.input.clone(),
-    })?;
+fn run(args: &Args) -> Result<()> {
+    let wasm = fs::read(&args.input).context(ReadWasmSnafu { path: &args.input })?;
+    let module = NixModule::translate(&wasm).context(TranslateWasmSnafu)?;
+    if let Some(imports_path) = &args.imports {
+        validate_import_manifest(&module, imports_path)?;
+    }
 
     let out_path = args
         .output
         .clone()
         .unwrap_or_else(|| default_output_path(&args.input));
-
     let runtime_path = runtime_path_for_output(&out_path, args.export_rt_path.as_deref());
-    let runtime_import = runtime_import_expr(&out_path, args.export_rt_path.as_deref());
-
-    let mut options = TranspileOptions::new(runtime_import);
+    let mut options = TranspileOptions::new(runtime_import_expr(
+        &out_path,
+        args.export_rt_path.as_deref(),
+    ));
     if let Some(width) = args.line_width {
         options.render_options.width = width;
     }
@@ -119,35 +124,25 @@ fn main() -> Result<()> {
         options.render_options.style = wasm2nix::nix::RenderStyle::Compact;
     }
 
-    if let Some(imports_path) = args.imports.as_deref() {
-        validate_import_manifest(&wasm, imports_path)?;
-    }
-
-    let nix_expr = lower_wasm_to_nix(&wasm, &options).context(LowerWasmSnafu)?;
+    let nix_expr = lower_module_to_nix(&module, &options).context(LowerWasmSnafu)?;
     let nix = generated_nix_file(Some(&args.input), &nix_expr, &options.render_options);
 
     if !args.no_export_rt {
-        std::fs::write(&runtime_path, runtime_nix())
-            .context(WriteRuntimeSnafu { path: runtime_path })?;
+        fs::write(&runtime_path, runtime_nix()).context(WriteRuntimeSnafu {
+            path: &runtime_path,
+        })?;
     }
-
-    std::fs::write(&out_path, nix).context(WriteNixSnafu { path: out_path })?;
-    Ok(())
+    fs::write(&out_path, nix).context(WriteNixSnafu { path: &out_path })
 }
 
-fn validate_import_manifest(wasm: &[u8], path: &Path) -> Result<()> {
-    let source = std::fs::read_to_string(path).context(ReadImportsSnafu {
-        path: path.to_path_buf(),
-    })?;
+fn validate_import_manifest(module: &NixModule, path: &Path) -> Result<()> {
+    let source = fs::read_to_string(path).context(ReadImportsSnafu { path })?;
     let mut imports = parse_imports_manifest(path, &source)?;
-    let module = NixModule::translate(wasm).context(TranslateWasmSnafu)?;
-    linking::validate_imports(&module, &mut imports).context(ValidateImportsSnafu)
+    linking::validate_imports(module, &mut imports).context(ValidateImportsSnafu)
 }
 
 fn parse_imports_manifest(path: &Path, source: &str) -> Result<ImportMap> {
-    serde_json::from_str(source).context(ParseImportsSnafu {
-        path: path.to_path_buf(),
-    })
+    serde_json::from_str(source).context(ParseImportsSnafu { path })
 }
 
 #[cfg(test)]

@@ -9,8 +9,11 @@ name       = "yaml_to_json"
 path       = "src/lib.rs"
 
 [dependencies]
-saphyr     = { version = "0.2.2", default-features = false }
+saphyr = { version = "0.2.2", default-features = false }
 serde_json = "1.0"
+snafu = { version = "0.9.2", default-features = false, features = [
+  "rust_1_81",
+] }
 
 [lints]
 workspace = true

@@ -1,4 +1,4 @@
-use wasm2nix_wast::error::Result;
+use wasm2nix_wast::Result;
 use wasm2nix_wast::run_wast_script;
 
 #[test]

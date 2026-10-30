@@ -13,7 +13,8 @@ use std::process::Command;
 use std::process::ExitStatus;
 
 use serde_json::Value as JsonValue;
-use snafu::prelude::*;
+use snafu::OptionExt;
+use snafu::ResultExt;
 use tempfile::TempDir;
 use wasm2nix::nix::AttrBind;
 use wasm2nix::nix::AttrKey;
@@ -29,6 +30,7 @@ use crate::error::EncodeJsonSnafu;
 use crate::error::EvalCmdNotUnicodeSnafu;
 use crate::error::EvalNixFailedSnafu;
 use crate::error::EvalNixSnafu;
+use crate::error::ExpectedIntegerResultSnafu;
 use crate::error::InvalidEvalCmdSnafu;
 use crate::error::MalformedEvalOutputSnafu;
 use crate::error::NixIntegerOverflowSnafu;
@@ -38,7 +40,6 @@ use crate::error::UnsupportedInvokeArgumentSnafu;
 use crate::error::WriteFileSnafu;
 use crate::expect::Expected;
 use crate::script::HarnessModule;
-use crate::script::resolve_alias;
 
 /// Steps per `nix eval`. Every step's state stays reachable until the
 /// evaluation ends, so this bounds evaluator memory.
@@ -109,16 +110,25 @@ impl Nix {
         self.write("state", &nix.render())
     }
 
-    /// Evaluates `body` to JSON with `rt` and `harness` in scope.
-    fn eval(&self, binds: Vec<LetBind>, body: Expr) -> Result<Result<JsonValue, EvalFailure>> {
-        let mut all = vec![
+    /// Evaluates `body` to JSON with `binds`, `rt` and `harness` in scope.
+    fn eval(&self, binds: &[LetBind], body: &Expr) -> Result<Result<JsonValue, EvalFailure>> {
+        let prelude = [
             LetBind::new("rt", import_expr(&self.rt_path(), nix!({}))),
             LetBind::new("harness", import_expr(&self.harness_path(), nix!({}))),
         ];
-        all.extend(binds);
-        let program = Expr::let_in(all, nix!(builtins.toJSON(#{body})));
+        // Rendered bind by bind, so the batch's bindings need no copy.
+        let mut program = String::from("let\n");
+        for bind in prelude.iter().chain(binds) {
+            program.push_str(&bind.name);
+            program.push_str(" = ");
+            program.push_str(&bind.value.render());
+            program.push_str(";\n");
+        }
+        program.push_str("in builtins.toJSON (");
+        program.push_str(&body.render());
+        program.push_str(")\n");
         let path = self.dir.path().join("eval.nix");
-        write_file(&path, &program.render())?;
+        write_file(&path, &program)?;
         let output = Command::new(&self.program)
             .args(&self.args)
             .args(["--raw", "--impure", "--log-format", "internal-json", "-f"])
@@ -253,7 +263,7 @@ pub struct Batch {
 }
 
 impl Batch {
-    pub const fn steps(&self) -> usize {
+    pub const fn step_count(&self) -> usize {
         self.steps.len()
     }
 
@@ -312,7 +322,7 @@ impl Batch {
 
         let mut errors = BTreeMap::new();
         let mut value = loop {
-            match nix.eval(self.binds.clone(), body.clone())? {
+            match nix.eval(&self.binds, &body)? {
                 Ok(value) => break value,
                 Err(failure) => {
                     let step = failure
@@ -345,7 +355,7 @@ impl Batch {
             let var = Expr::ident(self.binds[step.bind].name.as_str());
             self.binds[step.bind].value =
                 nix!(harness.unguarded(#{step_id(id)}, #{step.expr.clone()}));
-            if let Err(failure) = nix.eval(self.binds.clone(), nix!(#{var}.success))? {
+            if let Err(failure) = nix.eval(&self.binds, &nix!(#{var}.success))? {
                 errors.insert(id, failure.error);
             }
         }
@@ -376,197 +386,198 @@ fn step_id(index: usize) -> i64 {
     i64::try_from(index).expect("step count fits in i64")
 }
 
-/// A step instantiating the module at `path` under `key`; `imports` are the
-/// module names it imports from.
-pub fn instantiate_expr(
-    path: &Path, key: &str, imports: &[String], modules: &BTreeMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>,
-) -> Expr {
-    new_module_expr(
-        path,
-        key,
-        imports,
-        modules,
-        aliases,
-        nix!({
-            results = [];
-            st = (m_new.instantiate({})).st;
-        }),
-    )
+/// What a step importing a new module evaluates to.
+#[derive(Debug, Clone, Copy)]
+pub enum NewModule {
+    /// The state after instantiation.
+    Instantiate,
+    /// The state before active segments and the start function run.
+    InitialState,
 }
 
-/// A step producing the pre-initializer state of the module at `path`.
-pub fn initial_state_expr(
-    path: &Path, key: &str, imports: &[String], modules: &BTreeMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>,
-) -> Expr {
-    new_module_expr(
-        path,
-        key,
-        imports,
-        modules,
-        aliases,
-        nix!({
-            results = [];
-            st = m_new."__wasm2nix"."st0";
-        }),
-    )
+/// The modules a step can import, and the aliases they are registered
+/// under.
+#[derive(Clone, Copy)]
+pub struct World<'a> {
+    pub modules: &'a BTreeMap<String, HarnessModule>,
+    pub aliases: &'a HashMap<String, String>,
 }
 
-fn new_module_expr(
-    path: &Path, key: &str, imports: &[String], modules: &BTreeMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>, body: Expr,
-) -> Expr {
-    let roots = imports.iter().map(|name| resolve_alias(aliases, name));
-    let (mut binds, _) = world(modules, aliases, roots);
-    binds.push(LetBind::new("m_new", import_module_expr(path, key)));
-    Expr::let_in(binds, body)
-}
+impl<'a> World<'a> {
+    /// The module key that `name`, a registered alias or a key, refers to.
+    pub fn resolve<'s>(&self, name: &'s str) -> &'s str
+    where
+        'a: 's, {
+        self.aliases.get(name).map_or(name, String::as_str)
+    }
 
-/// A step invoking export `name` of module `key`.
-pub fn invoke_expr(
-    key: &str, name: &str, args: &[WastArg<'_>], modules: &BTreeMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>,
-) -> Result<Expr> {
-    let mut args = args
-        .iter()
-        .map(wast_arg_to_nix)
-        .collect::<Result<Vec<_>>>()?;
-    args.push(Expr::ident("st_in"));
-    export_expr(key, name, modules, aliases, |export| {
-        (
-            LetBind::new("call", Expr::app(export, args)),
+    /// A step importing the module at `path` as `key`; `imports` are the
+    /// module names it imports from.
+    pub fn new_module_expr(
+        &self, kind: NewModule, path: &Path, key: &str, imports: &[String],
+    ) -> Expr {
+        let roots = imports.iter().map(|name| self.resolve(name));
+        let (mut binds, _) = self.binds(roots);
+        binds.push(LetBind::new("m_new", import_module_expr(path, key)));
+        let body = match kind {
+            NewModule::Instantiate => nix!({
+                results = [];
+                st = (m_new.instantiate({})).st;
+            }),
+            NewModule::InitialState => nix!({
+                results = [];
+                st = m_new."__wasm2nix"."st0";
+            }),
+        };
+        Expr::let_in(binds, body)
+    }
+
+    /// A step invoking export `name` of module `key`.
+    pub fn invoke_expr(&self, key: &str, name: &str, args: &[WastArg<'_>]) -> Result<Expr> {
+        let mut args = args
+            .iter()
+            .map(wast_arg_to_nix)
+            .collect::<Result<Vec<_>>>()?;
+        args.push(Expr::ident("st_in"));
+        let (mut binds, export) = self.export(key, name)?;
+        binds.push(LetBind::new("call", Expr::app(export, args)));
+        Ok(Expr::let_in(
+            binds,
             nix!({
                 results = call.results;
                 st = call.st;
             }),
-        )
-    })
-}
+        ))
+    }
 
-/// A step reading global export `name` of module `key`.
-pub fn get_expr(
-    key: &str, name: &str, modules: &BTreeMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>,
-) -> Result<Expr> {
-    export_expr(key, name, modules, aliases, |export| {
-        (
-            LetBind::new("value", nix!(#{export}.get(st_in))),
+    /// A step reading global export `name` of module `key`.
+    pub fn get_expr(&self, key: &str, name: &str) -> Result<Expr> {
+        let (mut binds, export) = self.export(key, name)?;
+        binds.push(LetBind::new("value", nix!(#{export}.get(st_in))));
+        Ok(Expr::let_in(
+            binds,
             nix!({
                 results = [value];
                 st = st_in;
             }),
-        )
-    })
-}
+        ))
+    }
 
-/// Evaluates the body returned by `use_export` with export `name` of module
-/// `key` and its state `st_in` in scope; `use_export` also returns one extra
-/// binding.
-fn export_expr(
-    key: &str, name: &str, modules: &BTreeMap<String, HarnessModule>,
-    aliases: &HashMap<String, String>, use_export: impl FnOnce(Expr) -> (LetBind, Expr),
-) -> Result<Expr> {
-    let state = modules
-        .get(key)
-        .context(UnknownModuleSnafu { key })?
-        .state
-        .clone();
-    let (mut binds, vars) = world(modules, aliases, [key.to_string()]);
-    let module = Expr::ident(vars[key].as_str());
-    let export_key = format!("__wasm2nix_export_{}", hex::encode(name.as_bytes()));
-    let (bind, body) = use_export(nix!(#{module}."__wasm2nix"."exportsByName".(export_key)));
-    binds.push(LetBind::new("st_in", state));
-    binds.push(bind);
-    Ok(Expr::let_in(binds, body))
-}
+    /// The world of module `key` with its state bound to `st_in`, and the
+    /// expression of its export `name`.
+    fn export(&self, key: &str, name: &str) -> Result<(Vec<LetBind>, Expr)> {
+        let state = self
+            .modules
+            .get(key)
+            .context(UnknownModuleSnafu { key })?
+            .state
+            .expr();
+        let (mut binds, vars) = self.binds([key]);
+        let module = Expr::ident(vars[key].as_str());
+        let export_key = format!("__wasm2nix_export_{}", hex::encode(name.as_bytes()));
+        binds.push(LetBind::new("st_in", state));
+        Ok((
+            binds,
+            nix!(#{module}."__wasm2nix"."exportsByName".(export_key)),
+        ))
+    }
 
-/// Bindings importing, with their current states, the modules connected to
-/// `roots` by imports in either direction: a step can only reach those, and
-/// the function registry needs every module whose functions can land in a
-/// shared table. Also returns the variable bound to each module key.
-fn world(
-    modules: &BTreeMap<String, HarnessModule>, aliases: &HashMap<String, String>,
-    roots: impl IntoIterator<Item = String>,
-) -> (Vec<LetBind>, HashMap<String, String>) {
-    let mut neighbours = HashMap::<&str, Vec<&str>>::new();
-    for (key, module) in modules {
-        for name in &module.imports {
-            if let Some((target, _)) = modules.get_key_value(&resolve_alias(aliases, name)) {
-                neighbours.entry(key).or_default().push(target);
-                neighbours.entry(target).or_default().push(key);
+    /// Bindings importing, with their current states, the modules connected
+    /// to `roots` by imports in either direction: a step can only reach
+    /// those, and the function registry needs every module whose functions
+    /// can land in a shared table. Also returns the variable bound to each
+    /// module key.
+    fn binds<'k>(
+        &self, roots: impl IntoIterator<Item = &'k str>,
+    ) -> (Vec<LetBind>, HashMap<String, String>) {
+        let mut neighbours = HashMap::<&str, Vec<&str>>::new();
+        for (key, module) in self.modules {
+            for name in &module.imports {
+                if let Some((target, _)) = self.modules.get_key_value(self.resolve(name)) {
+                    neighbours.entry(key).or_default().push(target);
+                    neighbours.entry(target).or_default().push(key);
+                }
             }
         }
-    }
-    let mut component = BTreeSet::new();
-    let mut queue = roots
-        .into_iter()
-        .filter_map(|root| modules.get_key_value(&root).map(|(key, _)| key.as_str()))
-        .collect::<Vec<_>>();
-    while let Some(key) = queue.pop() {
-        if component.insert(key) {
-            queue.extend(neighbours.get(key).into_iter().flatten());
+        let mut component = BTreeSet::new();
+        let mut queue = roots
+            .into_iter()
+            .filter_map(|root| {
+                self.modules
+                    .get_key_value(root)
+                    .map(|(key, _)| key.as_str())
+            })
+            .collect::<Vec<_>>();
+        while let Some(key) = queue.pop() {
+            if component.insert(key) {
+                queue.extend(neighbours.get(key).into_iter().flatten());
+            }
         }
+
+        let vars = component
+            .iter()
+            .enumerate()
+            .map(|(i, key)| ((*key).to_string(), format!("m{i}_import")))
+            .collect::<HashMap<_, _>>();
+        let func_registry = Expr::attrset(component.iter().map(|key| {
+            let module = Expr::ident(vars[*key].as_str());
+            AttrBind::new(AttrKey::string(*key), nix!(#{module}."__wasm2nix"."funcs"))
+        }));
+        let mut binds = vec![
+            LetBind::new("imports", self.imports_expr(&vars)),
+            LetBind::new("funcRegistry", func_registry),
+        ];
+        for (i, key) in component.iter().enumerate() {
+            let module = &self.modules[*key];
+            let raw = format!("m{i}");
+            binds.push(LetBind::new(
+                raw.clone(),
+                import_module_expr(&module.path, key),
+            ));
+            binds.push(LetBind::new(
+                vars[*key].clone(),
+                nix!(merge(#{Expr::ident(raw)}, {
+                    "__wasm2nixState" = #{module.state.expr()};
+                })),
+            ));
+        }
+        (binds, vars)
     }
 
-    let vars = component
-        .iter()
-        .enumerate()
-        .map(|(i, key)| ((*key).to_string(), format!("m{i}_import")))
-        .collect::<HashMap<_, _>>();
-    let func_registry = Expr::attrset(component.iter().map(|key| {
-        let module = Expr::ident(vars[*key].as_str());
-        AttrBind::new(AttrKey::string(*key), nix!(#{module}."__wasm2nix"."funcs"))
-    }));
-    let mut binds = vec![
-        LetBind::new("imports", imports_expr(aliases, &vars)),
-        LetBind::new("funcRegistry", func_registry),
-    ];
-    for (i, key) in component.iter().enumerate() {
-        let raw = format!("m{i}");
-        binds.push(LetBind::new(
-            raw.clone(),
-            import_module_expr(&modules[*key].path, key),
-        ));
-        binds.push(LetBind::new(
-            vars[*key].clone(),
-            nix!(merge(#{Expr::ident(raw)}, {
-                "__wasm2nixState" = #{modules[*key].state.clone()};
-            })),
-        ));
+    /// The import set shared by every module of a world: each module, by key
+    /// and by registered alias, plus `spectest` and the function registry.
+    fn imports_expr(&self, vars: &HashMap<String, String>) -> Expr {
+        let mut fields = BTreeMap::new();
+        fields.insert("__funcRegistry", Expr::ident("funcRegistry"));
+        fields.insert("spectest", nix!(harness.spectest));
+        for (key, var) in vars {
+            fields.insert(key, Expr::ident(var.as_str()));
+        }
+        for (alias, key) in self.aliases {
+            if let Some(var) = vars.get(key) {
+                fields.insert(alias, Expr::ident(var.as_str()));
+            }
+        }
+        Expr::attrset(
+            fields
+                .into_iter()
+                .map(|(name, value)| AttrBind::new(AttrKey::string(name), value)),
+        )
     }
-    (binds, vars)
 }
 
-/// The import set shared by every module of a world: each module, by key and
-/// by registered alias, plus `spectest` and the function registry.
-fn imports_expr(aliases: &HashMap<String, String>, vars: &HashMap<String, String>) -> Expr {
-    let mut fields = BTreeMap::new();
-    fields.insert("__funcRegistry".to_string(), Expr::ident("funcRegistry"));
-    fields.insert("spectest".to_string(), nix!(harness.spectest));
-    for (key, var) in vars {
-        fields.insert(key.clone(), Expr::ident(var.as_str()));
-    }
-    for (alias, key) in aliases {
-        if let Some(var) = vars.get(key) {
-            fields.insert(alias.clone(), Expr::ident(var.as_str()));
-        }
-    }
-    Expr::attrset(
-        fields
-            .into_iter()
-            .map(|(name, value)| AttrBind::new(AttrKey::string(name), value)),
-    )
+pub fn path_expr(path: &Path) -> Expr {
+    Expr::path(path.display().to_string())
 }
 
 fn import_expr(path: &Path, arg: Expr) -> Expr {
-    nix!(import(#{Expr::path(path.display().to_string())}, #{arg}))
+    nix!(import(#{path_expr(path)}, #{arg}))
 }
 
 /// Imports the module at `path` as `key`, with the world's shared imports.
 fn import_module_expr(path: &Path, key: &str) -> Expr {
-    nix!(import(#{Expr::path(path.display().to_string())}, rt, merge(imports, {
-        "__moduleId" = #{Expr::string(key)};
+    nix!(import(#{path_expr(path)}, rt, merge(imports, {
+        "__moduleId" = #{key};
     })))
 }
 
@@ -580,12 +591,23 @@ fn wast_arg_to_nix(arg: &WastArg<'_>) -> Result<Expr> {
             Ok(nix!({ extern = #{i64::from(*value)}; }))
         }
         WastArg::Core(WastArgCore::RefNull(_)) => Ok(Expr::int(0)),
-        _ => UnsupportedInvokeArgumentSnafu.fail(),
+        _ => UnsupportedInvokeArgumentSnafu {
+            arg: format!("{arg:?}"),
+        }
+        .fail(),
     }
 }
 
+/// A Nix integer read back as the u64 bits it encodes.
+pub fn json_number_to_u64(value: &JsonValue) -> Result<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().map(i64::cast_unsigned))
+        .context(ExpectedIntegerResultSnafu)
+}
+
 pub fn nix_u64(value: u64) -> Result<Expr> {
-    let value = i64::try_from(value).map_err(|_| NixIntegerOverflowSnafu { value }.build())?;
+    let value = i64::try_from(value).context(NixIntegerOverflowSnafu { value })?;
     Ok(Expr::int(value))
 }
 

@@ -1,8 +1,11 @@
 //! Propagates imported tables, memories and globals between module states.
-//! Each new state is bound to a batch variable, so states never nest.
+//! Each new state is bound to a batch variable, so states never nest. Every
+//! update reads the current state, so updates of one module chain.
+
+use std::collections::HashMap;
 
 use cranelift_entity::EntityRef;
-use snafu::prelude::*;
+use snafu::OptionExt;
 use wasm2nix::nix::Expr;
 use wasm2nix::nix::nix;
 use wasm2nix::translator::NixModule;
@@ -13,135 +16,168 @@ use crate::error::Result;
 use crate::error::UnknownModuleSnafu;
 use crate::eval::nix_u64;
 use crate::script::HarnessModule;
+use crate::script::ModuleState;
 use crate::script::Session;
-use crate::script::resolve_alias;
+
+/// The registered module an import refers to.
+struct ImportTarget {
+    /// The import's index among the importing module's imports of its kind.
+    import_index: u32,
+    import_module: String,
+    field: String,
+    key: String,
+    /// The index of the imported export in the target, if it has one.
+    export_index: Option<u32>,
+}
 
 impl Session {
-    pub fn set_state(&mut self, key: &str, state: Expr) {
+    pub fn set_state(&mut self, key: &str, state: Expr) -> Result<()> {
         let state = self.batch.bind(state);
-        if let Some(module) = self.modules.get_mut(key) {
-            module.state = state;
-            module.pending = true;
-        }
+        self.modules
+            .get_mut(key)
+            .context(UnknownModuleSnafu { key })?
+            .state = ModuleState::Pending(state);
+        Ok(())
     }
 
-    fn target(&self, import_module: &str) -> Option<(String, &HarnessModule)> {
-        let key = resolve_alias(&self.aliases, import_module);
-        let module = self.modules.get(&key)?;
-        Some((key, module))
+    fn state(&self, key: &str) -> Result<Expr> {
+        Ok(self
+            .modules
+            .get(key)
+            .context(UnknownModuleSnafu { key })?
+            .state
+            .expr())
+    }
+
+    /// The registered modules the imports of `importer` refer to; `imports`
+    /// picks the imports of one kind and `exports` the target's exports of
+    /// that kind.
+    fn import_targets(
+        &self, importer: &str, imports: fn(&HarnessModule) -> &[(String, String)],
+        exports: fn(&HarnessModule) -> &HashMap<String, u32>,
+    ) -> Result<Vec<ImportTarget>> {
+        let importer = self
+            .modules
+            .get(importer)
+            .context(UnknownModuleSnafu { key: importer })?;
+        Ok((0..)
+            .zip(imports(importer))
+            .filter_map(|(import_index, (import_module, field))| {
+                let (key, module) = self
+                    .modules
+                    .get_key_value(self.world().resolve(import_module))?;
+                Some(ImportTarget {
+                    import_index,
+                    import_module: import_module.clone(),
+                    field: field.clone(),
+                    key: key.clone(),
+                    export_index: exports(module).get(field).copied(),
+                })
+            })
+            .collect())
     }
 
     /// Propagates the state changes of a call into module `key`.
-    pub fn sync_after_call(&mut self, key: &str) {
-        self.sync_global_imports_to_targets(key);
-        self.sync_memory_imports_to_targets(key);
-        self.sync_global_imports_from_targets();
+    pub fn sync_after_call(&mut self, key: &str) -> Result<()> {
+        self.sync_global_imports_to_targets(key)?;
+        self.sync_memory_imports_to_targets(key)?;
+        self.sync_global_imports_from_targets()
     }
 
     /// Refreshes every imported global from its exporting module.
-    pub fn sync_global_imports_from_targets(&mut self) {
+    pub fn sync_global_imports_from_targets(&mut self) -> Result<()> {
         let keys = self.modules.keys().cloned().collect::<Vec<_>>();
         for key in keys {
-            let module = &self.modules[&key];
-            let mut state = module.state.clone();
-            let mut synced = false;
-            for (index, (import_module, field)) in module.imported_globals.iter().enumerate() {
-                let Some((_, target)) = self.target(import_module) else {
+            let targets =
+                self.import_targets(&key, |m| &m.imported_globals, |m| &m.global_exports)?;
+            let mut state = None;
+            for target in targets {
+                let Some(export_index) = target.export_index else {
                     continue;
                 };
-                let Some(&target_index) = target.global_exports.get(field) else {
-                    continue;
+                let dst = match state.take() {
+                    Some(state) => state,
+                    None => self.state(&key)?,
                 };
-                state = nix!(harness.syncGlobalState({
-                    dstSt = #{state};
-                    dstGlobalIndex = #{i64::from(index as u32)};
-                    srcSt = #{target.state.clone()};
-                    srcGlobalIndex = #{i64::from(target_index)};
-                }));
-                synced = true;
+                state = Some(nix!(harness.syncGlobalState({
+                    dstSt = #{dst};
+                    dstGlobalIndex = #{target.import_index};
+                    srcSt = #{self.state(&target.key)?};
+                    srcGlobalIndex = #{export_index};
+                })));
             }
-            if synced {
-                self.set_state(&key, state);
+            if let Some(state) = state {
+                self.set_state(&key, state)?;
             }
         }
+        Ok(())
     }
 
     /// Writes the globals module `source_key` imports back to their exporters.
-    fn sync_global_imports_to_targets(&mut self, source_key: &str) {
-        let Some(source) = self.modules.get(source_key) else {
-            return;
-        };
-        let source_state = source.state.clone();
-        for (index, (import_module, field)) in source.imported_globals.clone().iter().enumerate() {
-            let Some((target_key, target)) = self.target(import_module) else {
-                continue;
-            };
-            let Some(&target_index) = target.global_exports.get(field) else {
+    fn sync_global_imports_to_targets(&mut self, source_key: &str) -> Result<()> {
+        let source = self.state(source_key)?;
+        let targets =
+            self.import_targets(source_key, |m| &m.imported_globals, |m| &m.global_exports)?;
+        for target in targets {
+            let Some(export_index) = target.export_index else {
                 continue;
             };
             let state = nix!(harness.syncGlobalState({
-                dstSt = #{target.state.clone()};
-                dstGlobalIndex = #{i64::from(target_index)};
-                srcSt = #{source_state.clone()};
-                srcGlobalIndex = #{i64::from(index as u32)};
+                dstSt = #{self.state(&target.key)?};
+                dstGlobalIndex = #{export_index};
+                srcSt = #{source.clone()};
+                srcGlobalIndex = #{target.import_index};
             }));
-            self.set_state(&target_key, state);
+            self.set_state(&target.key, state)?;
         }
+        Ok(())
     }
 
     /// Writes the memories module `source_key` imports back to their
     /// exporters.
-    pub fn sync_memory_imports_to_targets(&mut self, source_key: &str) {
-        let Some(source) = self.modules.get(source_key) else {
-            return;
-        };
-        let source_state = source.state.clone();
-        for (import_module, field) in source.imported_memories.clone() {
-            let Some((target_key, target)) = self.target(&import_module) else {
-                continue;
-            };
-            if !target.memory_exports.contains_key(&field) {
+    pub fn sync_memory_imports_to_targets(&mut self, source_key: &str) -> Result<()> {
+        let source = self.state(source_key)?;
+        let targets =
+            self.import_targets(source_key, |m| &m.imported_memories, |m| &m.memory_exports)?;
+        for target in targets {
+            if target.export_index.is_none() {
                 continue;
             }
             let state = nix!(harness.syncMemoryState({
-                dstSt = #{target.state.clone()};
-                srcSt = #{source_state.clone()};
+                dstSt = #{self.state(&target.key)?};
+                srcSt = #{source.clone()};
             }));
-            self.set_state(&target_key, state);
+            self.set_state(&target.key, state)?;
         }
+        Ok(())
     }
 
     /// Copies the tables a freshly instantiated module imports back to their
     /// exporters.
     pub fn merge_imported_table_initializers(&mut self, key: &str) -> Result<()> {
-        let source = self.modules.get(key).context(UnknownModuleSnafu { key })?;
-        let source_state = source.state.clone();
-        for (index, (import_module, field)) in source.imported_tables.clone().iter().enumerate() {
-            let Some((target_key, target)) = self.target(import_module) else {
-                continue;
-            };
-            let target_index =
-                *target
-                    .table_exports
-                    .get(field)
-                    .context(MissingTableExportSnafu {
-                        module_name: import_module,
-                        field_name: field,
-                    })?;
+        let source = self.state(key)?;
+        let targets = self.import_targets(key, |m| &m.imported_tables, |m| &m.table_exports)?;
+        for target in targets {
+            let export_index = target.export_index.context(MissingTableExportSnafu {
+                module_name: target.import_module,
+                field_name: target.field,
+            })?;
             let state = nix!(harness.mergeTableState({
-                dstSt = #{target.state.clone()};
-                targetTableIndex = #{i64::from(target_index)};
-                srcSt = #{source_state.clone()};
-                sourceTableIndex = #{i64::from(index as u32)};
+                dstSt = #{self.state(&target.key)?};
+                targetTableIndex = #{export_index};
+                srcSt = #{source.clone()};
+                sourceTableIndex = #{target.import_index};
             }));
-            self.set_state(&target_key, state);
+            self.set_state(&target.key, state)?;
         }
         Ok(())
     }
 
     /// Applies the in-bounds active element segments of a trapping module to
     /// the tables it imports, up to the first out-of-bounds segment.
-    pub fn apply_trapping_table_side_effects(&mut self, module: &NixModule, source_state: &Expr) {
+    pub fn apply_trapping_table_side_effects(
+        &mut self, module: &NixModule, source_state: &Expr,
+    ) -> Result<()> {
         for init in &module.info.table_initializers {
             if init.base.is_some() {
                 continue;
@@ -151,27 +187,30 @@ impl Session {
             else {
                 continue;
             };
-            let len = init.elements.len() as u32;
-            if init.offset.saturating_add(len) > module.info.tables[init.table_index].entity.minimum
-            {
+            let len = init.elements.len() as u64;
+            let min = u64::from(module.info.tables[init.table_index].entity.minimum);
+            if u64::from(init.offset).saturating_add(len) > min {
                 break;
             }
-            let Some((target_key, target)) = self.target(import_module) else {
-                continue;
-            };
-            let Some(&target_index) = target.table_exports.get(field) else {
+            let key = self.world().resolve(import_module).to_string();
+            let Some(&target_index) = self
+                .modules
+                .get(&key)
+                .and_then(|target| target.table_exports.get(field))
+            else {
                 continue;
             };
             let state = nix!(harness.mergeTableEntries({
-                dstSt = #{target.state.clone()};
-                targetTableIndex = #{i64::from(target_index)};
+                dstSt = #{self.state(&key)?};
+                targetTableIndex = #{target_index};
                 srcSt = #{source_state.clone()};
-                sourceTableIndex = #{i64::from(init.table_index.as_u32())};
-                offset = #{i64::from(init.offset)};
-                len = #{i64::from(len)};
+                sourceTableIndex = #{init.table_index.as_u32()};
+                offset = #{init.offset};
+                len = #{nix_u64(len)?};
             }));
-            self.set_state(&target_key, state);
+            self.set_state(&key, state)?;
         }
+        Ok(())
     }
 
     /// Applies the in-bounds active data segments of a trapping module to the
@@ -193,10 +232,12 @@ impl Session {
             if init.offset.saturating_add(len) > min_pages.saturating_mul(65536) {
                 break;
             }
-            let Some((target_key, target)) = self.target(import_module) else {
-                continue;
-            };
-            if !target.memory_exports.contains_key(field) {
+            let key = self.world().resolve(import_module).to_string();
+            if !self
+                .modules
+                .get(&key)
+                .is_some_and(|target| target.memory_exports.contains_key(field))
+            {
                 continue;
             }
             let offset = nix_u64(init.offset)?;
@@ -205,8 +246,8 @@ impl Session {
                 nix_u64(len)?,
                 source_state.clone(),
             ]);
-            let state = RuntimeFunction::MemStoreBytes.call([bytes, offset, target.state.clone()]);
-            self.set_state(&target_key, state);
+            let state = RuntimeFunction::MemStoreBytes.call([bytes, offset, self.state(&key)?]);
+            self.set_state(&key, state)?;
         }
         Ok(())
     }
