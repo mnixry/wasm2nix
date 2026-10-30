@@ -1,12 +1,14 @@
 use cranelift_wasm::ConstOp;
 use cranelift_wasm::WasmValType;
-use snafu::prelude::*;
+use snafu::OptionExt;
 use wasm2nix_runtime::RuntimeFunction;
 
-use crate::lower::error::MalformedConstExprSnafu;
+use crate::lower::error::ConstExprOperandSnafu;
+use crate::lower::error::ConstExprResultsSnafu;
 use crate::lower::error::Result;
-use crate::lower::state::global_bind_name;
-use crate::lower::state::lower_table_entry;
+use crate::lower::error::UnsupportedConstOpSnafu;
+use crate::lower::names::global_bind_name;
+use crate::lower::table_entry::lower_table_entry;
 use crate::nix::Expr;
 use crate::translator::NixModule;
 
@@ -32,12 +34,10 @@ pub(super) fn lower_const_expr(
             | ConstOp::I64Add
             | ConstOp::I64Sub
             | ConstOp::I64Mul => {
-                let rhs = stack.pop().context(MalformedConstExprSnafu {
-                    reason: format!("{op:?} missing right operand"),
-                })?;
-                let lhs = stack.pop().context(MalformedConstExprSnafu {
-                    reason: format!("{op:?} missing left operand"),
-                })?;
+                let (rhs, lhs) = stack
+                    .pop()
+                    .zip(stack.pop())
+                    .context(ConstExprOperandSnafu { op })?;
                 let function = match op {
                     ConstOp::I32Add => RuntimeFunction::I32Add,
                     ConstOp::I32Sub => RuntimeFunction::I32Sub,
@@ -48,22 +48,13 @@ pub(super) fn lower_const_expr(
                 };
                 stack.push(function.call([lhs, rhs]));
             }
-            _ => {
-                return MalformedConstExprSnafu {
-                    reason: format!("unsupported operator {op:?}"),
-                }
-                .fail();
-            }
+            _ => return UnsupportedConstOpSnafu { op }.fail(),
         }
     }
 
-    ensure!(
-        stack.len() == 1,
-        MalformedConstExprSnafu {
-            reason: format!("expected one result, found {}", stack.len()),
-        }
-    );
-    stack.pop().context(MalformedConstExprSnafu {
-        reason: "empty stack".to_string(),
-    })
+    let count = stack.len();
+    let [result] = <[Expr; 1]>::try_from(stack)
+        .ok()
+        .context(ConstExprResultsSnafu { count })?;
+    Ok(result)
 }

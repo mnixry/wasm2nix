@@ -22,19 +22,20 @@ use cranelift_wasm::MemoryIndex;
 use cranelift_wasm::ModuleEnvironment;
 use cranelift_wasm::Table;
 use cranelift_wasm::TableIndex;
-use cranelift_wasm::TargetEnvironment;
-use cranelift_wasm::TypeConvert;
 use cranelift_wasm::TypeIndex;
 use cranelift_wasm::WasmError;
 use cranelift_wasm::WasmFuncType;
-use cranelift_wasm::WasmHeapType;
 use cranelift_wasm::WasmResult;
 use cranelift_wasm::WasmValType;
 use cranelift_wasm::translate_module;
+use snafu::ResultExt;
 use target_lexicon::PointerWidth;
 use wasm2nix_runtime::intrinsics::UserName;
 
+use crate::error::TranslateError;
+use crate::error::TranslateSnafu;
 use crate::func_env::NixFuncEnvironment;
+use crate::func_env::user_name;
 
 #[derive(Debug, Clone)]
 pub struct Exportable<T> {
@@ -53,7 +54,6 @@ impl<T> Exportable<T> {
 
 #[derive(Debug, Clone)]
 pub struct DataInitializer {
-    pub data_index: DataIndex,
     pub memory_index: MemoryIndex,
     pub base: Option<GlobalIndex>,
     pub offset: u64,
@@ -62,7 +62,6 @@ pub struct DataInitializer {
 
 #[derive(Debug, Clone)]
 pub struct TableInitializer {
-    pub elem_index: ElemIndex,
     pub table_index: TableIndex,
     pub base: Option<GlobalIndex>,
     pub offset: u32,
@@ -100,8 +99,7 @@ pub struct NixModuleInfo {
 }
 
 impl NixModuleInfo {
-    #[must_use]
-    pub fn new(config: TargetFrontendConfig) -> Self {
+    fn new(config: TargetFrontendConfig) -> Self {
         Self {
             config,
             signatures: PrimaryMap::new(),
@@ -125,8 +123,9 @@ impl NixModuleInfo {
         }
     }
 
-    #[must_use]
-    pub fn canonical_type_index(&self, index: TypeIndex) -> TypeIndex {
+    /// The first type index with the same signature as `index`, so that
+    /// `call_indirect` compares structurally equal types as equal.
+    pub(crate) fn canonical_type_index(&self, index: TypeIndex) -> TypeIndex {
         let target = &self.signatures[index];
         for (candidate_index, candidate) in &self.signatures {
             if candidate_index == index {
@@ -145,15 +144,8 @@ pub struct NixModule {
     trans: FuncTranslator,
 }
 
-impl Default for NixModule {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl NixModule {
-    #[must_use]
-    pub fn new() -> Self {
+    fn new() -> Self {
         let config = default_frontend_config();
         Self {
             info: NixModuleInfo::new(config),
@@ -167,52 +159,19 @@ impl NixModule {
     ///
     /// Returns an error when the input bytes are malformed or contain Wasm
     /// features this translator does not support.
-    pub fn translate(wasm: &[u8]) -> WasmResult<Self> {
+    pub fn translate(wasm: &[u8]) -> Result<Self, TranslateError> {
         let mut module = Self::new();
-        translate_module(wasm, &mut module)?;
+        translate_module(wasm, &mut module).context(TranslateSnafu)?;
         Ok(module)
     }
 
-    #[must_use]
-    pub fn get_func_type(&self, func_index: FuncIndex) -> TypeIndex {
-        self.info.functions[func_index].entity
-    }
-
-    #[must_use]
-    pub const fn num_func_imports(&self) -> usize {
-        self.info.imported_funcs.len()
+    /// The index of a function with a body; imported functions come first.
+    pub(crate) fn func_index(&self, defined: DefinedFuncIndex) -> FuncIndex {
+        FuncIndex::new(self.info.imported_funcs.len() + defined.index())
     }
 }
 
-impl TypeConvert for NixModule {
-    fn lookup_heap_type(&self, _index: cranelift_wasm::wasmparser::UnpackedIndex) -> WasmHeapType {
-        unimplemented!("GC/reference types not supported in wasm2nix v0")
-    }
-
-    fn lookup_type_index(
-        &self, _index: cranelift_wasm::wasmparser::UnpackedIndex,
-    ) -> cranelift_wasm::EngineOrModuleTypeIndex {
-        unimplemented!("GC/reference types not supported in wasm2nix v0")
-    }
-}
-
-impl TargetEnvironment for NixModule {
-    fn target_config(&self) -> TargetFrontendConfig {
-        self.info.config
-    }
-
-    fn heap_access_spectre_mitigation(&self) -> bool {
-        false
-    }
-
-    fn proof_carrying_code(&self) -> bool {
-        false
-    }
-
-    fn reference_type(&self, _ty: WasmHeapType) -> (ir::Type, bool) {
-        (I32, false)
-    }
-}
+impl_target_environment!(NixModule, |module| module.info.config);
 
 impl<'data> ModuleEnvironment<'data> for NixModule {
     fn declare_type_func(&mut self, wasm: WasmFuncType) -> WasmResult<()> {
@@ -337,13 +296,6 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         Ok(())
     }
 
-    fn reserve_table_elements(&mut self, num: u32) -> WasmResult<()> {
-        if self.info.element_segments.is_empty() {
-            self.info.element_segments = SecondaryMap::with_capacity(num as usize);
-        }
-        Ok(())
-    }
-
     fn declare_table_elements(
         &mut self, table_index: TableIndex, base: Option<GlobalIndex>, offset: u32,
         elements: Box<[FuncIndex]>,
@@ -356,7 +308,6 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         // traps on segment bounds.
         self.info.element_segments[elem_index] = Vec::new();
         self.info.table_initializers.push(TableInitializer {
-            elem_index,
             table_index,
             base,
             offset,
@@ -393,17 +344,13 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         >,
         body: cranelift_wasm::wasmparser::FunctionBody<'data>,
     ) -> WasmResult<()> {
-        let func_index = FuncIndex::new(self.num_func_imports() + self.info.function_bodies.len());
-
-        let sigidx = self.get_func_type(func_index);
+        let func_index = self.func_index(self.info.function_bodies.next_key());
+        let sigidx = self.info.functions[func_index].entity;
         let mut func_environ = NixFuncEnvironment::new(&self.info);
         let sig = func_environ.vmctx_sig(sigidx);
 
-        let name = UserName::Func(func_index)
-            .to_parts()
-            .map_err(|err| WasmError::User(err.to_string()))?;
-        let mut func =
-            ir::Function::with_name_signature(UserFuncName::user(name.namespace, name.index), sig);
+        let name = user_name(UserName::Func(func_index))?;
+        let mut func = ir::Function::with_name_signature(UserFuncName::User(name), sig);
         self.trans
             .translate_body(&mut validator, body, &mut func, &mut func_environ)?;
         self.info.function_bodies.push(func);
@@ -420,7 +367,6 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         // instantiation, so a later memory.init with that index traps.
         self.info.data_segments[data_index] = Vec::new();
         self.info.data_initializers.push(DataInitializer {
-            data_index,
             memory_index,
             base,
             offset,
@@ -429,28 +375,16 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         Ok(())
     }
 
-    fn reserve_function_bodies(&mut self, bodies: u32, _code_section_offset: u64) {
-        if self.info.function_bodies.is_empty() {
-            self.info.function_bodies = PrimaryMap::with_capacity(bodies as usize);
-        }
-    }
-
-    fn reserve_data_initializers(&mut self, num: u32) -> WasmResult<()> {
-        self.info.data_initializers.reserve(num as usize);
-        Ok(())
-    }
-
-    fn reserve_passive_data(&mut self, count: u32) -> WasmResult<()> {
-        if self.info.data_segments.is_empty() {
-            self.info.data_segments = SecondaryMap::with_capacity(count as usize);
-        }
-        Ok(())
-    }
-
     fn wasm_features(&self) -> wasmparser::WasmFeatures {
         WASM_FEATURES
     }
 }
+
+/// Bytes per Wasm memory page.
+pub(crate) const WASM_PAGE_SIZE: u64 = 65536;
+
+/// The most pages a 32-bit memory can have.
+pub(crate) const WASM32_MAX_PAGES: u64 = 65536;
 
 /// The Wasm proposals the translator and the runtime support.
 pub const WASM_FEATURES: wasmparser::WasmFeatures = wasmparser::WasmFeatures::WASM1
@@ -488,6 +422,49 @@ pub(crate) fn validate_memory_type(memory: Memory) -> WasmResult<()> {
 fn validate_global_type(global: Global) -> WasmResult<()> {
     clif_type(global.wasm_ty).map(drop)
 }
+
+/// Implements `TypeConvert` and `TargetEnvironment` for an environment whose
+/// `TargetFrontendConfig` `$config` reads from `self`.
+macro_rules! impl_target_environment {
+    ($ty:ty, | $this:ident | $config:expr) => {
+        impl cranelift_wasm::TypeConvert for $ty {
+            fn lookup_heap_type(
+                &self, _index: cranelift_wasm::wasmparser::UnpackedIndex,
+            ) -> cranelift_wasm::WasmHeapType {
+                unreachable!("concrete heap types are rejected by WASM_FEATURES")
+            }
+
+            fn lookup_type_index(
+                &self, _index: cranelift_wasm::wasmparser::UnpackedIndex,
+            ) -> cranelift_wasm::EngineOrModuleTypeIndex {
+                unreachable!("concrete heap types are rejected by WASM_FEATURES")
+            }
+        }
+
+        impl cranelift_wasm::TargetEnvironment for $ty {
+            fn target_config(&self) -> cranelift_codegen::isa::TargetFrontendConfig {
+                let $this = self;
+                $config
+            }
+
+            fn heap_access_spectre_mitigation(&self) -> bool {
+                false
+            }
+
+            fn proof_carrying_code(&self) -> bool {
+                false
+            }
+
+            /// References are i32 table entry handles.
+            fn reference_type(
+                &self, _ty: cranelift_wasm::WasmHeapType,
+            ) -> (cranelift_codegen::ir::Type, bool) {
+                (cranelift_codegen::ir::types::I32, false)
+            }
+        }
+    };
+}
+pub(crate) use impl_target_environment;
 
 const fn default_frontend_config() -> TargetFrontendConfig {
     TargetFrontendConfig {

@@ -16,22 +16,20 @@ pub(super) fn inline_single_use_values(steps: Vec<Step>, body: Expr) -> LoweredB
     let mut forces = Vec::new();
 
     for step in steps {
-        binds.extend(step.binds.into_iter().map(LetBind::from));
-        if let Some(force) = step.force {
-            forces.push(force);
-        }
+        binds.extend(step.binds);
+        forces.extend(step.force);
     }
 
     let mut body = body;
     let mut index = 0;
     while index < binds.len() {
-        let name = binds[index].name.clone();
-        let value = binds[index].value.clone();
-
-        if !is_inline_candidate(&value) || uses_in_binds(&binds[..index], &name) != 0 {
+        if !is_inline_candidate(&binds[index].value)
+            || uses_in_binds(&binds[..index], &binds[index].name) != 0
+        {
             index += 1;
             continue;
         }
+        let name = binds[index].name.clone();
 
         // Forcing a bound value is redundant once it is inlined; trap
         // conditions are ordinary use sites.
@@ -58,16 +56,16 @@ pub(super) fn inline_single_use_values(steps: Vec<Step>, body: Expr) -> LoweredB
         if removable_force_count == 1 {
             remove_ident_force(&mut forces, &name);
         }
+        let value = binds.remove(index).value;
         if use_count == 1 {
-            for bind in &mut binds[index + 1..] {
+            for bind in &mut binds[index..] {
                 bind.value.substitute_free(&name, &value);
             }
-            for expr in forces.iter_mut().filter_map(Force::expr_mut) {
-                expr.substitute_free(&name, &value);
+            for force in &mut forces {
+                force.expr_mut().substitute_free(&name, &value);
             }
             body.substitute_free(&name, &value);
         }
-        binds.remove(index);
     }
 
     LoweredBlockBody {
@@ -136,8 +134,7 @@ fn uses_in_binds(binds: &[LetBind], name: &str) -> usize {
 fn uses_in_forces(forces: &[Force], name: &str) -> usize {
     forces
         .iter()
-        .filter_map(Force::expr)
-        .map(|expr| expr.free_uses(name))
+        .map(|force| force.expr().free_uses(name))
         .sum()
 }
 

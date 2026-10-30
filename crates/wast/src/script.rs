@@ -618,7 +618,7 @@ fn spectest_import(field_name: &str) -> Option<ExternType> {
         let params = params.iter().map(ToString::to_string).collect();
         Some(ExternType::Func(FuncType::new(params, Vec::new())))
     };
-    let global = |ty| Some(ExternType::Global(GlobalType::new(ty, false)));
+    let global = |ty: &str| Some(ExternType::Global(GlobalType::new(ty.to_string(), false)));
     match field_name {
         "print" => print(&[]),
         "print_i32" => print(&["i32"]),
@@ -633,7 +633,7 @@ fn spectest_import(field_name: &str) -> Option<ExternType> {
         "global_f64" => global("f64"),
         "memory" => Some(ExternType::Memory(Limits::new(1, Some(2)))),
         "table" => Some(ExternType::Table(TableType::new(
-            "funcref",
+            "funcref".to_string(),
             Limits::new(10, Some(20)),
         ))),
         _ => None,

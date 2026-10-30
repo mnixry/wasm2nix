@@ -10,7 +10,6 @@ use cranelift_codegen::ir::types::F64;
 use cranelift_codegen::ir::types::I32;
 use cranelift_codegen::ir::types::I64;
 use cranelift_codegen::isa::CallConv;
-use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_entity::EntityRef;
 use cranelift_entity::PrimaryMap;
 use cranelift_frontend::FunctionBuilder;
@@ -24,7 +23,6 @@ use cranelift_wasm::HeapStyle;
 use cranelift_wasm::MemoryIndex;
 use cranelift_wasm::TableIndex;
 use cranelift_wasm::TargetEnvironment;
-use cranelift_wasm::TypeConvert;
 use cranelift_wasm::TypeIndex;
 use cranelift_wasm::WASM32_MAX_SIZE;
 use cranelift_wasm::WasmError;
@@ -37,7 +35,7 @@ use wasm2nix_runtime::intrinsics::UserName;
 use wasm2nix_runtime::intrinsics::global_accessors;
 
 use crate::translator::NixModuleInfo;
-use crate::translator::validate_memory_type;
+use crate::translator::impl_target_environment;
 
 /// Parameter and result types of a fixed intrinsic, before its trailing
 /// `VMContext` parameter.
@@ -131,42 +129,16 @@ fn import_function(
     }))
 }
 
-fn user_name(name: UserName) -> WasmResult<ir::UserExternalName> {
+/// Encodes `name` for Cranelift. Cranelift's environment traits only carry a
+/// [`WasmError`], so the encoding error is kept as its message.
+pub fn user_name(name: UserName) -> WasmResult<ir::UserExternalName> {
     let parts = name
         .to_parts()
         .map_err(|err| WasmError::User(err.to_string()))?;
     Ok(ir::UserExternalName::new(parts.namespace, parts.index))
 }
 
-impl TypeConvert for NixFuncEnvironment<'_> {
-    fn lookup_heap_type(&self, _index: cranelift_wasm::wasmparser::UnpackedIndex) -> WasmHeapType {
-        unimplemented!("GC/reference types not supported in wasm2nix v0")
-    }
-
-    fn lookup_type_index(
-        &self, _index: cranelift_wasm::wasmparser::UnpackedIndex,
-    ) -> cranelift_wasm::EngineOrModuleTypeIndex {
-        unimplemented!("GC/reference types not supported in wasm2nix v0")
-    }
-}
-
-impl TargetEnvironment for NixFuncEnvironment<'_> {
-    fn target_config(&self) -> TargetFrontendConfig {
-        self.mod_info.config
-    }
-
-    fn heap_access_spectre_mitigation(&self) -> bool {
-        false
-    }
-
-    fn proof_carrying_code(&self) -> bool {
-        false
-    }
-
-    fn reference_type(&self, _ty: WasmHeapType) -> (ir::Type, bool) {
-        (I32, false)
-    }
-}
+impl_target_environment!(NixFuncEnvironment<'_>, |env| env.mod_info.config);
 
 impl FuncEnvironment for NixFuncEnvironment<'_> {
     fn param_needs_stack_map(&self, _signature: &ir::Signature, _index: usize) -> bool {
@@ -194,18 +166,14 @@ impl FuncEnvironment for NixFuncEnvironment<'_> {
     }
 
     fn make_heap(&mut self, func: &mut ir::Function, index: MemoryIndex) -> WasmResult<Heap> {
-        // v0: only wasm32 memory index 0.
-        if index.index() != 0 {
-            return Err(WasmError::Unsupported("multiple memories".into()));
-        }
-
+        ensure_single_memory(index)?;
+        // Declarations already passed `validate_memory_type`.
         let memory = self
             .mod_info
             .memories
             .get(index)
             .map(|e| e.entity)
             .ok_or_else(|| WasmError::Unsupported("memory referenced but not declared".into()))?;
-        validate_memory_type(memory)?;
 
         // Make the base address symbolic so `heap_addr` results are stable and
         // can be treated as linear offsets during CLIF->Nix lowering
@@ -512,12 +480,7 @@ fn args_with_vmctx(
     func: &ir::Function, args: impl IntoIterator<Item = ir::Value>,
 ) -> WasmResult<Vec<ir::Value>> {
     let vmctx = vmctx_param(func)?;
-    let iter = args.into_iter();
-    let (lower_bound, upper_bound) = iter.size_hint();
-    let mut args = Vec::with_capacity(upper_bound.unwrap_or(lower_bound) + 1);
-    args.extend(iter);
-    args.push(vmctx);
-    Ok(args)
+    Ok(args.into_iter().chain([vmctx]).collect())
 }
 
 fn call_cursor<const N: usize>(

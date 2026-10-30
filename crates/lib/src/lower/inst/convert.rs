@@ -1,4 +1,5 @@
 use cranelift_codegen::ir::Opcode;
+use cranelift_codegen::ir::Type;
 use cranelift_codegen::ir::types::F32;
 use cranelift_codegen::ir::types::F64;
 use cranelift_codegen::ir::types::I8;
@@ -8,9 +9,9 @@ use cranelift_codegen::ir::types::I64;
 use cranelift_codegen::ir::{self};
 use wasm2nix_runtime::RuntimeFunction;
 
+use super::ctx::InstCtx;
+use super::step::LoweredInst;
 use crate::lower::error::Result;
-use crate::lower::inst::InstCtx;
-use crate::lower::inst::LoweredInst;
 use crate::nix::Expr;
 use crate::nix::nix;
 
@@ -29,7 +30,6 @@ impl InstCtx<'_> {
         let e = if in_ty == I8 && out_ty == I32 {
             nix!(if #{a} then 1 else 0)
         } else {
-            // For now, rely on runtime for non-bool extensions.
             RuntimeFunction::ConvUextend.call([a, Expr::string(out_ty.to_string())])
         };
         self.pure_bind(out, e)
@@ -52,25 +52,25 @@ impl InstCtx<'_> {
     }
 
     pub(super) fn lower_float_to_int(&self, arg: ir::Value) -> Result<LoweredInst> {
-        let out = self.results[0];
-        let in_ty = self.func.dfg.value_type(arg);
-        let out_ty = self.func.dfg.value_type(out);
-        let Some(function) = float_to_int_conv_function(self.op, in_ty, out_ty) else {
-            return self.unsupported_opcode();
-        };
-        let e = function.call([self.value_expr(arg)]);
-        Ok(self.pure_bind(out, e))
+        self.lower_conversion(arg, float_to_int_conv_function)
     }
 
     pub(super) fn lower_int_to_float(&self, arg: ir::Value) -> Result<LoweredInst> {
+        self.lower_conversion(arg, int_to_float_conv_function)
+    }
+
+    /// Calls the runtime function `function` picks for the opcode and the
+    /// input and output types.
+    fn lower_conversion(
+        &self, arg: ir::Value, function: fn(Opcode, Type, Type) -> Option<RuntimeFunction>,
+    ) -> Result<LoweredInst> {
         let out = self.results[0];
         let in_ty = self.func.dfg.value_type(arg);
         let out_ty = self.func.dfg.value_type(out);
-        let Some(function) = int_to_float_conv_function(self.op, in_ty, out_ty) else {
+        let Some(function) = function(self.op, in_ty, out_ty) else {
             return self.unsupported_opcode();
         };
-        let e = function.call([self.value_expr(arg)]);
-        Ok(self.pure_bind(out, e))
+        Ok(self.pure_bind(out, function.call([self.value_expr(arg)])))
     }
 
     pub(super) fn lower_float_resize(&self, arg: ir::Value) -> LoweredInst {
@@ -84,7 +84,7 @@ impl InstCtx<'_> {
 }
 
 const fn float_to_int_conv_function(
-    op: Opcode, input: cranelift_codegen::ir::Type, output: cranelift_codegen::ir::Type,
+    op: Opcode, input: Type, output: Type,
 ) -> Option<RuntimeFunction> {
     match (op, input, output) {
         (Opcode::FcvtToSint, F32, I32) => Some(RuntimeFunction::ConvTruncSF32I32),
@@ -108,7 +108,7 @@ const fn float_to_int_conv_function(
 }
 
 const fn int_to_float_conv_function(
-    op: Opcode, input: cranelift_codegen::ir::Type, output: cranelift_codegen::ir::Type,
+    op: Opcode, input: Type, output: Type,
 ) -> Option<RuntimeFunction> {
     match (op, input, output) {
         (Opcode::FcvtFromSint, I32, F32) => Some(RuntimeFunction::ConvConvertSI32F32),

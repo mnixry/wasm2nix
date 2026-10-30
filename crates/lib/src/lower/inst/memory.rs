@@ -6,11 +6,10 @@ use cranelift_codegen::ir::types::I64;
 use cranelift_codegen::ir::{self};
 use wasm2nix_runtime::RuntimeFunction;
 
+use super::ctx::InstCtx;
+use super::step::LoweredInst;
 use crate::lower::error::Result;
-use crate::lower::error::UnsupportedLoadSnafu;
-use crate::lower::error::UnsupportedStoreSnafu;
-use crate::lower::inst::InstCtx;
-use crate::lower::inst::LoweredInst;
+use crate::lower::error::UnsupportedMemoryAccessSnafu;
 use crate::nix::Expr;
 
 impl InstCtx<'_> {
@@ -41,11 +40,7 @@ fn load_function(op: Opcode, ty: ir::Type) -> Result<RuntimeFunction> {
             I64 => Ok(RuntimeFunction::MemLoadI64),
             F32 => Ok(RuntimeFunction::MemLoadF32),
             F64 => Ok(RuntimeFunction::MemLoadF64),
-            _ => UnsupportedLoadSnafu {
-                opcode: op.to_string(),
-                ty: ty.to_string(),
-            }
-            .fail(),
+            _ => UnsupportedMemoryAccessSnafu { opcode: op, ty }.fail(),
         },
         Opcode::Uload8 => Ok(RuntimeFunction::MemLoadU8),
         Opcode::Sload8 if ty == I64 => Ok(RuntimeFunction::MemLoadS8I64),
@@ -56,11 +51,7 @@ fn load_function(op: Opcode, ty: ir::Type) -> Result<RuntimeFunction> {
         Opcode::Uload32 => Ok(RuntimeFunction::MemLoadU32),
         Opcode::Sload32 if ty == I64 => Ok(RuntimeFunction::MemLoadS32I64),
         Opcode::Sload32 => Ok(RuntimeFunction::MemLoadS32),
-        _ => UnsupportedLoadSnafu {
-            opcode: op.to_string(),
-            ty: ty.to_string(),
-        }
-        .fail(),
+        _ => UnsupportedMemoryAccessSnafu { opcode: op, ty }.fail(),
     }
 }
 
@@ -71,19 +62,11 @@ fn store_function(op: Opcode, ty: ir::Type) -> Result<RuntimeFunction> {
             I64 => Ok(RuntimeFunction::MemStoreI64),
             F32 => Ok(RuntimeFunction::MemStoreF32),
             F64 => Ok(RuntimeFunction::MemStoreF64),
-            _ => UnsupportedStoreSnafu {
-                opcode: op.to_string(),
-                ty: ty.to_string(),
-            }
-            .fail(),
+            _ => UnsupportedMemoryAccessSnafu { opcode: op, ty }.fail(),
         },
         Opcode::Istore8 => Ok(RuntimeFunction::MemStoreU8),
         Opcode::Istore16 => Ok(RuntimeFunction::MemStoreU16),
         Opcode::Istore32 => Ok(RuntimeFunction::MemStoreI32),
-        _ => UnsupportedStoreSnafu {
-            opcode: op.to_string(),
-            ty: ty.to_string(),
-        }
-        .fail(),
+        _ => UnsupportedMemoryAccessSnafu { opcode: op, ty }.fail(),
     }
 }

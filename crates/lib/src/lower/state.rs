@@ -1,21 +1,28 @@
+//! The initial instance state `st0`: memory, globals, tables, and the
+//! passive segments.
+
 use std::collections::BTreeMap;
 
-use cranelift_codegen::ir::{self};
 use cranelift_entity::EntityRef;
+use snafu::OptionExt;
 use wasm2nix_runtime::MEMORY_CHUNK_WORDS;
 use wasm2nix_runtime::MEMORY_GROUP_CHUNKS;
 use wasm2nix_runtime::RuntimeFunction;
 
 use crate::lower::const_expr::lower_const_expr;
+use crate::lower::error::MissingGlobalInitializerSnafu;
 use crate::lower::error::Result;
 use crate::lower::imports::lower_attr_or;
 use crate::lower::imports::lower_imported_extern;
+use crate::lower::names::global_bind_name;
+use crate::lower::table_entry::lower_table_entry;
 use crate::nix::AttrBind;
 use crate::nix::AttrKey;
 use crate::nix::Expr;
 use crate::nix::LetBind;
 use crate::nix::nix;
 use crate::translator::NixModule;
+use crate::translator::WASM32_MAX_PAGES;
 
 pub(super) fn lower_initial_state(module: &NixModule) -> Result<Expr> {
     Ok(nix!({
@@ -36,11 +43,10 @@ fn lower_initial_memory(module: &NixModule) -> Expr {
         });
     };
 
-    let declared_min =
-        Expr::int(i64::try_from(memory.entity.minimum).expect("memory minimum fits in i64"));
-    let declared_max_pages = memory.entity.maximum.unwrap_or(65536);
-    let declared_max =
-        Expr::int(i64::try_from(declared_max_pages).expect("memory maximum fits in i64"));
+    // Validation bounds 32-bit memories by `WASM32_MAX_PAGES`.
+    let pages = |count: u64| Expr::int(i64::try_from(count).expect("page count fits in i64"));
+    let declared_min = pages(memory.entity.minimum);
+    let declared_max = pages(memory.entity.maximum.unwrap_or(WASM32_MAX_PAGES));
     let overlay_pages = lower_initial_memory_pages(module);
 
     if let Some((module_name, field_name)) = module.info.imported_memories.get(memory_index.index())
@@ -78,16 +84,13 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
 
         // Bytes past the address space are out of bounds; instantiation traps.
         for (addr, byte) in (init.offset..=u64::MAX).zip(init.data.iter().copied()) {
-            let word_index = addr / 4;
             let shift = ((addr % 4) as u32) * 8;
-            let old_word = words.get(&word_index).copied().unwrap_or(0);
-            let mask = !(0xff_u32 << shift);
-            let new_word = (old_word & mask) | (u32::from(byte) << shift);
-            words.insert(word_index, new_word);
+            let word = words.entry(addr / 4).or_insert(0);
+            *word = (*word & !(0xff_u32 << shift)) | (u32::from(byte) << shift);
         }
     }
 
-    let mut groups: BTreeMap<u64, BTreeMap<u64, Vec<AttrBind>>> = BTreeMap::new();
+    let mut groups: BTreeMap<u64, BTreeMap<u64, Vec<(u64, Expr)>>> = BTreeMap::new();
     for (idx, word) in words {
         let chunk = idx / MEMORY_CHUNK_WORDS;
         groups
@@ -95,174 +98,101 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
             .or_default()
             .entry(chunk)
             .or_default()
-            .push(AttrBind::new(
-                AttrKey::string(idx.to_string()),
-                Expr::int(i64::from(word)),
-            ));
+            .push((idx, Expr::int(i64::from(word))));
     }
     keyed_attrset(groups.into_iter().map(|(group, chunks)| {
         let chunks = chunks
             .into_iter()
-            .map(|(chunk, words)| (chunk, Expr::attrset(words)));
+            .map(|(chunk, words)| (chunk, keyed_attrset(words)));
         (group, keyed_attrset(chunks))
     }))
 }
 
-fn keyed_attrset(entries: impl Iterator<Item = (u64, Expr)>) -> Expr {
+/// An attrset keyed by the decimal strings of `entries`' indices.
+fn keyed_attrset(entries: impl IntoIterator<Item = (u64, Expr)>) -> Expr {
     Expr::attrset(
-        entries.map(|(key, value)| AttrBind::new(AttrKey::string(key.to_string()), value)),
+        entries
+            .into_iter()
+            .map(|(key, value)| AttrBind::new(AttrKey::string(key.to_string()), value)),
     )
 }
 
 fn lower_data_segments(module: &NixModule) -> Expr {
-    Expr::attrset(module.info.data_segments.iter().map(|(idx, data)| {
-        AttrBind::new(
-            AttrKey::string(idx.as_u32().to_string()),
-            Expr::list(
-                data.iter()
-                    .copied()
-                    .map(|byte| Expr::int(i64::from(byte)))
-                    .collect(),
-            ),
-        )
+    keyed_attrset(module.info.data_segments.iter().map(|(idx, data)| {
+        let bytes = data.iter().map(|byte| Expr::int(i64::from(*byte)));
+        (u64::from(idx.as_u32()), Expr::list(bytes.collect()))
     }))
 }
 
 fn lower_initial_globals(module: &NixModule) -> Result<Expr> {
+    let info = &module.info;
     let mut binds = Vec::new();
-    let mut global_attrs = Vec::new();
+    let mut globals = Vec::new();
 
-    for (idx, global) in &module.info.globals {
-        let bind_name = global_bind_name(idx);
-        let value = if let Some((module_name, field_name)) =
-            module.info.imported_globals.get(idx.index())
+    for (idx, global) in &info.globals {
+        let value = if let Some((module_name, field_name)) = info.imported_globals.get(idx.index())
         {
             lower_imported_extern(module_name, field_name)
-        } else if let Some(init) = module
-            .info
-            .global_inits
-            .get(idx)
-            .and_then(|expr| expr.as_ref())
-        {
-            lower_const_expr(module, init, global.entity.wasm_ty)?
         } else {
-            nix!(throw("wasm2nix: global has no initializer"))
+            let init = info
+                .global_inits
+                .get(idx)
+                .and_then(Option::as_ref)
+                .context(MissingGlobalInitializerSnafu { index: idx })?;
+            lower_const_expr(module, init, global.entity.wasm_ty)?
         };
 
-        binds.push(LetBind::new(bind_name.clone(), value));
-        global_attrs.push(AttrBind::new(
-            AttrKey::string(idx.as_u32().to_string()),
-            Expr::ident(bind_name),
-        ));
+        let name = global_bind_name(idx);
+        globals.push((u64::from(idx.as_u32()), Expr::ident(name.as_str())));
+        binds.push(LetBind::new(name, value));
     }
 
-    Ok(Expr::let_in(binds, Expr::attrset(global_attrs)))
+    Ok(Expr::let_in(binds, keyed_attrset(globals)))
 }
 
 fn lower_initial_tables(module: &NixModule) -> Expr {
-    let mut table_binds: Vec<AttrBind> = Vec::new();
-
-    for (table_index, table_decl) in &module.info.tables {
-        let mut elems: BTreeMap<u64, Expr> = BTreeMap::new();
+    keyed_attrset(module.info.tables.iter().map(|(table_index, table)| {
+        let mut elems = BTreeMap::new();
         for init in &module.info.table_initializers {
             if init.table_index != table_index || init.base.is_some() {
                 continue;
             }
-
             for (slot, func_index) in (u64::from(init.offset)..).zip(init.elements.iter().copied())
             {
                 elems.insert(slot, lower_table_entry(module, func_index));
             }
         }
+        let elems = keyed_attrset(elems);
+        let size = i64::from(table.entity.minimum);
+        let max_size = i64::from(table.entity.maximum.unwrap_or(u32::MAX));
 
-        let elems_expr = Expr::attrset(
-            elems
-                .into_iter()
-                .map(|(idx, entry)| AttrBind::new(AttrKey::string(idx.to_string()), entry)),
-        );
-
-        let table_expr = if let Some((module_name, field_name)) =
+        let table = if let Some((module_name, field_name)) =
             module.info.imported_tables.get(table_index.index())
         {
             let imported = lower_imported_extern(module_name, field_name);
             nix!(let
                 importedTable = #{imported};
             in {
-                size = #{lower_attr_or(
-                    nix!(importedTable),
-                    "size",
-                    nix!(#{i64::from(table_decl.entity.minimum)}),
-                )};
-                maxSize = #{lower_attr_or(
-                    nix!(importedTable),
-                    "maxSize",
-                    nix!(#{i64::from(table_decl.entity.maximum.unwrap_or(u32::MAX))}),
-                )};
-                elems = merge(#{lower_attr_or(nix!(importedTable), "elems", nix!({}))}, #{elems_expr});
+                size = #{lower_attr_or(nix!(importedTable), "size", Expr::int(size))};
+                maxSize = #{lower_attr_or(nix!(importedTable), "maxSize", Expr::int(max_size))};
+                elems = merge(#{lower_attr_or(nix!(importedTable), "elems", nix!({}))}, #{elems});
             })
         } else {
             nix!({
-                size = #{i64::from(table_decl.entity.minimum)};
-                maxSize = #{i64::from(table_decl.entity.maximum.unwrap_or(u32::MAX))};
-                elems = #{elems_expr};
+                size = #{size};
+                maxSize = #{max_size};
+                elems = #{elems};
             })
         };
-
-        table_binds.push(AttrBind::new(
-            AttrKey::string(table_index.as_u32().to_string()),
-            table_expr,
-        ));
-    }
-
-    Expr::attrset(table_binds)
-}
-
-fn lower_element_segments(module: &NixModule) -> Expr {
-    Expr::attrset(module.info.element_segments.iter().map(|(idx, elements)| {
-        AttrBind::new(
-            AttrKey::string(idx.as_u32().to_string()),
-            Expr::list(
-                elements
-                    .iter()
-                    .copied()
-                    .map(|func_index| lower_table_entry(module, func_index))
-                    .collect(),
-            ),
-        )
+        (u64::from(table_index.as_u32()), table)
     }))
 }
 
-pub(super) fn lower_table_entry(module: &NixModule, func_index: cranelift_wasm::FuncIndex) -> Expr {
-    let Some(function) = module.info.functions.get(func_index) else {
-        return nix!(null);
-    };
-    nix!({
-        module = moduleId;
-        func = #{i64::from(func_index.as_u32())};
-        type = #{lower_signature_id(module, function.entity)};
-    })
-}
-
-fn lower_signature_id(module: &NixModule, sig_index: cranelift_wasm::TypeIndex) -> Expr {
-    Expr::string(signature_id(&module.info.signatures[sig_index]))
-}
-
-pub(super) fn signature_id(sig: &ir::Signature) -> String {
-    let params = sig
-        .params
-        .iter()
-        .map(|param| param.value_type.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let returns = sig
-        .returns
-        .iter()
-        .map(|param| param.value_type.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("({params})->({returns})")
-}
-
-pub(super) fn global_bind_name(idx: cranelift_wasm::GlobalIndex) -> String {
-    format!("g{}", idx.as_u32())
+fn lower_element_segments(module: &NixModule) -> Expr {
+    keyed_attrset(module.info.element_segments.iter().map(|(idx, elements)| {
+        let entries = elements
+            .iter()
+            .map(|func_index| lower_table_entry(module, *func_index));
+        (u64::from(idx.as_u32()), Expr::list(entries.collect()))
+    }))
 }

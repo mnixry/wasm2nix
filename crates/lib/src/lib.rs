@@ -20,9 +20,9 @@ pub struct TranspileOptions {
 
 impl TranspileOptions {
     #[must_use]
-    pub fn new(runtime_import_expr: impl Into<String>) -> Self {
+    pub fn new(runtime_import_expr: String) -> Self {
         Self {
-            runtime_import_expr: runtime_import_expr.into(),
+            runtime_import_expr,
             render_options: nix::RenderOptions::default(),
         }
     }
@@ -78,9 +78,7 @@ pub fn generated_nix_file(
 
 #[must_use]
 pub fn default_output_path(input_path: &Path) -> PathBuf {
-    let mut path = input_path.to_path_buf();
-    path.set_extension("nix");
-    path
+    input_path.with_extension("nix")
 }
 
 #[must_use]
@@ -96,14 +94,14 @@ pub fn runtime_path_for_output(out_path: &Path, export_rt_path: Option<&Path>) -
     }
 }
 
+/// The Nix path the generated file imports the runtime from: relative to the
+/// output file unless `export_rt_path` is absolute.
 #[must_use]
-pub fn runtime_import_expr(
-    out_path: &Path, export_rt_path: Option<&Path>, runtime_path: &Path,
-) -> String {
+pub fn runtime_import_expr(out_path: &Path, export_rt_path: Option<&Path>) -> String {
     match export_rt_path {
-        Some(path) if !path.is_absolute() => relative_nix_path_expr(path),
+        Some(path) if path.is_absolute() => path.display().to_string(),
+        Some(path) => relative_nix_path_expr(path),
         None => relative_nix_path_expr(Path::new(&default_runtime_file_name(out_path))),
-        _ => nix_path_expr(runtime_path),
     }
 }
 
@@ -114,14 +112,6 @@ fn default_runtime_file_name(out_path: &Path) -> String {
         .filter(|stem| !stem.is_empty())
         .unwrap_or("wasm2nix");
     format!("{stem}-rt.nix")
-}
-
-fn nix_path_expr(path: &Path) -> String {
-    if path.is_absolute() {
-        path.display().to_string()
-    } else {
-        relative_nix_path_expr(path)
-    }
 }
 
 fn relative_nix_path_expr(path: &Path) -> String {
@@ -172,10 +162,7 @@ mod tests {
             runtime_path_for_output(out, None),
             PathBuf::from("dist/module-rt.nix")
         );
-        assert_eq!(
-            runtime_import_expr(out, None, &runtime_path_for_output(out, None)),
-            "./module-rt.nix"
-        );
+        assert_eq!(runtime_import_expr(out, None), "./module-rt.nix");
     }
 
     #[test]
@@ -187,14 +174,7 @@ mod tests {
             runtime_path_for_output(out, Some(export)),
             PathBuf::from("dist/rt/custom.nix")
         );
-        assert_eq!(
-            runtime_import_expr(
-                out,
-                Some(export),
-                &runtime_path_for_output(out, Some(export))
-            ),
-            "./rt/custom.nix"
-        );
+        assert_eq!(runtime_import_expr(out, Some(export)), "./rt/custom.nix");
     }
 
     #[test]
@@ -207,11 +187,7 @@ mod tests {
             PathBuf::from("/tmp/wasm2nix-rt.nix")
         );
         assert_eq!(
-            runtime_import_expr(
-                out,
-                Some(export),
-                &runtime_path_for_output(out, Some(export))
-            ),
+            runtime_import_expr(out, Some(export)),
             "/tmp/wasm2nix-rt.nix"
         );
     }

@@ -9,7 +9,10 @@ use cranelift_wasm::Global;
 use cranelift_wasm::Memory;
 use cranelift_wasm::Table;
 use serde::Deserialize;
+use snafu::OptionExt;
+use snafu::ResultExt;
 use snafu::Snafu;
+use snafu::ensure;
 
 use crate::translator::Exportable;
 use crate::translator::NixModule;
@@ -53,8 +56,7 @@ impl Limits {
         Self { min, max }
     }
 
-    #[must_use]
-    pub fn satisfies_import(self, expected: Self) -> bool {
+    fn satisfies_import(self, expected: Self) -> bool {
         if self.min < expected.min {
             return false;
         }
@@ -95,8 +97,7 @@ impl FuncType {
         Self { params, results }
     }
 
-    #[must_use]
-    pub fn from_signature(sig: &ir::Signature) -> Self {
+    pub(crate) fn from_signature(sig: &ir::Signature) -> Self {
         Self {
             params: sig
                 .params
@@ -134,11 +135,8 @@ pub struct GlobalType {
 
 impl GlobalType {
     #[must_use]
-    pub fn new(ty: impl Into<String>, mutable: bool) -> Self {
-        Self {
-            ty: ty.into(),
-            mutable,
-        }
+    pub const fn new(ty: String, mutable: bool) -> Self {
+        Self { ty, mutable }
     }
 }
 
@@ -181,15 +179,11 @@ impl From<TableManifest> for TableType {
 
 impl TableType {
     #[must_use]
-    pub fn new(ty: impl Into<String>, limits: Limits) -> Self {
-        Self {
-            ty: ty.into(),
-            limits,
-        }
+    pub const fn new(ty: String, limits: Limits) -> Self {
+        Self { ty, limits }
     }
 
-    #[must_use]
-    pub fn satisfies_import(&self, expected: &Self) -> bool {
+    fn satisfies_import(&self, expected: &Self) -> bool {
         self.ty == expected.ty && self.limits.satisfies_import(expected.limits)
     }
 }
@@ -218,8 +212,7 @@ pub enum ExternType {
 }
 
 impl ExternType {
-    #[must_use]
-    pub fn satisfies_import(&self, expected: &Self) -> bool {
+    fn satisfies_import(&self, expected: &Self) -> bool {
         match (self, expected) {
             (Self::Func(actual), Self::Func(expected)) => actual == expected,
             (Self::Global(actual), Self::Global(expected)) => actual == expected,
@@ -264,8 +257,7 @@ impl ModuleInterface {
         }
     }
 
-    #[must_use]
-    pub fn get_export(&self, field: &str) -> Option<ExternType> {
+    fn get_export(&self, field: &str) -> Option<ExternType> {
         self.funcs
             .get(field)
             .cloned()
@@ -374,27 +366,22 @@ fn validate_one<R: ImportResolver>(
 ) -> Result<(), R::Error> {
     let actual = resolver
         .resolve_import(module, field)
-        .map_err(|source| LinkError::ResolveImport {
-            module: module.to_string(),
-            field: field.to_string(),
-            source,
-        })?
-        .ok_or_else(|| LinkError::MissingImport {
-            module: module.to_string(),
-            field: field.to_string(),
+        .context(ResolveImportSnafu { module, field })?
+        .with_context(|| MissingImportSnafu {
+            module,
+            field,
             expected: Box::new(expected.clone()),
         })?;
-
-    if actual.satisfies_import(&expected) {
-        Ok(())
-    } else {
-        Err(LinkError::IncompatibleImport {
-            module: module.to_string(),
-            field: field.to_string(),
+    ensure!(
+        actual.satisfies_import(&expected),
+        IncompatibleImportSnafu {
+            module,
+            field,
             expected: Box::new(expected),
             actual: Box::new(actual),
-        })
-    }
+        }
+    );
+    Ok(())
 }
 
 #[cfg(test)]

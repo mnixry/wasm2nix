@@ -1,22 +1,21 @@
-use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use cranelift_codegen::ir::Block;
 use cranelift_codegen::ir::Inst;
 use cranelift_codegen::ir::{self};
-use snafu::prelude::*;
+use snafu::OptionExt;
 
 use crate::lower::error::EmptyBlockSnafu;
 use crate::lower::error::Result;
-use crate::lower::function::block_name;
 use crate::lower::function::cfg::ControlFlow;
 use crate::lower::function::inline::inline_single_use_values;
 use crate::lower::inst::Force;
-use crate::lower::inst::Step;
-use crate::lower::inst::lower_inst;
+use crate::lower::inst::InstCtx;
 use crate::lower::inst::value_expr;
-use crate::lower::inst::value_name;
 use crate::lower::lambda_chain;
+use crate::lower::names::ST;
+use crate::lower::names::block_name;
+use crate::lower::names::value_name;
 use crate::nix::AttrBind;
 use crate::nix::AttrKey;
 use crate::nix::Expr;
@@ -27,22 +26,22 @@ use crate::translator::NixModule;
 /// the printer.
 pub(super) const MAX_INLINE_DEPTH: usize = 32;
 
-pub(super) struct BlockLowering<'a> {
-    pub(super) module: &'a NixModule,
-    pub(super) func: &'a ir::Function,
-    pub(super) vmctx: ir::Value,
+pub(in crate::lower) struct BlockLowering<'a> {
+    pub(in crate::lower) module: &'a NixModule,
+    pub(in crate::lower) func: &'a ir::Function,
+    pub(in crate::lower) vmctx: ir::Value,
     pub(super) cfg: &'a ControlFlow,
-    pub(super) offset_adds: &'a BTreeSet<Inst>,
+    pub(in crate::lower) offset_adds: &'a BTreeSet<Inst>,
     /// Single-edge blocks that were called instead of inlined because the
     /// nesting limit was reached.
-    pub(super) spilled: RefCell<Vec<Block>>,
+    pub(super) spilled: Vec<Block>,
 }
 
 impl BlockLowering<'_> {
     /// Lowers every block that needs its own function: the entry, blocks with
     /// several incoming edges, loop headers and blocks spilled at the nesting
     /// limit. Every other block is inlined into its only predecessor.
-    pub(super) fn lower_blocks(&self, entry: Block) -> Result<Vec<AttrBind>> {
+    pub(super) fn lower_blocks(&mut self, entry: Block) -> Result<Vec<AttrBind>> {
         let mut pending: Vec<Block> = self
             .func
             .layout
@@ -57,26 +56,18 @@ impl BlockLowering<'_> {
             if !emitted.insert(block) {
                 continue;
             }
-            binds.push(AttrBind::new(
-                AttrKey::ident(block_name(block)),
-                self.lower_block(block)?,
-            ));
-            pending.extend(self.spilled.borrow_mut().drain(..).rev());
+            let lowered = self.lower_block(block)?;
+            binds.push(AttrBind::new(AttrKey::ident(block_name(block)), lowered));
+            pending.extend(self.spilled.drain(..).rev());
         }
         Ok(binds)
     }
 
-    fn lower_block(&self, block: Block) -> Result<Expr> {
+    /// `params…: free values…: st: body`.
+    fn lower_block(&mut self, block: Block) -> Result<Expr> {
         let mut params = self.block_params(block);
-        params.extend(
-            self.cfg
-                .free_values
-                .get(&block)
-                .into_iter()
-                .flat_map(|values| values.iter())
-                .map(|v| value_name(*v)),
-        );
-        params.push("st".into());
+        params.extend(self.cfg.free_values(block).iter().map(|v| value_name(*v)));
+        params.push(ST.into());
 
         let body = self.lower_block_body(block, 0)?;
         Ok(lambda_chain(&params, body))
@@ -88,40 +79,22 @@ impl BlockLowering<'_> {
             .dfg
             .block_params(block)
             .iter()
-            .copied()
-            .filter(|v| *v != self.vmctx)
-            .map(value_name)
+            .filter(|v| **v != self.vmctx)
+            .map(|v| value_name(*v))
             .collect()
     }
 
-    pub(super) fn lower_block_body(&self, block: Block, depth: usize) -> Result<Expr> {
+    pub(super) fn lower_block_body(&mut self, block: Block, depth: usize) -> Result<Expr> {
         let mut insts: Vec<Inst> = self.func.layout.block_insts(block).collect();
-        ensure!(
-            !insts.is_empty(),
-            EmptyBlockSnafu {
-                block: block.as_u32()
-            }
-        );
-
         let term = insts.pop().context(EmptyBlockSnafu {
             block: block.as_u32(),
         })?;
 
-        let mut steps: Vec<Step> = Vec::new();
-        let mut st_name = "st".to_string();
-
+        let mut steps = Vec::new();
+        let mut st_name = ST.to_string();
         for inst in insts {
-            let lowered = lower_inst(
-                self.module,
-                self.func,
-                inst,
-                &st_name,
-                self.vmctx,
-                self.offset_adds,
-            )?;
-            if let Some(step) = lowered.step {
-                steps.push(step);
-            }
+            let lowered = InstCtx::new(self, inst, &st_name).lower()?;
+            steps.extend(lowered.step);
             if let Some(new_st) = lowered.next_state {
                 st_name = new_st;
             }

@@ -6,9 +6,12 @@ use cranelift_wasm::ConstOp;
 use cranelift_wasm::GlobalIndex;
 use cranelift_wasm::MemoryIndex;
 use cranelift_wasm::TableIndex;
-use snafu::prelude::*;
+use snafu::OptionExt;
+use snafu::ResultExt;
+use snafu::Snafu;
 
 use crate::translator::NixModule;
+use crate::translator::WASM_PAGE_SIZE;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -22,11 +25,17 @@ pub enum InstantiationError<E: snafu::Error + 'static = Infallible> {
     #[snafu(display("global {index:?} has no constant initializer"))]
     MissingGlobalInitializer { index: GlobalIndex },
 
-    #[snafu(display("malformed const expression: {reason}"))]
-    MalformedConstExpr { reason: String },
+    #[snafu(display("imported i32 global has value {value}"))]
+    GlobalValueOutOfRange { value: u64 },
 
-    #[snafu(display("unsupported active segment offset expression {op}"))]
-    UnsupportedActiveOffsetExpression { op: String },
+    #[snafu(display("offset operator {op:?} is missing an operand"))]
+    OffsetOperand { op: ConstOp },
+
+    #[snafu(display("offset expression produces {count} values instead of one"))]
+    OffsetResults { count: usize },
+
+    #[snafu(display("unsupported active segment offset operator {op:?}"))]
+    UnsupportedOffsetOp { op: ConstOp },
 }
 
 pub type Result<T, E = Infallible> = std::result::Result<T, InstantiationError<E>>;
@@ -78,11 +87,10 @@ pub fn active_initializers_trap<R: ActiveInitializerResolver>(
             .memory_min_pages(module, init.memory_index)
             .context(ResolveSnafu)?;
         let byte_len = min_pages
-            .checked_mul(65536)
+            .checked_mul(WASM_PAGE_SIZE)
             .context(MemoryByteSizeOverflowSnafu)?;
         let offset = active_offset(module, resolver, init.base, init.offset)?;
-        let end = offset.saturating_add(init.data.len() as u64);
-        if offset > byte_len || end > byte_len {
+        if offset.saturating_add(init.data.len() as u64) > byte_len {
             return Ok(true);
         }
     }
@@ -92,8 +100,7 @@ pub fn active_initializers_trap<R: ActiveInitializerResolver>(
             .table_min_elements(module, init.table_index)
             .context(ResolveSnafu)?;
         let offset = active_offset(module, resolver, init.base, u64::from(init.offset))?;
-        let end = offset.saturating_add(init.elements.len() as u64);
-        if offset > min_elements || end > min_elements {
+        if offset.saturating_add(init.elements.len() as u64) > min_elements {
             return Ok(true);
         }
     }
@@ -107,16 +114,19 @@ fn active_offset<R: ActiveInitializerResolver>(
     let Some(base) = base else {
         return Ok(offset);
     };
-    Ok(global_i32_value(module, resolver, base)?.saturating_add(offset))
+    Ok(u64::from(global_i32_value(module, resolver, base)?).saturating_add(offset))
 }
 
 fn global_i32_value<R: ActiveInitializerResolver>(
     module: &NixModule, resolver: &mut R, index: GlobalIndex,
-) -> Result<u64, R::Error> {
+) -> Result<u32, R::Error> {
     if let Some((module_name, field_name)) = module.info.imported_globals.get(index.index()) {
-        return resolver
+        let value = resolver
             .imported_global_i32(module_name, field_name)
-            .context(ResolveSnafu);
+            .context(ResolveSnafu)?;
+        return u32::try_from(value)
+            .ok()
+            .context(GlobalValueOutOfRangeSnafu { value });
     }
 
     let expr = module.info.global_inits[index]
@@ -127,43 +137,30 @@ fn global_i32_value<R: ActiveInitializerResolver>(
 
 fn eval_i32_const_expr<R: ActiveInitializerResolver>(
     module: &NixModule, resolver: &mut R, expr: &ConstExpr,
-) -> Result<u64, R::Error> {
+) -> Result<u32, R::Error> {
     let mut stack = Vec::new();
     for op in expr.ops().iter().copied() {
         match op {
-            ConstOp::I32Const(value) => stack.push(u64::from(value.cast_unsigned())),
+            ConstOp::I32Const(value) => stack.push(value.cast_unsigned()),
             ConstOp::GlobalGet(index) => stack.push(global_i32_value(module, resolver, index)?),
             ConstOp::I32Add | ConstOp::I32Sub | ConstOp::I32Mul => {
-                let rhs = stack.pop().context(MalformedConstExprSnafu {
-                    reason: format!("{op:?} missing right operand"),
-                })?;
-                let lhs = stack.pop().context(MalformedConstExprSnafu {
-                    reason: format!("{op:?} missing left operand"),
-                })?;
-                let (lhs, rhs) = (lhs as u32, rhs as u32);
-                let value = match op {
+                let (rhs, lhs) = stack
+                    .pop()
+                    .zip(stack.pop())
+                    .context(OffsetOperandSnafu { op })?;
+                stack.push(match op {
                     ConstOp::I32Add => lhs.wrapping_add(rhs),
                     ConstOp::I32Sub => lhs.wrapping_sub(rhs),
                     _ => lhs.wrapping_mul(rhs),
-                };
-                stack.push(u64::from(value));
+                });
             }
-            _ => {
-                return UnsupportedActiveOffsetExpressionSnafu {
-                    op: format!("{op:?}"),
-                }
-                .fail();
-            }
+            _ => return UnsupportedOffsetOpSnafu { op }.fail(),
         }
     }
 
-    ensure!(
-        stack.len() == 1,
-        MalformedConstExprSnafu {
-            reason: "active segment offset expression must produce one result".to_string()
-        }
-    );
-    stack.first().copied().context(MalformedConstExprSnafu {
-        reason: "active segment offset expression produced no result".to_string(),
-    })
+    let count = stack.len();
+    let [value] = <[u32; 1]>::try_from(stack)
+        .ok()
+        .context(OffsetResultsSnafu { count })?;
+    Ok(value)
 }

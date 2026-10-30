@@ -5,6 +5,7 @@ use wasm2nix_runtime::intrinsics::global_accessors;
 
 use crate::lower::error::Result;
 use crate::lower::error::UnsupportedGlobalTypeSnafu;
+use crate::lower::names::func_name;
 use crate::nix::AttrBind;
 use crate::nix::AttrKey;
 use crate::nix::Expr;
@@ -18,61 +19,42 @@ pub(super) enum ExportKeyMode {
 }
 
 pub(super) fn lower_exports_attrset(module: &NixModule, mode: ExportKeyMode) -> Result<Expr> {
-    let mut binds: Vec<AttrBind> = Vec::new();
-
-    for (func_index, func_decl) in &module.info.functions {
-        if func_decl.export_names.is_empty() {
+    let info = &module.info;
+    let mut binds = Vec::new();
+    for (func_index, func) in &info.functions {
+        let value = Expr::select(nix!(funcs), AttrKey::ident(func_name(func_index)));
+        push_exports(&mut binds, &func.export_names, mode, &value);
+    }
+    for memory in info.memories.values() {
+        push_exports(
+            &mut binds,
+            &memory.export_names,
+            mode,
+            &lower_memory_export(),
+        );
+    }
+    for (table_index, table) in &info.tables {
+        let value = lower_table_export(table_index.as_u32());
+        push_exports(&mut binds, &table.export_names, mode, &value);
+    }
+    for (global_index, global) in &info.globals {
+        if global.export_names.is_empty() {
             continue;
         }
-        let f_name = format!("f{}", func_index.as_u32());
-        let f_expr = Expr::select(nix!(funcs), AttrKey::ident(f_name));
-        for export_name in &func_decl.export_names {
-            let Some(key) = export_attr_key(export_name, mode) else {
-                continue;
-            };
-            // Use string keys for safety (names can contain characters invalid
-            // in identifiers).
-            binds.push(AttrBind::new(AttrKey::string(key), f_expr.clone()));
-        }
+        let value = lower_global_export(global_index.as_u32(), global.entity.wasm_ty)?;
+        push_exports(&mut binds, &global.export_names, mode, &value);
     }
-
-    for (memory_index, memory_decl) in &module.info.memories {
-        for export_name in &memory_decl.export_names {
-            let Some(key) = export_attr_key(export_name, mode) else {
-                continue;
-            };
-            binds.push(AttrBind::new(
-                AttrKey::string(key),
-                lower_memory_export(memory_index.as_u32()),
-            ));
-        }
-    }
-
-    for (table_index, table_decl) in &module.info.tables {
-        for export_name in &table_decl.export_names {
-            let Some(key) = export_attr_key(export_name, mode) else {
-                continue;
-            };
-            binds.push(AttrBind::new(
-                AttrKey::string(key),
-                lower_table_export(table_index.as_u32()),
-            ));
-        }
-    }
-
-    for (global_index, global_decl) in &module.info.globals {
-        for export_name in &global_decl.export_names {
-            let Some(key) = export_attr_key(export_name, mode) else {
-                continue;
-            };
-            binds.push(AttrBind::new(
-                AttrKey::string(key),
-                lower_global_export(global_index.as_u32(), global_decl.entity.wasm_ty)?,
-            ));
-        }
-    }
-
     Ok(Expr::attrset(binds))
+}
+
+/// Binds `value` under each export name; keys are strings because export
+/// names need not be identifiers.
+fn push_exports(binds: &mut Vec<AttrBind>, names: &[String], mode: ExportKeyMode, value: &Expr) {
+    for name in names {
+        if let Some(key) = export_attr_key(name, mode) {
+            binds.push(AttrBind::new(AttrKey::string(key), value.clone()));
+        }
+    }
 }
 
 fn export_attr_key(export_name: &str, mode: ExportKeyMode) -> Option<String> {
@@ -86,8 +68,8 @@ fn export_attr_key(export_name: &str, mode: ExportKeyMode) -> Option<String> {
     }
 }
 
-fn lower_memory_export(memory_index: u32) -> Expr {
-    debug_assert_eq!(memory_index, 0);
+/// The only memory; `make_heap` rejects others.
+fn lower_memory_export() -> Expr {
     nix!(merge(#{RuntimeNamespace::Mem.expr()}, { get = st: st.mem; }))
 }
 
@@ -97,8 +79,7 @@ fn lower_table_export(table_index: u32) -> Expr {
 }
 
 fn lower_global_export(global_index: u32, ty: WasmValType) -> Result<Expr> {
-    let accessors =
-        global_accessors(&ty).context(UnsupportedGlobalTypeSnafu { ty: ty.to_string() })?;
+    let accessors = global_accessors(&ty).context(UnsupportedGlobalTypeSnafu { ty })?;
     let index = i64::from(global_index);
     let get_call = accessors
         .get

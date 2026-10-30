@@ -47,11 +47,7 @@ pub enum Error {
 
     #[snafu(display("Wasm translation failed"))]
     TranslateWasm {
-        #[snafu(source(from(
-            wasm2nix::error::TranslateWasmRawSource,
-            wasm2nix::error::TranslateWasmSource::from
-        )))]
-        source: wasm2nix::error::TranslateWasmSource,
+        source: wasm2nix::error::TranslateError,
     },
 
     #[snafu(display("Nix lowering failed"))]

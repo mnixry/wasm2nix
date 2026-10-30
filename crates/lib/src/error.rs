@@ -1,31 +1,34 @@
-pub use cranelift_wasm::WasmError as TranslateWasmRawSource;
-use snafu::prelude::*;
+use std::fmt;
 
+use cranelift_wasm::WasmError;
+use snafu::Snafu;
+
+/// [`WasmError`] as an error source: it only implements `std::error::Error`
+/// with `wasmtime-types/std`, which nothing enables.
 #[derive(Debug)]
-pub struct TranslateWasmSource(TranslateWasmRawSource);
+pub struct WasmErrorSource(WasmError);
 
-impl From<TranslateWasmRawSource> for TranslateWasmSource {
-    fn from(source: TranslateWasmRawSource) -> Self {
-        Self(source)
-    }
-}
-
-impl std::fmt::Display for TranslateWasmSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for WasmErrorSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
 
-impl std::error::Error for TranslateWasmSource {}
+impl std::error::Error for WasmErrorSource {}
+
+/// The Wasm bytes are malformed, invalid, or use unsupported features.
+#[derive(Debug, Snafu)]
+#[snafu(display("Wasm translation failed"), visibility(pub(crate)))]
+pub struct TranslateError {
+    #[snafu(source(from(WasmError, WasmErrorSource)))]
+    source: WasmErrorSource,
+}
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
+#[snafu(visibility(pub(crate)))]
 pub enum Error {
     #[snafu(display("Wasm translation failed"))]
-    TranslateWasm {
-        #[snafu(source(from(TranslateWasmRawSource, TranslateWasmSource::from)))]
-        source: TranslateWasmSource,
-    },
+    TranslateWasm { source: TranslateError },
 
     #[snafu(display("Nix lowering failed"))]
     LowerNix { source: crate::lower::LowerError },

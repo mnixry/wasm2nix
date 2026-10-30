@@ -1,40 +1,36 @@
 use cranelift_codegen::ir::condcodes::FloatCC;
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::types::I32;
 use cranelift_codegen::ir::types::I64;
 use cranelift_codegen::ir::{self};
 use wasm2nix_runtime::RuntimeFunction;
 
+use super::ctx::InstCtx;
+use super::ctx::canonical_imm;
+use super::step::LoweredInst;
 use crate::lower::error::Result;
-use crate::lower::inst::InstCtx;
-use crate::lower::inst::LoweredInst;
 use crate::nix::BinOp;
 use crate::nix::Expr;
 
 impl InstCtx<'_> {
     pub(super) fn lower_int_compare(&self, args: [ir::Value; 2], cond: IntCC) -> LoweredInst {
-        let is_i64 = self.func.dfg.value_type(args[0]) == I64;
-        let (lhs, rhs) = (self.value_expr(args[0]), self.value_expr(args[1]));
-        if let Some(e) = inline_int_compare(is_i64, cond, lhs.clone(), rhs.clone()) {
-            return self.bind_result(e);
-        }
-        self.bind_result(int_compare_function(is_i64, cond).call([lhs, rhs]))
+        let ty = self.func.dfg.value_type(args[0]);
+        self.int_compare(ty, cond, self.value_expr(args[0]), self.value_expr(args[1]))
     }
 
     pub(super) fn lower_int_compare_imm(
         &self, arg: ir::Value, cond: IntCC, imm64: i64,
     ) -> LoweredInst {
         let ty = self.func.dfg.value_type(arg);
-        let imm_expr = if ty == I32 {
-            Expr::int(i64::from(imm64.cast_unsigned() as u32))
-        } else {
-            Expr::int(imm64)
+        let imm = Expr::int(canonical_imm(ty, imm64));
+        self.int_compare(ty, cond, self.value_expr(arg), imm)
+    }
+
+    fn int_compare(&self, ty: ir::Type, cond: IntCC, lhs: Expr, rhs: Expr) -> LoweredInst {
+        let e = match inline_int_compare(ty, cond) {
+            Some(op) => Expr::bin(op, lhs, rhs),
+            None => int_compare_function(ty, cond).call([lhs, rhs]),
         };
-        let lhs = self.value_expr(arg);
-        if let Some(e) = inline_int_compare(ty == I64, cond, lhs.clone(), imm_expr.clone()) {
-            return self.bind_result(e);
-        }
-        self.bind_result(int_compare_function(ty == I64, cond).call([lhs, imm_expr]))
+        self.bind_result(e)
     }
 
     pub(super) fn lower_float_compare(
@@ -48,8 +44,8 @@ impl InstCtx<'_> {
     }
 }
 
-const fn int_compare_function(is_i64: bool, cc: IntCC) -> RuntimeFunction {
-    match (is_i64, cc) {
+fn int_compare_function(ty: ir::Type, cc: IntCC) -> RuntimeFunction {
+    match (ty == I64, cc) {
         (false, IntCC::Equal) => RuntimeFunction::CmpEq,
         (false, IntCC::NotEqual) => RuntimeFunction::CmpNe,
         (false, IntCC::SignedLessThan) => RuntimeFunction::CmpLtS,
@@ -113,8 +109,8 @@ const fn float_compare_function(ty: ir::Type, cc: FloatCC) -> Option<RuntimeFunc
 
 /// Integer comparisons that map onto Nix's own operators: equality for both
 /// widths, unsigned order on canonical u32 and signed order on native int64.
-fn inline_int_compare(is_i64: bool, cc: IntCC, lhs: Expr, rhs: Expr) -> Option<Expr> {
-    let op = match (is_i64, cc) {
+fn inline_int_compare(ty: ir::Type, cc: IntCC) -> Option<BinOp> {
+    Some(match (ty == I64, cc) {
         (_, IntCC::Equal) => BinOp::Eq,
         (_, IntCC::NotEqual) => BinOp::Neq,
         (false, IntCC::UnsignedLessThan) | (true, IntCC::SignedLessThan) => BinOp::Lt,
@@ -124,6 +120,5 @@ fn inline_int_compare(is_i64: bool, cc: IntCC, lhs: Expr, rhs: Expr) -> Option<E
             BinOp::Ge
         }
         _ => return None,
-    };
-    Some(Expr::bin(op, lhs, rhs))
+    })
 }

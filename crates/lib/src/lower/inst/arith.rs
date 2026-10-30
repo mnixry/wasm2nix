@@ -8,9 +8,10 @@ use cranelift_codegen::ir::types::I64;
 use cranelift_codegen::ir::{self};
 use wasm2nix_runtime::RuntimeFunction;
 
+use super::ctx::InstCtx;
+use super::ctx::canonical_imm;
+use super::step::LoweredInst;
 use crate::lower::error::Result;
-use crate::lower::inst::InstCtx;
-use crate::lower::inst::LoweredInst;
 use crate::nix::AttrKey;
 use crate::nix::BinOp;
 use crate::nix::Expr;
@@ -21,13 +22,7 @@ impl InstCtx<'_> {
     pub(super) fn lower_iconst(&self, v: i64) -> LoweredInst {
         let dst = self.results[0];
         let ty = self.func.dfg.value_type(dst);
-        let nix_int = if ty == I32 {
-            // represent i32 as u32 in i64 range
-            i64::from(v.cast_unsigned() as u32)
-        } else {
-            v
-        };
-        self.pure_bind(dst, Expr::int(nix_int))
+        self.pure_bind(dst, Expr::int(canonical_imm(ty, v)))
     }
 
     pub(super) fn lower_unary(&self, arg: ir::Value) -> Result<LoweredInst> {
@@ -47,31 +42,27 @@ impl InstCtx<'_> {
                 Ok(self.bind_result(RuntimeFunction::IntBnot.call([self.value_expr(arg)])))
             }
             Opcode::Ineg => Ok(self.bind_result(Expr::un(UnOp::Neg, self.value_expr(arg)))),
-            Opcode::Clz | Opcode::Ctz | Opcode::Popcnt => self.lower_int_unary(arg),
+            Opcode::Clz | Opcode::Ctz | Opcode::Popcnt => {
+                self.lower_unary_call(arg, int_unary_function)
+            }
             Opcode::Fneg
             | Opcode::Fabs
             | Opcode::Sqrt
             | Opcode::Ceil
             | Opcode::Floor
             | Opcode::Trunc
-            | Opcode::Nearest => self.lower_float_unary(arg),
-            _ => Ok(self.unsupported(format!("wasm2nix: unimplemented unary op {}", self.op))),
+            | Opcode::Nearest => self.lower_unary_call(arg, float_unary_function),
+            _ => Ok(self.unsupported(&format!("wasm2nix: unimplemented unary op {}", self.op))),
         }
     }
 
-    fn lower_int_unary(&self, arg: ir::Value) -> Result<LoweredInst> {
+    /// Calls the runtime function `function` picks for the opcode and the
+    /// result type.
+    fn lower_unary_call(
+        &self, arg: ir::Value, function: fn(Opcode, Type) -> Option<RuntimeFunction>,
+    ) -> Result<LoweredInst> {
         let out = self.results[0];
-        let out_ty = self.func.dfg.value_type(out);
-        let Some(function) = int_unary_function(self.op, out_ty) else {
-            return self.unsupported_opcode();
-        };
-        Ok(self.pure_bind(out, function.call([self.value_expr(arg)])))
-    }
-
-    fn lower_float_unary(&self, arg: ir::Value) -> Result<LoweredInst> {
-        let out = self.results[0];
-        let out_ty = self.func.dfg.value_type(out);
-        let Some(function) = float_unary_function(self.op, out_ty) else {
+        let Some(function) = function(self.op, self.func.dfg.value_type(out)) else {
             return self.unsupported_opcode();
         };
         Ok(self.pure_bind(out, function.call([self.value_expr(arg)])))
@@ -117,29 +108,19 @@ impl InstCtx<'_> {
     pub(super) fn lower_binary_imm(&self, arg: ir::Value, imm64: i64) -> LoweredInst {
         let out = self.results[0];
         let out_ty = self.func.dfg.value_type(out);
-        let imm_expr = if out_ty == I32 {
-            Expr::int(i64::from(imm64.cast_unsigned() as u32))
-        } else {
-            Expr::int(imm64)
-        };
-
-        let imm_const = match imm_expr {
-            Expr::Int(value) => Some(value),
-            _ => None,
-        };
-        if let Some(e) = inline_int_binary(
-            self.op,
-            out_ty,
-            self.value_expr(arg),
-            imm_expr.clone(),
-            imm_const,
-        ) {
+        let imm = canonical_imm(out_ty, imm64);
+        let lhs = self.value_expr(arg);
+        if let Some(e) = inline_int_binary(self.op, out_ty, lhs.clone(), Expr::int(imm), Some(imm))
+        {
             return self.pure_bind(out, e);
         }
         let Some(function) = binary_imm_function(self.op, out_ty) else {
-            return self.unsupported(format!("wasm2nix: unimplemented binary-imm op {}", self.op));
+            return self.unsupported(&format!(
+                "wasm2nix: unimplemented binary-imm op {}",
+                self.op
+            ));
         };
-        self.pure_bind(out, function.call([self.value_expr(arg), imm_expr]))
+        self.pure_bind(out, function.call([lhs, Expr::int(imm)]))
     }
 
     pub(super) fn lower_select(&self, args: [ir::Value; 3]) -> LoweredInst {
@@ -179,7 +160,11 @@ fn inline_int_binary(
     }
 }
 
+/// The bitwise builtins [`inline_int_binary`] emits.
+const BIT_OPS: [&str; 3] = ["bitAnd", "bitOr", "bitXor"];
+
 fn bit_op(name: &str, lhs: Expr, rhs: Expr) -> Expr {
+    debug_assert!(BIT_OPS.contains(&name), "{name} is not a bit op");
     Expr::app(
         Expr::select(Expr::ident("builtins"), AttrKey::ident(name)),
         [lhs, rhs],
@@ -189,20 +174,18 @@ fn bit_op(name: &str, lhs: Expr, rhs: Expr) -> Expr {
 /// Whether `expr` is one of the bitwise builtins emitted by
 /// [`inline_int_binary`], which are pure on integers.
 pub(in crate::lower) fn is_bit_op(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Select { expr, path }
-            if matches!(expr.as_ref(), Expr::Ident(name) if name == "builtins")
-                && matches!(
-                    path.iter().collect::<Vec<_>>().as_slice(),
-                    [AttrKey::Ident(name)] if matches!(name.as_str(), "bitAnd" | "bitOr" | "bitXor")
-                )
-    )
+    let Expr::Select { expr, path } = expr else {
+        return false;
+    };
+    let mut path = path.iter();
+    matches!(expr.as_ref(), Expr::Ident(name) if name == "builtins")
+        && matches!(
+            (path.next(), path.next()),
+            (Some(AttrKey::Ident(name)), None) if BIT_OPS.contains(&name.as_str())
+        )
 }
 
-const fn int_unary_function(
-    op: Opcode, ty: cranelift_codegen::ir::Type,
-) -> Option<RuntimeFunction> {
+const fn int_unary_function(op: Opcode, ty: Type) -> Option<RuntimeFunction> {
     match (ty, op) {
         (I32, Opcode::Clz) => Some(RuntimeFunction::I32Clz),
         (I32, Opcode::Ctz) => Some(RuntimeFunction::I32Ctz),
@@ -214,9 +197,7 @@ const fn int_unary_function(
     }
 }
 
-const fn float_unary_function(
-    op: Opcode, ty: cranelift_codegen::ir::Type,
-) -> Option<RuntimeFunction> {
+const fn float_unary_function(op: Opcode, ty: Type) -> Option<RuntimeFunction> {
     match (ty, op) {
         (F32, Opcode::Fneg) => Some(RuntimeFunction::F32Neg),
         (F32, Opcode::Fabs) => Some(RuntimeFunction::F32Abs),
@@ -236,7 +217,7 @@ const fn float_unary_function(
     }
 }
 
-const fn binary_function(op: Opcode, ty: cranelift_codegen::ir::Type) -> Option<RuntimeFunction> {
+const fn binary_function(op: Opcode, ty: Type) -> Option<RuntimeFunction> {
     match (ty, op) {
         (I32, Opcode::Iadd) => Some(RuntimeFunction::I32Add),
         (I32, Opcode::Isub) => Some(RuntimeFunction::I32Sub),
@@ -286,9 +267,7 @@ const fn binary_function(op: Opcode, ty: cranelift_codegen::ir::Type) -> Option<
     }
 }
 
-const fn binary_imm_function(
-    op: Opcode, ty: cranelift_codegen::ir::Type,
-) -> Option<RuntimeFunction> {
+const fn binary_imm_function(op: Opcode, ty: Type) -> Option<RuntimeFunction> {
     match (ty, op) {
         (I32, Opcode::IaddImm) => Some(RuntimeFunction::I32Add),
         (I32, Opcode::ImulImm) => Some(RuntimeFunction::I32Mul),

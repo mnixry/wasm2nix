@@ -69,11 +69,7 @@ enum CliError {
 
     #[snafu(display("Wasm translation failed"))]
     TranslateWasm {
-        #[snafu(source(from(
-            wasm2nix::error::TranslateWasmRawSource,
-            wasm2nix::error::TranslateWasmSource::from
-        )))]
-        source: wasm2nix::error::TranslateWasmSource,
+        source: wasm2nix::error::TranslateError,
     },
 
     #[snafu(display("import validation failed"))]
@@ -113,8 +109,7 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| default_output_path(&args.input));
 
     let runtime_path = runtime_path_for_output(&out_path, args.export_rt_path.as_deref());
-    let runtime_import =
-        runtime_import_expr(&out_path, args.export_rt_path.as_deref(), &runtime_path);
+    let runtime_import = runtime_import_expr(&out_path, args.export_rt_path.as_deref());
 
     let mut options = TranspileOptions::new(runtime_import);
     if let Some(width) = args.line_width {
@@ -210,11 +205,11 @@ mod tests {
         assert_eq!(spectest.memories["memory"], Limits::new(1, Some(2)));
         assert_eq!(
             spectest.globals["global_i32"],
-            GlobalType::new("i32", false)
+            GlobalType::new("i32".into(), false)
         );
         assert_eq!(
             spectest.tables["table"],
-            TableType::new("funcref", Limits::new(10, Some(20)))
+            TableType::new("funcref".into(), Limits::new(10, Some(20)))
         );
     }
 

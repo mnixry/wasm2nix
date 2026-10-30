@@ -7,7 +7,9 @@ mod funcs;
 mod function;
 mod imports;
 mod inst;
+mod names;
 mod state;
+mod table_entry;
 #[cfg(test)]
 mod tests;
 
@@ -32,11 +34,6 @@ use crate::translator::NixModule;
 /// Returns an error when a Wasm construct is malformed or not yet supported by
 /// the lowering layer.
 pub fn lower_module(module: &NixModule) -> Result<Expr> {
-    // Top-level:
-    // rt: imports:
-    // let moduleId = ...; funcs = rec { ... }; funcRegistry = ...; st0 = ...;
-    // st = ...; exports = ...; in exports // { instantiate = args: { st =
-    // st; exports = exports; }; __wasm2nix = { funcs = funcs; }; }
     let funcs_expr = lower_funcs_rec_attrset(module)?;
     let exports_expr = lower_exports_attrset(module, ExportKeyMode::Public)?;
     let exports_by_name_expr = lower_exports_attrset(module, ExportKeyMode::Encoded)?;
@@ -63,6 +60,7 @@ pub fn lower_module(module: &NixModule) -> Result<Expr> {
     in #{body}))
 }
 
+/// `p0: p1: … body`.
 fn lambda_chain(params: &[String], body: Expr) -> Expr {
     params
         .iter()

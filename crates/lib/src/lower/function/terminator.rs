@@ -8,16 +8,16 @@ use crate::lower::error::Result;
 use crate::lower::error::UnsupportedOpcodeSnafu;
 use crate::lower::function::block::BlockLowering;
 use crate::lower::function::block::MAX_INLINE_DEPTH;
-use crate::lower::function::block_name;
 use crate::lower::inst::truthy_value_expr;
-use crate::nix::AttrKey;
+use crate::lower::names::ST;
+use crate::lower::names::block_name;
 use crate::nix::Expr;
 use crate::nix::LetBind;
 use crate::nix::nix;
 
 impl BlockLowering<'_> {
     pub(super) fn lower_terminator(
-        &self, block: Block, inst: Inst, st_name: &str, depth: usize,
+        &mut self, block: Block, inst: Inst, st_name: &str, depth: usize,
     ) -> Result<Expr> {
         let func = self.func;
         let data = &func.dfg.insts[inst];
@@ -48,39 +48,17 @@ impl BlockLowering<'_> {
                 self.lower_branch_table(block, inst, *arg, *table, st_name, depth)?
             }
 
-            (Opcode::Trap, _) => {
-                let trap_code = data
-                    .trap_code()
-                    .map_or_else(|| "?".into(), |code| code.to_string());
-                nix!(throw(#{format!("wasm2nix: trap {trap_code}")}))
+            // `trapz` and `trapnz` do not end blocks; `InstCtx` lowers them.
+            (Opcode::Trap, InstructionData::Trap { code, .. }) => {
+                nix!(throw(#{format!("wasm2nix: trap {code}")}))
             }
 
-            (Opcode::Trapz, InstructionData::CondTrap { arg, code, .. }) => {
-                let c = truthy_value_expr(func, *arg, st_name, self.vmctx);
-                // trapz: if c is false then trap.
-                nix!(if #{c}
-                    then #{lower_done_record(Expr::ident(st_name), vec![])}
-                    else throw(#{format!("wasm2nix: trapz {code}")}))
-            }
-
-            (Opcode::Trapnz, InstructionData::CondTrap { arg, code, .. }) => {
-                let c = truthy_value_expr(func, *arg, st_name, self.vmctx);
-                let ok = lower_done_record(Expr::ident(st_name), vec![]);
-                // trapnz: if c is true then trap.
-                nix!(if #{c} then throw(#{format!("wasm2nix: trapnz {code}")}) else #{ok})
-            }
-
-            _ => {
-                return UnsupportedOpcodeSnafu {
-                    opcode: op.to_string(),
-                }
-                .fail();
-            }
+            _ => return UnsupportedOpcodeSnafu { opcode: op }.fail(),
         })
     }
 
     fn lower_branch_table(
-        &self, block: Block, inst: Inst, arg: ir::Value, table: ir::JumpTable, st_name: &str,
+        &mut self, block: Block, inst: Inst, arg: ir::Value, table: ir::JumpTable, st_name: &str,
         depth: usize,
     ) -> Result<Expr> {
         let index_name = format!("br_table_index_{}", inst.as_u32());
@@ -94,17 +72,10 @@ impl BlockLowering<'_> {
         let target_count =
             i64::try_from(targets.len()).expect("branch table target count fits in i64");
         let default = self.lower_block_call(block, table_data.default_block(), st_name, depth)?;
-        let selected = Expr::app(
-            Expr::select(nix!(builtins), AttrKey::ident("elemAt")),
-            vec![
-                Expr::ident(targets_name.clone()),
-                Expr::ident(index_name.clone()),
-            ],
-        );
-        let in_range = nix!(
-            #{Expr::ident(index_name.clone())} >= 0
-                && #{Expr::ident(index_name.clone())} < #{target_count}
-        );
+        let targets_var = Expr::ident(targets_name.as_str());
+        let index_var = Expr::ident(index_name.as_str());
+        let selected = nix!(builtins.elemAt(#{targets_var}, #{index_var.clone()}));
+        let in_range = nix!(#{index_var.clone()} >= 0 && #{index_var} < #{target_count});
 
         Ok(Expr::let_in(
             [
@@ -122,7 +93,7 @@ impl BlockLowering<'_> {
     /// return a jump record to the function's trampoline so that loops do not
     /// grow the Nix call stack.
     fn lower_block_call(
-        &self, from: Block, call: ir::BlockCall, st_name: &str, depth: usize,
+        &mut self, from: Block, call: ir::BlockCall, st_name: &str, depth: usize,
     ) -> Result<Expr> {
         let value_lists = &self.func.dfg.value_lists;
         let target = call.block(value_lists);
@@ -132,7 +103,8 @@ impl BlockLowering<'_> {
             .map(|v| self.value_expr(*v, st_name))
             .collect::<Vec<_>>();
 
-        if self.cfg.is_inlinable(target) && !self.cfg.back_edges.contains(&(from, target)) {
+        let back_edge = self.cfg.back_edges.contains(&(from, target));
+        if self.cfg.is_inlinable(target) && !back_edge {
             if depth < MAX_INLINE_DEPTH {
                 let mut binds = self
                     .block_params(target)
@@ -140,26 +112,24 @@ impl BlockLowering<'_> {
                     .zip(args)
                     .map(|(name, value)| LetBind::new(name, value))
                     .collect::<Vec<_>>();
-                if st_name != "st" {
-                    binds.push(LetBind::new("st", Expr::ident(st_name)));
+                if st_name != ST {
+                    binds.push(LetBind::new(ST, Expr::ident(st_name)));
                 }
                 return Ok(Expr::let_in(
                     binds,
                     self.lower_block_body(target, depth + 1)?,
                 ));
             }
-            self.spilled.borrow_mut().push(target);
+            self.spilled.push(target);
         }
 
         args.extend(
             self.cfg
-                .free_values
-                .get(&target)
-                .into_iter()
-                .flat_map(|values| values.iter())
+                .free_values(target)
+                .iter()
                 .map(|v| self.value_expr(*v, st_name)),
         );
-        if self.cfg.back_edges.contains(&(from, target)) {
+        if back_edge {
             Ok(lower_jump_record(target, args, Expr::ident(st_name)))
         } else {
             args.push(Expr::ident(st_name));
@@ -168,8 +138,7 @@ impl BlockLowering<'_> {
     }
 }
 
-/// A jump record for the trampoline; the entry record also carries the
-/// `genericClosure` key that later steps derive from it.
+/// A record telling the trampoline to call block `target` with `args`.
 pub(super) fn lower_jump_record(target: Block, args: Vec<Expr>, st: Expr) -> Expr {
     let block = block_name(target);
     nix!({ tag = "jump"; block = #{block}; args = #{Expr::list(args)}; st = #{st}; })
