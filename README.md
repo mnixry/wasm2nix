@@ -1,117 +1,186 @@
 # wasm2nix
 
-`wasm2nix` is a small experiment that translates WebAssembly modules into Nix.
+`wasm2nix` translates a WebAssembly module into a Nix expression. You give it a `.wasm` file and get back a `.nix` file that any Nix evaluator can import and call, with no builds and no import-from-derivation. This lets you run code written in Rust, C, Zig or any other language that targets Wasm inside a Nix evaluation: parsers, encoders, validators, small interpreters.
 
-The goal is simple: give it a `.wasm` file, get back a `.nix` file that can be imported and evaluated by Nix. The generated file uses a small runtime file, so the CLI normally writes both:
+The generated code passes the WebAssembly core spec test suite on Nix, Lix, Determinate Nix and [iets](https://github.com/numtide/iets).
 
-- `module.nix`
-- `module-rt.nix`
+## Installation
 
-> [!CAUTION]
-> This is not a polished compiler, package manager, or production runtime. Most of the codebase is vibecoded, so anything can happen. It is full of land mines, dragons, and dinosaurs with laser guns. If it works for your case, great. If it does something strange, that is also part of the current contract.
-
-## What is in here
-
-- `crates/cli`: the `wasm2nix` command line tool
-- `crates/lib`: the Wasm-to-Nix lowering code
-- `crates/runtime`: the Nix runtime used by generated modules
-- `crates/nix`: a small Nix AST and formatter
-- `crates/wast`: spec-test harness support
-- `example`: a tiny Rust-to-Wasm example that converts YAML to JSON from Nix without IFD (import from derivation)
-
-## Requirements
-
-You probably want Nix and Rust installed. The flake provides a development shell with the Rust toolchain and the `wasm32-unknown-unknown` target.
+Run the CLI straight from the flake:
 
 ```sh
-nix develop
+nix run github:mnixry/wasm2nix -- module.wasm
 ```
 
-If you are not using the flake, make sure your Rust toolchain can build this workspace and, for the example, can compile to `wasm32-unknown-unknown`.
-
-## Usage
-
-Build the CLI:
+Or install it into your profile, or open a shell with it:
 
 ```sh
-cargo build -p wasm2nix-cli
-# or use nix shell
-nix shell "github:mnixry/wasm2nix"
+nix profile install github:mnixry/wasm2nix
+nix shell github:mnixry/wasm2nix
 ```
 
-Translate a Wasm module:
+## Quick start
+
+Translate a module:
 
 ```sh
-wasm2nix-cli -- path/to/module.wasm -o path/to/module.nix
+wasm2nix path/to/module.wasm
 ```
 
-By default this also writes a runtime file next to the generated Nix file. For the command above, that would be:
+This writes two files next to the input:
 
-```text
-path/to/module-rt.nix
-```
+- `path/to/module.nix`, the translated module.
+- `path/to/module-rt.nix`, the runtime it needs.
 
-Then import the generated module from Nix:
+Keep the two files together. Then call an export from Nix:
 
 ```nix
 let
   wasm = import ./path/to/module.nix { };
   instance = wasm.instantiate { };
+  result = wasm.add 2 3 instance.st;
 in
-instance
+builtins.head result.results
 ```
 
-The exact functions you call after that depend on the exports in your Wasm module.
+## Using a generated module
 
-Useful CLI flags:
+### State
 
-```sh
-wasm2nix input.wasm
-wasm2nix input.wasm -o output.nix
-wasm2nix input.wasm --no-export-rt
-wasm2nix input.wasm --export-rt-path ./shared-rt.nix
-wasm2nix input.wasm --imports imports.json
-wasm2nix input.wasm --line-width 100
-wasm2nix input.wasm --compact
+Nix values are immutable, so a Wasm instance is a value too. `wasm.instantiate { }` returns `{ st; exports; }`, where `st` is the initial instance state.
+
+Every exported function takes its Wasm arguments, then the state, and returns the results with the new state:
+
+```nix
+let
+  instance = wasm.instantiate { };
+  first = wasm.add 2 3 instance.st;    # { results = [ 5 ]; st = …; }
+  second = wasm.add 40 2 first.st;     # continue from the state `first` left behind
+in
+second.results                         # [ 42 ]
 ```
 
-`--imports` validates the Wasm imports before writing the output. The manifest is a JSON object grouped by import module:
+Pass the returned `st` to the next call to keep memory and global changes.
+
+Exports whose names are not Nix identifiers use string attributes, such as `wasm."my-func"`.
+
+### Values
+
+Wasm values are Nix integers:
+
+| Wasm type | Nix value                                                                                                                  |
+| --------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `i32`     | integer in `0 … 4294967295`. A negative number is passed as its two's-complement value; for example, `-1` is `4294967295`. |
+| `i64`     | signed 64-bit integer.                                                                                                     |
+| `f32`     | the IEEE 754 bit pattern, as an unsigned 32-bit integer.                                                                   |
+| `f64`     | the IEEE 754 bit pattern, as a signed 64-bit integer.                                                                      |
+
+### Memory and globals
+
+An exported memory reads and writes bytes through the instance state:
+
+```nix
+bytes = wasm.memory.load_bytes 0 4 st;             # list of 4 integers
+st' = wasm.memory.store_bytes [ 104 105 ] 1024 st; # writes "hi" at address 1024
+```
+
+An exported global has `get` and `set`:
+
+```nix
+count = wasm.count.get st;
+st' = wasm.count.set 7 st;
+```
+
+### Imports
+
+Pass the module's imports as `imports.<module>.<field>` when you import the file.
+
+A host function receives its Wasm arguments and one extra argument it can ignore, and returns its results as a list:
+
+```nix
+wasm = import ./module.nix {
+  imports.env.log = value: _: builtins.trace "log: ${toString value}" { results = [ ]; };
+};
+```
+
+An imported global is its value, such as `imports.env.base = 1024;`.
+
+### Traps
+
+A Wasm trap, such as out-of-bounds access, division by zero or `unreachable`, becomes a Nix `throw` that names the trap, for example `wasm trap: integer divide by zero`. `builtins.tryEval` catches it.
+
+## Command-line reference
+
+```text
+wasm2nix [OPTIONS] <INPUT>
+```
+
+| Option                    | Effect                                                                                                      |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `-o, --output <PATH>`     | Write the module here. Defaults to the input path with a `.nix` extension.                                  |
+| `--no-export-rt`          | Do not write the runtime file, for example when several modules share one.                                  |
+| `--export-rt-path <PATH>` | Write the runtime here and import it from here. A relative path is relative to the output file's directory. |
+| `--imports <PATH>`        | Check the module's imports against a JSON manifest before writing anything.                                 |
+| `--line-width <COLUMNS>`  | Wrap the generated Nix at this width. Defaults to 100.                                                      |
+| `--compact`               | Emit compact Nix without line breaks or the generated header comment.                                       |
+
+### Import manifests
+
+`--imports` takes a JSON object keyed by import module name. Each module lists the functions, globals, memories and tables it provides:
 
 ```json
 {
   "env": {
     "funcs": {
-      "log": {
-        "params": ["i32"],
-        "results": []
-      }
+      "log": { "params": ["i32"], "results": [] }
+    },
+    "globals": {
+      "base": { "type": "i32", "mutable": false }
     },
     "memories": {
-      "memory": {
-        "min": 1
-      }
+      "memory": { "min": 1, "max": 16 }
+    },
+    "tables": {
+      "table": { "type": "funcref", "min": 4 }
     }
   }
 }
 ```
 
+The CLI fails when an import is missing or its type or limits do not match, so linking mistakes show up before evaluation.
+
+## Supported WebAssembly
+
+wasm2nix supports [WebAssembly 1.0](https://www.w3.org/TR/wasm-core-1/) and these proposals:
+
+- [mutable globals](https://github.com/WebAssembly/mutable-global)
+- [sign-extension operators](https://github.com/WebAssembly/sign-extension-ops)
+- [multi-value](https://github.com/WebAssembly/multi-value)
+- [reference types](https://github.com/WebAssembly/reference-types)
+- [non-trapping float-to-int conversions](https://github.com/WebAssembly/nontrapping-float-to-int-conversions)
+- [bulk memory operations](https://github.com/WebAssembly/bulk-memory-operations)
+
+Modules that use SIMD, threads, 64-bit or multiple memories, tail calls, exceptions or garbage collection fail to translate. Active data or element segments whose offset reads a global are not applied yet.
+
+For Rust, build for `wasm32-unknown-unknown`.
+
+Generated Nix is large and evaluates much slower than native code; the example's 270 KB Wasm module becomes about 4 MB of Nix. Use wasm2nix for work small enough to finish during evaluation, such as parsing a config format or validating input.
+
 ## Example
 
-The repository includes an example that builds a Rust Wasm module, translates it with `wasm2nix`, and evaluates it from Nix.
-
-From the repository root:
+[`example`](./example) is a Rust crate that parses YAML and prints JSON, wrapped by `example/default.nix` as a `yamlToJson` function. From the repository root, inside `nix develop`:
 
 ```sh
 ./example/build.sh
 ```
 
-If everything works, it prints:
+The script builds the crate, translates it, and evaluates a sample document:
 
 ```json
-{"enabled":true,"items":[1,2],"name":"wasm2nix"}
+{ "enabled": true, "items": [1, 2], "name": "wasm2nix" }
 ```
 
-You can also call the generated wrapper yourself:
+Then call the wrapper yourself:
 
 ```sh
 nix eval --raw --impure --expr '
@@ -120,27 +189,26 @@ nix eval --raw --impure --expr '
 '
 ```
 
-Expected output:
-
-```json
-{"enabled":true,"name":"wasm2nix"}
-```
+`example/default.nix` also shows how to pass strings in and out through linear memory.
 
 ## Development
 
-Run the Rust tests:
+Enter the development shell and fetch the spec tests:
 
 ```sh
-cargo test
+nix develop
+git submodule update --init
 ```
 
-Run the flake checks if you want the Nix-backed test matrix too:
+Run the tests, format, and lint:
 
 ```sh
-nix flake check
+cargo nextest run --workspace
+nix fmt
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expect rough edges. Generated Nix can be large, slow, and surprising. Some Wasm features may be incomplete, broken, and harmful to your computer RAM ;).
+`nix flake check` runs the same checks as CI, including the spec tests on every supported evaluator.
 
 ## License
 
