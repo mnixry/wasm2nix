@@ -144,3 +144,13 @@ fn renders_large_flat_let_without_recursive_doc_chain() {
     assert!(rendered.contains(&format!("{last_name} = {};", BIND_COUNT - 1)));
     assert!(rendered.ends_with(&last_name));
 }
+
+#[test]
+fn escapes_interpolation_in_strings() {
+    assert_eq!(Expr::string("${x}").render(), r#""\${x}""#);
+    assert_eq!(Expr::string("$${x} $ {").render(), r#""$\${x} $ {""#);
+    assert_eq!(
+        Expr::attrset(false, vec![(AttrKey::string("${k}"), Expr::int(1))]).render(),
+        r#"{ "\${k}" = 1; }"#
+    );
+}

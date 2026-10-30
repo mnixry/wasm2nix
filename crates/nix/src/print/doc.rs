@@ -52,13 +52,16 @@ pub(super) fn join(docs: impl IntoIterator<Item = Doc>, sep: &Doc) -> Doc {
 
 pub(super) fn escape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
         match c {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            // `${` would start an interpolation inside a Nix string.
+            '$' if chars.peek() == Some(&'{') => out.push_str("\\$"),
             _ => out.push(c),
         }
     }
