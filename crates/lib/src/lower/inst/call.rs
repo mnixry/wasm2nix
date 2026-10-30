@@ -29,7 +29,12 @@ impl InstCtx<'_> {
             return Ok(self.unsupported("wasm2nix: unsupported call kind"));
         };
 
-        let callee = resolve_callee(self.module, self.func, &self.func.dfg.ext_funcs[fref].name)?;
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "the function's own external function"
+        )]
+        let callee = &self.func.dfg.ext_funcs[fref].name;
+        let callee = resolve_callee(self.module, self.func, callee)?;
         Ok(match callee.kind {
             CallKind::Pure => self.bind_result(Expr::app(callee.expr, self.arg_exprs(args))),
             CallKind::StatefulRecord => {

@@ -91,6 +91,7 @@ impl Nix {
     }
 
     /// Writes a new Nix file; importing it is memoized by the evaluator.
+    #[expect(clippy::arithmetic_side_effects, reason = "one file per directive")]
     pub fn write(&mut self, kind: &str, nix: &str) -> Result<PathBuf> {
         let path = self.dir.path().join(format!("{kind}-{}.nix", self.files));
         self.files += 1;
@@ -176,26 +177,28 @@ impl EvalFailure {
             .lines()
             .filter_map(|line| line.strip_prefix("@nix "))
             .filter_map(|record| serde_json::from_str::<JsonValue>(record).ok())
-            .filter(|record| record["action"] == "msg");
+            .filter(|record| record.get("action").and_then(JsonValue::as_str) == Some("msg"));
         for record in records {
-            if let Some(raw) = record["raw_msg"].as_str() {
+            if let Some(raw) = record.get("raw_msg").and_then(JsonValue::as_str) {
                 error = Some(raw.to_string());
                 continue;
             }
-            let Some(marker) = record["msg"]
-                .as_str()
+            let Some(marker) = record
+                .get("msg")
+                .and_then(JsonValue::as_str)
                 .and_then(|msg| msg.strip_prefix("trace: "))
                 .and_then(|trace| serde_json::from_str::<JsonValue>(trace).ok())
             else {
                 continue;
             };
-            let Some(id) = marker["id"]
-                .as_u64()
+            let Some(id) = marker
+                .get("id")
+                .and_then(JsonValue::as_u64)
                 .and_then(|id| usize::try_from(id).ok())
             else {
                 continue;
             };
-            match marker["wast"].as_str() {
+            match marker.get("wast").and_then(JsonValue::as_str) {
                 Some("step") => open.push(id),
                 Some("done") => open.retain(|open| *open != id),
                 _ => {}
@@ -235,7 +238,10 @@ impl Check {
 }
 
 struct Step {
+    /// The index of the step's binding in `Batch::binds`.
     bind: usize,
+    /// The variable the step is bound to.
+    var: String,
     expr: Expr,
     case: Case,
 }
@@ -282,12 +288,15 @@ impl Batch {
     /// `tryEval` result variable.
     pub fn step(&mut self, expr: Expr, case: Case) -> Expr {
         let id = step_id(self.steps.len());
+        let bind = self.binds.len();
+        let var = self.bind(nix!(harness.attempt(#{id}, #{expr.clone()})));
         self.steps.push(Step {
-            bind: self.binds.len(),
-            expr: expr.clone(),
+            bind,
+            var: var.to_string(),
+            expr,
             case,
         });
-        self.bind(nix!(harness.attempt(#{id}, #{expr})))
+        var
     }
 
     /// Evaluates every queued step, the given module `states` and `query` in
@@ -306,7 +315,7 @@ impl Batch {
             self.steps
                 .iter()
                 .map(|step| {
-                    let var = Expr::ident(self.binds[step.bind].name.as_str());
+                    let var = Expr::ident(step.var.as_str());
                     nix!(if #{var.clone()}.success then #{var}.value.results else null)
                 })
                 .collect(),
@@ -332,7 +341,7 @@ impl Batch {
                             status: failure.status,
                             stderr: failure.error.clone(),
                         })?;
-                    self.binds[self.steps[step].bind].value = nix!({
+                    *self.step_value(step) = nix!({
                         success = false;
                         value = null;
                     });
@@ -340,21 +349,20 @@ impl Batch {
                 }
             }
         };
-        let results = match value["outcomes"].take() {
-            JsonValue::Array(results) if results.len() == self.steps.len() => results,
+        let results = match value.get_mut("outcomes").map(JsonValue::take) {
+            Some(JsonValue::Array(results)) if results.len() == self.steps.len() => results,
             _ => return MalformedEvalOutputSnafu { field: "outcomes" }.fail(),
         };
 
-        let unexpected = self.steps.iter().enumerate().position(|(id, step)| {
+        let unexpected = self.steps.iter().enumerate().find(|(id, step)| {
             step.case.check.wants_success()
-                && results.get(id).is_none_or(JsonValue::is_null)
-                && !errors.contains_key(&id)
+                && results.get(*id).is_none_or(JsonValue::is_null)
+                && !errors.contains_key(id)
         });
-        if let Some(id) = unexpected {
-            let step = &self.steps[id];
-            let var = Expr::ident(self.binds[step.bind].name.as_str());
-            self.binds[step.bind].value =
-                nix!(harness.unguarded(#{step_id(id)}, #{step.expr.clone()}));
+        if let Some((id, step)) = unexpected {
+            let var = Expr::ident(step.var.as_str());
+            let unguarded = nix!(harness.unguarded(#{step_id(id)}, #{step.expr.clone()}));
+            *self.step_value(id) = unguarded;
             if let Err(failure) = nix.eval(&self.binds, &nix!(#{var}.success))? {
                 errors.insert(id, failure.error);
             }
@@ -371,14 +379,29 @@ impl Batch {
                 error: errors.remove(&id),
             })
             .collect();
-        let JsonValue::Object(states) = value["states"].take() else {
+        let Some(JsonValue::Object(states)) = value.get_mut("states").map(JsonValue::take) else {
             return MalformedEvalOutputSnafu { field: "states" }.fail();
         };
         Ok(Flushed {
             outcomes,
             states: states.into_iter().collect(),
-            query: value["query"].take(),
+            query: value
+                .get_mut("query")
+                .map(JsonValue::take)
+                .unwrap_or_default(),
         })
+    }
+}
+
+impl Batch {
+    /// The value bound for step `step`.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "steps are created with their bindings and index them"
+    )]
+    fn step_value(&mut self, step: usize) -> &mut Expr {
+        let bind = self.steps[step].bind;
+        &mut self.binds[bind].value
     }
 }
 
@@ -473,7 +496,7 @@ impl<'a> World<'a> {
             .state
             .expr();
         let (mut binds, vars) = self.binds([key]);
-        let module = Expr::ident(vars[key].as_str());
+        let module = Expr::ident(vars.get(key).context(UnknownModuleSnafu { key })?.as_str());
         let export_key = format!("__wasm2nix_export_{}", hex::encode(name.as_bytes()));
         binds.push(LetBind::new("st_in", state));
         Ok((
@@ -514,28 +537,36 @@ impl<'a> World<'a> {
             }
         }
 
-        let vars = component
+        // Each module is bound raw as `m<i>` and with its state as
+        // `m<i>_import`.
+        let members = component
             .iter()
+            .filter_map(|key| self.modules.get_key_value(*key))
             .enumerate()
-            .map(|(i, key)| ((*key).to_string(), format!("m{i}_import")))
+            .map(|(i, (key, module))| (key, module, format!("m{i}"), format!("m{i}_import")))
+            .collect::<Vec<_>>();
+        let vars = members
+            .iter()
+            .map(|(key, _, _, var)| ((*key).clone(), var.clone()))
             .collect::<HashMap<_, _>>();
-        let func_registry = Expr::attrset(component.iter().map(|key| {
-            let module = Expr::ident(vars[*key].as_str());
-            AttrBind::new(AttrKey::string(*key), nix!(#{module}."__wasm2nix"."funcs"))
+        let func_registry = Expr::attrset(members.iter().map(|(key, _, _, var)| {
+            let module = Expr::ident(var.as_str());
+            AttrBind::new(
+                AttrKey::string(key.as_str()),
+                nix!(#{module}."__wasm2nix"."funcs"),
+            )
         }));
         let mut binds = vec![
             LetBind::new("imports", self.imports_expr(&vars)),
             LetBind::new("funcRegistry", func_registry),
         ];
-        for (i, key) in component.iter().enumerate() {
-            let module = &self.modules[*key];
-            let raw = format!("m{i}");
+        for (key, module, raw, var) in members {
             binds.push(LetBind::new(
-                raw.clone(),
+                raw.as_str(),
                 import_module_expr(&module.path, key),
             ));
             binds.push(LetBind::new(
-                vars[*key].clone(),
+                var,
                 nix!(merge(#{Expr::ident(raw)}, {
                     "__wasm2nixState" = #{module.state.expr()};
                 })),

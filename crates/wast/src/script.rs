@@ -95,6 +95,10 @@ pub fn run_wast_script(script: &str) -> Result<()> {
     let mut session = Session::new()?;
     for directive in wast.directives {
         let (line, col) = directive.span().linecol_in(script);
+        #[expect(
+            clippy::arithmetic_side_effects,
+            reason = "positions within the script"
+        )]
         let at = format!("{}:{}", line + 1, col + 1);
         session
             .directive(directive, &at)
@@ -442,6 +446,7 @@ impl Session {
         )
     }
 
+    #[expect(clippy::arithmetic_side_effects, reason = "one key per directive")]
     fn transient_key(&mut self, kind: &str) -> String {
         let key = format!("__{kind}{}", self.next_module);
         self.next_module += 1;
@@ -607,6 +612,10 @@ impl ImportResolver for Session {
 impl ActiveInitializerResolver for Session {
     type Error = HarnessResolverError;
 
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "validation keeps the module's memory indices in range"
+    )]
     fn memory_min_pages(
         &mut self, module: &NixModule, index: MemoryIndex,
     ) -> std::result::Result<u64, Self::Error> {
@@ -619,6 +628,10 @@ impl ActiveInitializerResolver for Session {
         })?)
     }
 
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "validation keeps the module's table indices in range"
+    )]
     fn table_min_elements(
         &mut self, module: &NixModule, index: TableIndex,
     ) -> std::result::Result<u64, Self::Error> {
@@ -652,7 +665,10 @@ impl ActiveInitializerResolver for Session {
         let query = self.world().get_expr(&key, field_name)?;
         let value = self.flush(Some(query))?;
         Ok(json_number_to_u64(
-            value["results"].get(0).context(ExpectedResultSnafu)?,
+            value
+                .get("results")
+                .and_then(|results| results.get(0))
+                .context(ExpectedResultSnafu)?,
         )?)
     }
 }

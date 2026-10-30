@@ -11,65 +11,70 @@ pub(super) struct LoweredBlockBody {
     pub(super) body: Expr,
 }
 
+/// Inlines bindings whose value is cheap and pure into their only use, in
+/// binding order, and drops the ones nothing uses.
 pub(super) fn inline_single_use_values(steps: Vec<Step>, body: Expr) -> LoweredBlockBody {
-    let mut binds = Vec::new();
+    let mut kept = Vec::new();
     let mut forces = Vec::new();
-
+    // The bindings still to visit, last first.
+    let mut pending = Vec::new();
     for step in steps {
-        binds.extend(step.binds);
+        pending.extend(step.binds);
         forces.extend(step.force);
     }
+    pending.reverse();
 
     let mut body = body;
-    let mut index = 0;
-    while index < binds.len() {
-        if !is_inline_candidate(&binds[index].value)
-            || uses_in_binds(&binds[..index], &binds[index].name) != 0
-        {
-            index += 1;
+    while let Some(bind) = pending.pop() {
+        if !is_inline_candidate(&bind.value) || uses_in_binds(&kept, &bind.name) != 0 {
+            kept.push(bind);
             continue;
         }
-        let name = binds[index].name.clone();
 
         // Forcing a bound value is redundant once it is inlined; trap
         // conditions are ordinary use sites.
+        let is_removable_force =
+            |force: &Force| matches!(force, Force::Value(expr) if is_ident_named(expr, &bind.name));
         let removable_force_count = forces
             .iter()
-            .filter(|force| matches!(force, Force::Value(expr) if is_ident_named(expr, &name)))
+            .filter(|force| is_removable_force(force))
             .count();
         if removable_force_count > 1 {
-            index += 1;
+            kept.push(bind);
             continue;
         }
 
-        let use_count = uses_in_binds(&binds[index + 1..], &name) + uses_in_forces(&forces, &name)
-            - removable_force_count
-            + body.free_uses(&name);
+        let forced_uses = forces
+            .iter()
+            .filter(|force| !is_removable_force(force))
+            .map(|force| force.expr().free_uses(&bind.name));
+        let use_count = uses_in_binds(&pending, &bind.name)
+            .saturating_add(forced_uses.sum())
+            .saturating_add(body.free_uses(&bind.name));
         // List elements and attribute values stay unevaluated, so an expression
         // inlined into a jump record would grow a thunk chain across loop
         // iterations instead of being forced in this block.
-        if use_count > 1 || is_used_lazily(&body, &name) {
-            index += 1;
+        if use_count > 1 || is_used_lazily(&body, &bind.name) {
+            kept.push(bind);
             continue;
         }
 
         if removable_force_count == 1 {
-            remove_ident_force(&mut forces, &name);
+            remove_ident_force(&mut forces, &bind.name);
         }
-        let value = binds.remove(index).value;
         if use_count == 1 {
-            for bind in &mut binds[index..] {
-                bind.value.substitute_free(&name, &value);
+            for later in &mut pending {
+                later.value.substitute_free(&bind.name, &bind.value);
             }
             for force in &mut forces {
-                force.expr_mut().substitute_free(&name, &value);
+                force.expr_mut().substitute_free(&bind.name, &bind.value);
             }
-            body.substitute_free(&name, &value);
+            body.substitute_free(&bind.name, &bind.value);
         }
     }
 
     LoweredBlockBody {
-        binds,
+        binds: kept,
         forces,
         body,
     }
@@ -129,13 +134,6 @@ const fn is_safe_inline_binop(op: BinOp) -> bool {
 
 fn uses_in_binds(binds: &[LetBind], name: &str) -> usize {
     binds.iter().map(|bind| bind.value.free_uses(name)).sum()
-}
-
-fn uses_in_forces(forces: &[Force], name: &str) -> usize {
-    forces
-        .iter()
-        .map(|force| force.expr().free_uses(name))
-        .sum()
 }
 
 /// Whether a free `name` occurs inside a list element or an attribute value.

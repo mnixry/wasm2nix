@@ -14,7 +14,7 @@ use crate::nix::Expr;
 
 impl InstCtx<'_> {
     pub(super) fn lower_load(&self, arg: ir::Value, offset: i32) -> Result<LoweredInst> {
-        let out = self.results[0];
+        let out = self.result();
         let out_ty = self.func.dfg.value_type(out);
         let addr = self.addr_with_offset(arg, offset);
         let e = load_function(self.op, out_ty)?.call([addr, Expr::ident(self.st_name)]);

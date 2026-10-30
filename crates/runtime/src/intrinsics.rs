@@ -77,6 +77,12 @@ impl UserName {
     /// Returns an error for a fixed intrinsic code that does not exist.
     pub fn from_parts(parts: UserNameParts) -> Result<Self, UserNameError> {
         let UserNameParts { namespace, index } = parts;
+        if let Some(table) = namespace.checked_sub(CALL_INDIRECT_NAMESPACE) {
+            return Ok(Self::Intrinsic(Intrinsic::CallIndirect {
+                table_index: TableIndex::from_u32(table),
+                type_index: TypeIndex::from_u32(index),
+            }));
+        }
         Ok(match namespace {
             FUNC_NAMESPACE => Self::Func(FuncIndex::from_u32(index)),
             MEMORY_BASE_NAMESPACE => Self::MemoryBase(MemoryIndex::from_u32(index)),
@@ -87,12 +93,9 @@ impl UserName {
                     .copied()
                     .context(UnknownIntrinsicSnafu { code: index })?,
             )),
-            REF_FUNC_NAMESPACE => Self::Intrinsic(Intrinsic::RefFunc {
+            // The only namespace below `CALL_INDIRECT_NAMESPACE` left.
+            _ => Self::Intrinsic(Intrinsic::RefFunc {
                 func_index: FuncIndex::from_u32(index),
-            }),
-            table => Self::Intrinsic(Intrinsic::CallIndirect {
-                table_index: TableIndex::from_u32(table - CALL_INDIRECT_NAMESPACE),
-                type_index: TypeIndex::from_u32(index),
             }),
         })
     }

@@ -82,7 +82,7 @@ impl<'m> NixFuncEnvironment<'m> {
 
     #[must_use]
     pub fn vmctx_sig(&self, sigidx: TypeIndex) -> ir::Signature {
-        let mut sig = self.mod_info.signatures[sigidx].clone();
+        let mut sig = self.mod_info.signature(sigidx).clone();
         sig.params.push(self.vmctx_param());
         sig
     }
@@ -111,7 +111,13 @@ impl<'m> NixFuncEnvironment<'m> {
     }
 
     fn global_accessors(&self, index: GlobalIndex) -> WasmResult<GlobalAccessors> {
-        let ty = self.mod_info.globals[index].entity.wasm_ty;
+        let ty = self
+            .mod_info
+            .globals
+            .get(index)
+            .ok_or_else(|| WasmError::User(format!("undeclared global {index:?}")))?
+            .entity
+            .wasm_ty;
         global_accessors(&ty).ok_or_else(|| WasmError::Unsupported(format!("global type {ty}")))
     }
 }
@@ -214,7 +220,12 @@ impl FuncEnvironment for NixFuncEnvironment<'_> {
     fn make_direct_func(
         &mut self, func: &mut ir::Function, index: FuncIndex,
     ) -> WasmResult<ir::FuncRef> {
-        let sigidx = self.mod_info.functions[index].entity;
+        let sigidx = self
+            .mod_info
+            .functions
+            .get(index)
+            .ok_or_else(|| WasmError::User(format!("undeclared function {index:?}")))?
+            .entity;
         import_function(func, UserName::Func(index), self.vmctx_sig(sigidx))
     }
 
@@ -415,7 +426,7 @@ impl FuncEnvironment for NixFuncEnvironment<'_> {
         let ref_func = Intrinsic::RefFunc { func_index };
         let fref = import_function(pos.func, UserName::Intrinsic(ref_func), sig)?;
         let call = pos.ins().call(fref, &[]);
-        Ok(pos.func.dfg.inst_results(call)[0])
+        Ok(pos.func.dfg.first_result(call))
     }
 
     fn translate_custom_global_get(
@@ -494,7 +505,7 @@ fn call_cursor_result<const N: usize>(
     pos: &mut FuncCursor<'_>, fref: ir::FuncRef, args: [ir::Value; N],
 ) -> WasmResult<ir::Value> {
     let inst = call_cursor(pos, fref, args)?;
-    Ok(pos.func.dfg.inst_results(inst)[0])
+    Ok(pos.func.dfg.first_result(inst))
 }
 
 fn call_builder<const N: usize>(
@@ -508,7 +519,7 @@ fn call_builder_result<const N: usize>(
     builder: &mut FunctionBuilder<'_>, fref: ir::FuncRef, args: [ir::Value; N],
 ) -> WasmResult<ir::Value> {
     let inst = call_builder(builder, fref, args)?;
-    Ok(builder.inst_results(inst)[0])
+    Ok(builder.func.dfg.first_result(inst))
 }
 
 fn cursor_u32_const(pos: &mut FuncCursor<'_>, value: u32) -> ir::Value {

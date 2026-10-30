@@ -15,7 +15,7 @@ pub(super) fn lower_table_entry(module: &NixModule, func_index: FuncIndex) -> Ex
     let Some(function) = module.info.functions.get(func_index) else {
         return nix!(null);
     };
-    let sig = &module.info.signatures[function.entity];
+    let sig = module.info.signature(function.entity);
     nix!({
         module = moduleId;
         func = #{func_index.as_u32()};

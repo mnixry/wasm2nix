@@ -45,7 +45,9 @@ impl ControlFlow {
 
         let mut in_edges = BTreeMap::new();
         for target in successors.values().flatten() {
-            *in_edges.entry(*target).or_insert(0) += 1;
+            // Only a count of one matters, so saturating is exact enough.
+            let count = in_edges.entry(*target).or_insert(0_usize);
+            *count = count.saturating_add(1);
         }
 
         Self {
@@ -81,6 +83,7 @@ fn branch_calls(func: &ir::Function, inst: &InstructionData) -> Vec<ir::BlockCal
         InstructionData::Jump { destination, .. } => vec![*destination],
         InstructionData::Brif { blocks, .. } => blocks.to_vec(),
         InstructionData::BranchTable { table, .. } => {
+            #[expect(clippy::indexing_slicing, reason = "the function's own jump table")]
             let table_data = &func.dfg.jump_tables[*table];
             std::iter::once(table_data.default_block())
                 .chain(table_data.as_slice().iter().copied())

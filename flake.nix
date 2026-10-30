@@ -115,7 +115,7 @@
                 craneCommonArgs
                 // {
                   inherit cargoArtifacts;
-                  cargoClippyExtraArgs = "--all-targets --all-features";
+                  cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
                 }
               );
             }

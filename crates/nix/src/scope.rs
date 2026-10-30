@@ -26,6 +26,10 @@ impl Expr {
     /// Counts the occurrences of the variable `name` that are not shadowed by
     /// an inner binding.
     #[must_use]
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "a count of tree nodes cannot overflow usize"
+    )]
     pub fn free_uses(&self, name: &str) -> usize {
         match self {
             Self::Ident(ident) if ident == name => 1,

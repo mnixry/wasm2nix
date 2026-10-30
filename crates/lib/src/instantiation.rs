@@ -129,8 +129,10 @@ fn global_i32_value<R: ActiveInitializerResolver>(
             .context(GlobalValueOutOfRangeSnafu { value });
     }
 
-    let expr = module.info.global_inits[index]
-        .as_ref()
+    let expr = module
+        .info
+        .global_inits
+        .get(&index)
         .context(MissingGlobalInitializerSnafu { index })?;
     eval_i32_const_expr(module, resolver, expr)
 }

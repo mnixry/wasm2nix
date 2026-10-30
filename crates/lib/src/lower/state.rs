@@ -84,9 +84,12 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
 
         // Bytes past the address space are out of bounds; instantiation traps.
         for (addr, byte) in (init.offset..=u64::MAX).zip(init.data.iter().copied()) {
-            let shift = ((addr % 4) as u32) * 8;
             let word = words.entry(addr / 4).or_insert(0);
-            *word = (*word & !(0xff_u32 << shift)) | (u32::from(byte) << shift);
+            let mut bytes = word.to_le_bytes();
+            if let Some(slot) = bytes.get_mut((addr % 4) as usize) {
+                *slot = byte;
+            }
+            *word = u32::from_le_bytes(bytes);
         }
     }
 
@@ -136,8 +139,7 @@ fn lower_initial_globals(module: &NixModule) -> Result<Expr> {
         } else {
             let init = info
                 .global_inits
-                .get(idx)
-                .and_then(Option::as_ref)
+                .get(&idx)
                 .context(MissingGlobalInitializerSnafu { index: idx })?;
             lower_const_expr(module, init, global.entity.wasm_ty)?
         };

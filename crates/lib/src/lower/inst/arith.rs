@@ -20,7 +20,7 @@ use crate::nix::nix;
 
 impl InstCtx<'_> {
     pub(super) fn lower_iconst(&self, v: i64) -> LoweredInst {
-        let dst = self.results[0];
+        let dst = self.result();
         let ty = self.func.dfg.value_type(dst);
         self.pure_bind(dst, Expr::int(canonical_imm(ty, v)))
     }
@@ -61,7 +61,7 @@ impl InstCtx<'_> {
     fn lower_unary_call(
         &self, arg: ir::Value, function: fn(Opcode, Type) -> Option<RuntimeFunction>,
     ) -> Result<LoweredInst> {
-        let out = self.results[0];
+        let out = self.result();
         let Some(function) = function(self.op, self.func.dfg.value_type(out)) else {
             return self.unsupported_opcode();
         };
@@ -71,7 +71,7 @@ impl InstCtx<'_> {
     pub(super) fn lower_binary(&self, args: [ir::Value; 2]) -> Result<LoweredInst> {
         let a = self.value_expr(args[0]);
         let b = self.value_expr(args[1]);
-        let out = self.results[0];
+        let out = self.result();
         let out_ty = self.func.dfg.value_type(out);
         if out_ty == I8 {
             let e = match self.op {
@@ -106,7 +106,7 @@ impl InstCtx<'_> {
     }
 
     pub(super) fn lower_binary_imm(&self, arg: ir::Value, imm64: i64) -> LoweredInst {
-        let out = self.results[0];
+        let out = self.result();
         let out_ty = self.func.dfg.value_type(out);
         let imm = canonical_imm(out_ty, imm64);
         let lhs = self.value_expr(arg);

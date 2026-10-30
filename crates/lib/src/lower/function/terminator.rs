@@ -3,6 +3,7 @@ use cranelift_codegen::ir::Inst;
 use cranelift_codegen::ir::InstructionData;
 use cranelift_codegen::ir::Opcode;
 use cranelift_codegen::ir::{self};
+use snafu::OptionExt;
 
 use crate::lower::error::Result;
 use crate::lower::error::UnsupportedOpcodeSnafu;
@@ -63,14 +64,18 @@ impl BlockLowering<'_> {
     ) -> Result<Expr> {
         let index_name = format!("br_table_index_{}", inst.as_u32());
         let targets_name = format!("br_table_targets_{}", inst.as_u32());
+        #[expect(clippy::indexing_slicing, reason = "the function's own jump table")]
         let table_data = &self.func.dfg.jump_tables[table];
         let targets = table_data
             .as_slice()
             .iter()
             .map(|branch| self.lower_block_call(block, *branch, st_name, depth))
             .collect::<Result<Vec<_>>>()?;
-        let target_count =
-            i64::try_from(targets.len()).expect("branch table target count fits in i64");
+        let target_count = i64::try_from(targets.len())
+            .ok()
+            .context(UnsupportedOpcodeSnafu {
+                opcode: Opcode::BrTable,
+            })?;
         let default = self.lower_block_call(block, table_data.default_block(), st_name, depth)?;
         let targets_var = Expr::ident(targets_name.as_str());
         let index_var = Expr::ident(index_name.as_str());
@@ -115,10 +120,9 @@ impl BlockLowering<'_> {
                 if st_name != ST {
                     binds.push(LetBind::new(ST, Expr::ident(st_name)));
                 }
-                return Ok(Expr::let_in(
-                    binds,
-                    self.lower_block_body(target, depth + 1)?,
-                ));
+                #[expect(clippy::arithmetic_side_effects, reason = "below MAX_INLINE_DEPTH")]
+                let depth = depth + 1;
+                return Ok(Expr::let_in(binds, self.lower_block_body(target, depth)?));
             }
             self.spilled.push(target);
         }

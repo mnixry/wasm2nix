@@ -155,8 +155,13 @@ impl<'a> InstCtx<'a> {
         )
     }
 
+    /// The result of a single-result instruction.
+    pub(super) fn result(&self) -> ir::Value {
+        self.func.dfg.first_result(self.inst)
+    }
+
     pub(super) fn bind_result(&self, e: Expr) -> LoweredInst {
-        self.pure_bind(self.results[0], e)
+        self.pure_bind(self.result(), e)
     }
 
     pub(super) fn pure_bind(&self, out: ir::Value, e: Expr) -> LoweredInst {

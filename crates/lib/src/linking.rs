@@ -249,7 +249,7 @@ impl ModuleInterface {
         let info = &module.info;
         Self {
             funcs: exports(&info.functions, |sig| {
-                FuncType::from_signature(&info.signatures[*sig])
+                FuncType::from_signature(info.signature(*sig))
             }),
             globals: exports(&info.globals, |global| GlobalType::from(global)),
             memories: exports(&info.memories, |memory| Limits::from(memory)),
@@ -334,7 +334,7 @@ pub fn validate_imports<R: ImportResolver>(
         .values()
         .zip(&info.imported_funcs)
         .map(|(func, name)| {
-            let ty = FuncType::from_signature(&info.signatures[func.entity]);
+            let ty = FuncType::from_signature(info.signature(func.entity));
             (name, ExternType::Func(ty))
         });
     let globals = info

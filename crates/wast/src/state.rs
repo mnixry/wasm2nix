@@ -188,6 +188,7 @@ impl Session {
                 continue;
             };
             let len = init.elements.len() as u64;
+            #[expect(clippy::indexing_slicing, reason = "validated table index")]
             let min = u64::from(module.info.tables[init.table_index].entity.minimum);
             if u64::from(init.offset).saturating_add(len) > min {
                 break;
@@ -228,6 +229,7 @@ impl Session {
                 continue;
             };
             let len = init.data.len() as u64;
+            #[expect(clippy::indexing_slicing, reason = "validated memory index")]
             let min_pages = module.info.memories[init.memory_index].entity.minimum;
             if init.offset.saturating_add(len) > min_pages.saturating_mul(65536) {
                 break;

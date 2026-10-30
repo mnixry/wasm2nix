@@ -37,7 +37,7 @@ pub(super) fn lower_funcs_rec_attrset(module: &NixModule) -> Result<Expr> {
     let info = &module.info;
     let imported = info.imported_funcs.iter().zip(info.functions.iter()).map(
         |((module_name, field_name), (func_index, func))| {
-            let sig = &info.signatures[func.entity];
+            let sig = info.signature(func.entity);
             let lowered = lower_imported_func(module_name, field_name, sig);
             AttrBind::new(AttrKey::ident(func_name(func_index)), lowered)
         },

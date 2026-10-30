@@ -17,12 +17,14 @@ use crate::nix::nix;
 
 impl InstCtx<'_> {
     pub(super) fn lower_bitcast(&self) -> LoweredInst {
-        let arg = self.data.arguments(&self.func.dfg.value_lists)[0];
-        self.bind_result(self.value_expr(arg))
+        match self.data.arguments(&self.func.dfg.value_lists) {
+            [arg] => self.bind_result(self.value_expr(*arg)),
+            _ => self.unsupported("wasm2nix: bitcast without one argument"),
+        }
     }
 
     pub(super) fn lower_uextend(&self, arg: ir::Value) -> LoweredInst {
-        let out = self.results[0];
+        let out = self.result();
         let in_ty = self.func.dfg.value_type(arg);
         let out_ty = self.func.dfg.value_type(out);
         let a = self.value_expr(arg);
@@ -36,7 +38,7 @@ impl InstCtx<'_> {
     }
 
     pub(super) fn lower_sextend(&self, arg: ir::Value) -> LoweredInst {
-        let out = self.results[0];
+        let out = self.result();
         let in_ty = self.func.dfg.value_type(arg);
         let out_ty = self.func.dfg.value_type(out);
         let a = self.value_expr(arg);
@@ -64,7 +66,7 @@ impl InstCtx<'_> {
     fn lower_conversion(
         &self, arg: ir::Value, function: fn(Opcode, Type, Type) -> Option<RuntimeFunction>,
     ) -> Result<LoweredInst> {
-        let out = self.results[0];
+        let out = self.result();
         let in_ty = self.func.dfg.value_type(arg);
         let out_ty = self.func.dfg.value_type(out);
         let Some(function) = function(self.op, in_ty, out_ty) else {

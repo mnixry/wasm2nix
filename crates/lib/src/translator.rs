@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use cranelift_codegen::ir;
 use cranelift_codegen::ir::UserFuncName;
 use cranelift_codegen::ir::types::F32;
@@ -8,7 +10,6 @@ use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_entity::EntityRef;
 use cranelift_entity::PrimaryMap;
-use cranelift_entity::SecondaryMap;
 use cranelift_wasm::ConstExpr;
 use cranelift_wasm::DataIndex;
 use cranelift_wasm::DefinedFuncIndex;
@@ -86,15 +87,18 @@ pub struct NixModuleInfo {
     pub tables: PrimaryMap<TableIndex, Exportable<Table>>,
     pub globals: PrimaryMap<GlobalIndex, Exportable<Global>>,
 
-    pub global_inits: SecondaryMap<GlobalIndex, Option<ConstExpr>>,
+    /// Initializers of the globals the module defines.
+    pub global_inits: BTreeMap<GlobalIndex, ConstExpr>,
 
-    pub data_segments: SecondaryMap<DataIndex, Vec<u8>>,
+    /// Every data segment, in section order; active ones are empty because
+    /// instantiation drops them.
+    pub data_segments: BTreeMap<DataIndex, Vec<u8>>,
     pub data_initializers: Vec<DataInitializer>,
     pub table_initializers: Vec<TableInitializer>,
-    pub element_segments: SecondaryMap<ElemIndex, Vec<FuncIndex>>,
+    /// Every element segment, in section order; only passive ones keep their
+    /// elements.
+    pub element_segments: BTreeMap<ElemIndex, Vec<FuncIndex>>,
 
-    data_segment_count: usize,
-    elem_segment_count: usize,
     pub start_func: Option<FuncIndex>,
 }
 
@@ -112,21 +116,28 @@ impl NixModuleInfo {
             memories: PrimaryMap::new(),
             tables: PrimaryMap::new(),
             globals: PrimaryMap::new(),
-            global_inits: SecondaryMap::new(),
-            data_segments: SecondaryMap::new(),
+            global_inits: BTreeMap::new(),
+            data_segments: BTreeMap::new(),
             data_initializers: Vec::new(),
             table_initializers: Vec::new(),
-            element_segments: SecondaryMap::new(),
-            data_segment_count: 0,
-            elem_segment_count: 0,
+            element_segments: BTreeMap::new(),
             start_func: None,
         }
+    }
+
+    /// The signature of type `index`.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "validation keeps the module's own type indices in range"
+    )]
+    pub(crate) fn signature(&self, index: TypeIndex) -> &ir::Signature {
+        &self.signatures[index]
     }
 
     /// The first type index with the same signature as `index`, so that
     /// `call_indirect` compares structurally equal types as equal.
     pub(crate) fn canonical_type_index(&self, index: TypeIndex) -> TypeIndex {
-        let target = &self.signatures[index];
+        let target = self.signature(index);
         for (candidate_index, candidate) in &self.signatures {
             if candidate_index == index {
                 break;
@@ -166,6 +177,10 @@ impl NixModule {
     }
 
     /// The index of a function with a body; imported functions come first.
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "wasmparser bounds function counts far below usize::MAX"
+    )]
     pub(crate) fn func_index(&self, defined: DefinedFuncIndex) -> FuncIndex {
         FuncIndex::new(self.info.imported_funcs.len() + defined.index())
     }
@@ -190,11 +205,11 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     fn declare_func_import(
         &mut self, index: TypeIndex, module: &'data str, field: &'data str,
     ) -> WasmResult<()> {
-        assert_eq!(
-            self.info.functions.len(),
-            self.info.imported_funcs.len(),
-            "Imported functions must be declared first"
-        );
+        if self.info.functions.len() != self.info.imported_funcs.len() {
+            return Err(WasmError::User(
+                "imported functions must be declared first".into(),
+            ));
+        }
         self.info.functions.push(Exportable::new(index));
         self.info
             .imported_funcs
@@ -253,42 +268,30 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     fn declare_global(&mut self, global: Global, init: ConstExpr) -> WasmResult<()> {
         validate_global_type(global)?;
         let idx = self.info.globals.push(Exportable::new(global));
-        self.info.global_inits[idx] = Some(init);
+        self.info.global_inits.insert(idx, init);
         Ok(())
     }
 
     fn declare_func_export(&mut self, func_index: FuncIndex, name: &'data str) -> WasmResult<()> {
-        self.info.functions[func_index]
-            .export_names
-            .push(name.to_string());
-        Ok(())
+        declare_export(&mut self.info.functions, func_index, name)
     }
 
     fn declare_table_export(
         &mut self, table_index: TableIndex, name: &'data str,
     ) -> WasmResult<()> {
-        self.info.tables[table_index]
-            .export_names
-            .push(name.to_string());
-        Ok(())
+        declare_export(&mut self.info.tables, table_index, name)
     }
 
     fn declare_memory_export(
         &mut self, memory_index: MemoryIndex, name: &'data str,
     ) -> WasmResult<()> {
-        self.info.memories[memory_index]
-            .export_names
-            .push(name.to_string());
-        Ok(())
+        declare_export(&mut self.info.memories, memory_index, name)
     }
 
     fn declare_global_export(
         &mut self, global_index: GlobalIndex, name: &'data str,
     ) -> WasmResult<()> {
-        self.info.globals[global_index]
-            .export_names
-            .push(name.to_string());
-        Ok(())
+        declare_export(&mut self.info.globals, global_index, name)
     }
 
     fn declare_start_func(&mut self, index: FuncIndex) -> WasmResult<()> {
@@ -300,18 +303,16 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         &mut self, table_index: TableIndex, base: Option<GlobalIndex>, offset: u32,
         elements: Box<[FuncIndex]>,
     ) -> WasmResult<()> {
-        let elem_index = ElemIndex::new(self.info.elem_segment_count);
-        self.info.elem_segment_count += 1;
-        let elements = elements.into_vec();
         // Active element segments are consumed during instantiation. Keep their
         // index present but empty so a later table.init with that index
         // traps on segment bounds.
-        self.info.element_segments[elem_index] = Vec::new();
+        let elem_index = ElemIndex::new(self.info.element_segments.len());
+        self.info.element_segments.insert(elem_index, Vec::new());
         self.info.table_initializers.push(TableInitializer {
             table_index,
             base,
             offset,
-            elements,
+            elements: elements.into_vec(),
         });
         Ok(())
     }
@@ -319,21 +320,20 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     fn declare_passive_element(
         &mut self, index: ElemIndex, elements: Box<[FuncIndex]>,
     ) -> WasmResult<()> {
-        self.info.element_segments[index] = elements.into_vec();
-        self.info.elem_segment_count = self.info.elem_segment_count.max(index.index() + 1);
+        self.info
+            .element_segments
+            .insert(index, elements.into_vec());
         Ok(())
     }
 
     fn declare_elements(&mut self, _elements: Box<[FuncIndex]>) -> WasmResult<()> {
-        let elem_index = ElemIndex::new(self.info.elem_segment_count);
-        self.info.elem_segment_count += 1;
-        self.info.element_segments[elem_index] = Vec::new();
+        let elem_index = ElemIndex::new(self.info.element_segments.len());
+        self.info.element_segments.insert(elem_index, Vec::new());
         Ok(())
     }
 
     fn declare_passive_data(&mut self, data_index: DataIndex, data: &'data [u8]) -> WasmResult<()> {
-        self.info.data_segments[data_index] = data.to_vec();
-        self.info.data_segment_count = self.info.data_segment_count.max(data_index.index() + 1);
+        self.info.data_segments.insert(data_index, data.to_vec());
         Ok(())
     }
 
@@ -345,7 +345,14 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         body: cranelift_wasm::wasmparser::FunctionBody<'data>,
     ) -> WasmResult<()> {
         let func_index = self.func_index(self.info.function_bodies.next_key());
-        let sigidx = self.info.functions[func_index].entity;
+        let sigidx = self
+            .info
+            .functions
+            .get(func_index)
+            .ok_or_else(|| {
+                WasmError::User(format!("function body without declaration {func_index:?}"))
+            })?
+            .entity;
         let mut func_environ = NixFuncEnvironment::new(&self.info);
         let sig = func_environ.vmctx_sig(sigidx);
 
@@ -361,11 +368,10 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
         &mut self, memory_index: MemoryIndex, base: Option<GlobalIndex>, offset: u64,
         data: &'data [u8],
     ) -> WasmResult<()> {
-        let data_index = DataIndex::new(self.info.data_segment_count);
-        self.info.data_segment_count += 1;
         // Like active element segments, active data segments are dropped by
         // instantiation, so a later memory.init with that index traps.
-        self.info.data_segments[data_index] = Vec::new();
+        let data_index = DataIndex::new(self.info.data_segments.len());
+        self.info.data_segments.insert(data_index, Vec::new());
         self.info.data_initializers.push(DataInitializer {
             memory_index,
             base,
@@ -378,6 +384,17 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     fn wasm_features(&self) -> wasmparser::WasmFeatures {
         WASM_FEATURES
     }
+}
+
+/// Records `name` as an export of entity `index`.
+fn declare_export<K: EntityRef, T>(
+    entities: &mut PrimaryMap<K, Exportable<T>>, index: K, name: &str,
+) -> WasmResult<()> {
+    let entity = entities
+        .get_mut(index)
+        .ok_or_else(|| WasmError::User(format!("export {name} of an undeclared entity")))?;
+    entity.export_names.push(name.to_string());
+    Ok(())
 }
 
 /// Bytes per Wasm memory page.
