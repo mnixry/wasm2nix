@@ -74,8 +74,8 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
             continue;
         }
 
-        for (i, byte) in init.data.iter().copied().enumerate() {
-            let addr = init.offset + i as u64;
+        // Bytes past the address space are out of bounds; instantiation traps.
+        for (addr, byte) in (init.offset..=u64::MAX).zip(init.data.iter().copied()) {
             let word_index = addr / 4;
             let shift = ((addr % 4) as u32) * 8;
             let old_word = words.get(&word_index).copied().unwrap_or(0);
@@ -169,14 +169,14 @@ fn lower_initial_tables(module: &NixModule) -> Expr {
     let mut table_binds: Vec<(AttrKey, Expr)> = Vec::new();
 
     for (table_index, table_decl) in &module.info.tables {
-        let mut elems: BTreeMap<u32, Expr> = BTreeMap::new();
+        let mut elems: BTreeMap<u64, Expr> = BTreeMap::new();
         for init in &module.info.table_initializers {
             if init.table_index != table_index || init.base.is_some() {
                 continue;
             }
 
-            for (i, func_index) in init.elements.iter().copied().enumerate() {
-                let slot = init.offset + i as u32;
+            for (slot, func_index) in (u64::from(init.offset)..).zip(init.elements.iter().copied())
+            {
                 elems.insert(slot, lower_table_entry(module, func_index));
             }
         }

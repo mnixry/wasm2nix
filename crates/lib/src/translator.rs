@@ -415,7 +415,9 @@ impl<'data> ModuleEnvironment<'data> for NixModule {
     ) -> WasmResult<()> {
         let data_index = DataIndex::new(self.info.data_segment_count);
         self.info.data_segment_count += 1;
-        self.info.data_segments[data_index] = data.to_vec();
+        // Like active element segments, active data segments are dropped by
+        // instantiation, so a later memory.init with that index traps.
+        self.info.data_segments[data_index] = Vec::new();
         self.info.data_initializers.push(DataInitializer {
             data_index,
             memory_index,

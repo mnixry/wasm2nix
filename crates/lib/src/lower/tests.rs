@@ -338,3 +338,23 @@ fn generated_module_lowers_call_indirect_through_table_runtime() {
     assert!(nix.contains("func = 0;"));
     assert!(nix.contains("type = \"(i32)->(i32)\";"));
 }
+
+#[test]
+fn active_segments_are_dropped_after_instantiation() {
+    let nix = lower_wat(
+        r#"
+        (module
+          (memory 1)
+          (table 1 funcref)
+          (func $f)
+          (data (i32.const 0) "ab")
+          (data "cd")
+          (elem (i32.const 0) $f))
+        "#,
+    );
+    assert!(
+        nix.contains(r#"data = { "0" = [ ]; "1" = [ 99 100 ]; };"#),
+        "{nix}"
+    );
+    assert!(nix.contains(r#"elemSegments = { "0" = [ ]; };"#), "{nix}");
+}
