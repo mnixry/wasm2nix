@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use cranelift_codegen::ir::{self, Inst, InstructionData, Opcode};
+use cranelift_codegen::ir::Inst;
+use cranelift_codegen::ir::InstructionData;
+use cranelift_codegen::ir::Opcode;
+use cranelift_codegen::ir::{self};
 
 /// Finds the additions of a memarg offset in heap address computations.
 /// Cranelift computes a heap address as `iadd heap_base, index`, then adds a

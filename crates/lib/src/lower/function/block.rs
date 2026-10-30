@@ -1,18 +1,25 @@
-use std::{cell::RefCell, collections::BTreeSet};
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 
-use cranelift_codegen::ir::{self, Block, Inst};
+use cranelift_codegen::ir::Block;
+use cranelift_codegen::ir::Inst;
+use cranelift_codegen::ir::{self};
 use snafu::prelude::*;
 
-use crate::{
-    lower::{
-        error::{EmptyBlockSnafu, Result},
-        function::{block_name, cfg::ControlFlow, inline::inline_single_use_values},
-        inst::{Force, Step, lower_inst, value_expr, value_name},
-        lambda_chain,
-    },
-    nix::{AttrKey, Expr},
-    translator::NixModule,
-};
+use crate::lower::error::EmptyBlockSnafu;
+use crate::lower::error::Result;
+use crate::lower::function::block_name;
+use crate::lower::function::cfg::ControlFlow;
+use crate::lower::function::inline::inline_single_use_values;
+use crate::lower::inst::Force;
+use crate::lower::inst::Step;
+use crate::lower::inst::lower_inst;
+use crate::lower::inst::value_expr;
+use crate::lower::inst::value_name;
+use crate::lower::lambda_chain;
+use crate::nix::AttrKey;
+use crate::nix::Expr;
+use crate::translator::NixModule;
 
 /// Single-edge blocks nest at most this deep before they are emitted as
 /// separate block functions, which bounds recursion in the lowering and in

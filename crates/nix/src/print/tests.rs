@@ -1,5 +1,8 @@
 use super::*;
-use crate::{AttrKey, Expr, LetBind, RenderStyle};
+use crate::AttrKey;
+use crate::Expr;
+use crate::LetBind;
+use crate::RenderStyle;
 
 #[test]
 fn renders_attrset_and_let() {

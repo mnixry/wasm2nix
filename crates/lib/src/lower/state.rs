@@ -2,17 +2,18 @@ use std::collections::BTreeMap;
 
 use cranelift_codegen::ir::{self};
 use cranelift_entity::EntityRef;
-use wasm2nix_runtime::{MEMORY_CHUNK_WORDS, MEMORY_GROUP_CHUNKS, RuntimeFunction};
+use wasm2nix_runtime::MEMORY_CHUNK_WORDS;
+use wasm2nix_runtime::MEMORY_GROUP_CHUNKS;
+use wasm2nix_runtime::RuntimeFunction;
 
-use crate::{
-    lower::{
-        const_expr::lower_const_expr,
-        error::Result,
-        imports::{lower_attr_or, lower_imported_extern},
-    },
-    nix::{AttrKey, Expr, nix},
-    translator::NixModule,
-};
+use crate::lower::const_expr::lower_const_expr;
+use crate::lower::error::Result;
+use crate::lower::imports::lower_attr_or;
+use crate::lower::imports::lower_imported_extern;
+use crate::nix::AttrKey;
+use crate::nix::Expr;
+use crate::nix::nix;
+use crate::translator::NixModule;
 
 pub(super) fn lower_initial_state(module: &NixModule) -> Result<Expr> {
     Ok(nix!({
@@ -78,7 +79,7 @@ fn lower_initial_memory_pages(module: &NixModule) -> Expr {
             let word_index = addr / 4;
             let shift = ((addr % 4) as u32) * 8;
             let old_word = words.get(&word_index).copied().unwrap_or(0);
-            let mask = !(0xFF_u32 << shift);
+            let mask = !(0xff_u32 << shift);
             let new_word = (old_word & mask) | (u32::from(byte) << shift);
             words.insert(word_index, new_word);
         }

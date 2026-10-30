@@ -1,6 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
-use cranelift_codegen::ir::{self, Block, Inst, InstructionData};
+use cranelift_codegen::ir::Block;
+use cranelift_codegen::ir::Inst;
+use cranelift_codegen::ir::InstructionData;
+use cranelift_codegen::ir::{self};
 
 fn block_free_values(func: &ir::Function, vmctx: ir::Value) -> BTreeMap<Block, Vec<ir::Value>> {
     let mut result = BTreeMap::new();

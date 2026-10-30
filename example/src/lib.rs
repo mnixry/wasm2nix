@@ -2,15 +2,19 @@
 #![allow(unsafe_code)]
 extern crate alloc;
 
-use alloc::{
-    boxed::Box,
-    string::{String, ToString},
-    vec::Vec,
-};
-use core::{cell::UnsafeCell, fmt::Write};
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
+use core::cell::UnsafeCell;
+use core::fmt::Write;
 
-use saphyr::{LoadableYamlNode, Scalar, Yaml};
-use serde_json::{Map, Number, Value};
+use saphyr::LoadableYamlNode;
+use saphyr::Scalar;
+use saphyr::Yaml;
+use serde_json::Map;
+use serde_json::Number;
+use serde_json::Value;
 
 struct OutputCell(UnsafeCell<Vec<u8>>);
 
@@ -144,14 +148,14 @@ fn json_to_ascii(json: &str) -> String {
 
 fn push_json_unicode_escape(ch: char, out: &mut String) {
     let code = ch as u32;
-    if code <= 0xFFFF {
+    if code <= 0xffff {
         write!(out, "\\u{code:04x}").expect("writing to String cannot fail");
         return;
     }
 
     let code = code - 0x10000;
-    let high = 0xD800 + (code >> 10);
-    let low = 0xDC00 + (code & 0x3FF);
+    let high = 0xd800 + (code >> 10);
+    let low = 0xdc00 + (code & 0x3ff);
     write!(out, "\\u{high:04x}\\u{low:04x}").expect("writing to String cannot fail");
 }
 

@@ -1,6 +1,7 @@
 use pretty::BoxDoc;
 
-use crate::{AttrBind, AttrKey};
+use crate::AttrBind;
+use crate::AttrKey;
 
 pub(super) type Doc = BoxDoc<'static, ()>;
 

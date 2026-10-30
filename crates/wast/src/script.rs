@@ -1,44 +1,77 @@
 //! Runs a WAST script: directives are checked in order while their Nix work
 //! queues up in a [`Batch`], evaluated only when Rust needs a value.
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::PathBuf,
-};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
-use cranelift_entity::{EntityRef, PrimaryMap};
+use cranelift_entity::EntityRef;
+use cranelift_entity::PrimaryMap;
 use serde_json::Value as JsonValue;
 use snafu::prelude::*;
-use wasm2nix::{
-    instantiation::ActiveInitializerResolver,
-    linking::{
-        self, ExternType, FuncType, GlobalType, ImportResolver, Limits, ModuleInterface, TableType,
-    },
-    nix::{Expr, nix},
-    translator::{Exportable, NixModule},
-};
-use wast::{
-    QuoteWat, Wast, WastDirective, WastExecute, WastInvoke, WastRet, Wat,
-    lexer::Lexer,
-    parser::{self, ParseBuffer},
-};
+use wasm2nix::instantiation::ActiveInitializerResolver;
+use wasm2nix::linking::ExternType;
+use wasm2nix::linking::FuncType;
+use wasm2nix::linking::GlobalType;
+use wasm2nix::linking::ImportResolver;
+use wasm2nix::linking::Limits;
+use wasm2nix::linking::ModuleInterface;
+use wasm2nix::linking::TableType;
+use wasm2nix::linking::{self};
+use wasm2nix::nix::Expr;
+use wasm2nix::nix::nix;
+use wasm2nix::translator::Exportable;
+use wasm2nix::translator::NixModule;
+use wast::QuoteWat;
+use wast::Wast;
+use wast::WastDirective;
+use wast::WastExecute;
+use wast::WastInvoke;
+use wast::WastRet;
+use wast::Wat;
+use wast::lexer::Lexer;
+use wast::parser::ParseBuffer;
+use wast::parser::{self};
 
-use crate::{
-    error::{
-        ActiveInitializerSnafu, DirectiveSnafu, EncodeWatSnafu, Error, ExpectedResultSnafu,
-        FailuresSnafu, HarnessResolverError, IncompatibleImportTypeSnafu,
-        LimitsQueryNotObjectSnafu, LinkSnafu, LowerNixSnafu, MissingTableLimitsSnafu,
-        ModuleAccessBeforeModuleSnafu, ModuleInstantiationTrappedSnafu, ParseWastSnafu, Result,
-        TranslateWasmSnafu, UnknownImportModuleSnafu, UnknownImportSnafu, UnknownModuleSnafu,
-        UnsupportedAssertReturnModuleExecutionSnafu, UnsupportedImportedOffsetGlobalSnafu,
-        UnsupportedWastDirectiveSnafu,
-    },
-    eval::{
-        Batch, Case, Check, MAX_BATCH_STEPS, Nix, Outcome, get_expr, initial_state_expr,
-        instantiate_expr, invoke_expr, nix_optional_u64, nix_u64,
-    },
-    expect::{Expected, json_number_to_u64, results_label, results_match},
-};
+use crate::error::ActiveInitializerSnafu;
+use crate::error::DirectiveSnafu;
+use crate::error::EncodeWatSnafu;
+use crate::error::Error;
+use crate::error::ExpectedResultSnafu;
+use crate::error::FailuresSnafu;
+use crate::error::HarnessResolverError;
+use crate::error::IncompatibleImportTypeSnafu;
+use crate::error::LimitsQueryNotObjectSnafu;
+use crate::error::LinkSnafu;
+use crate::error::LowerNixSnafu;
+use crate::error::MissingTableLimitsSnafu;
+use crate::error::ModuleAccessBeforeModuleSnafu;
+use crate::error::ModuleInstantiationTrappedSnafu;
+use crate::error::ParseWastSnafu;
+use crate::error::Result;
+use crate::error::TranslateWasmSnafu;
+use crate::error::UnknownImportModuleSnafu;
+use crate::error::UnknownImportSnafu;
+use crate::error::UnknownModuleSnafu;
+use crate::error::UnsupportedAssertReturnModuleExecutionSnafu;
+use crate::error::UnsupportedImportedOffsetGlobalSnafu;
+use crate::error::UnsupportedWastDirectiveSnafu;
+use crate::eval::Batch;
+use crate::eval::Case;
+use crate::eval::Check;
+use crate::eval::MAX_BATCH_STEPS;
+use crate::eval::Nix;
+use crate::eval::Outcome;
+use crate::eval::get_expr;
+use crate::eval::initial_state_expr;
+use crate::eval::instantiate_expr;
+use crate::eval::invoke_expr;
+use crate::eval::nix_optional_u64;
+use crate::eval::nix_u64;
+use crate::expect::Expected;
+use crate::expect::json_number_to_u64;
+use crate::expect::results_label;
+use crate::expect::results_match;
 
 /// Runs a WAST script and checks every assertion in it.
 ///

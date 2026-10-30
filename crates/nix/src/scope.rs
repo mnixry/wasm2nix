@@ -1,10 +1,12 @@
 //! Nix scoping rules: which nodes bind a name, and the free occurrences of a
 //! name below a node.
 
-use crate::{
-    AttrKey, Expr,
-    visit::{Visit, VisitMut, walk_expr, walk_expr_mut},
-};
+use crate::AttrKey;
+use crate::Expr;
+use crate::visit::Visit;
+use crate::visit::VisitMut;
+use crate::visit::walk_expr;
+use crate::visit::walk_expr_mut;
 
 impl Expr {
     /// Whether this node binds `name` for its whole subtree: a lambda
@@ -76,7 +78,9 @@ impl VisitMut for Substitute<'_> {
 #[cfg(test)]
 #[allow(clippy::vec_init_then_push)] // `nix!` expansions build lists with `push`.
 mod tests {
-    use crate::{AttrKey, Expr, nix};
+    use crate::AttrKey;
+    use crate::Expr;
+    use crate::nix;
 
     #[test]
     fn counts_free_uses_through_nested_expressions() {

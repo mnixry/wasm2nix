@@ -4,5 +4,13 @@ mod print;
 mod scope;
 pub mod visit;
 
-pub use ast::{AttrBind, AttrKey, AttrPath, BinOp, Expr, IntoNixExpr, LetBind, UnOp};
-pub use print::{RenderOptions, RenderStyle};
+pub use ast::AttrBind;
+pub use ast::AttrKey;
+pub use ast::AttrPath;
+pub use ast::BinOp;
+pub use ast::Expr;
+pub use ast::IntoNixExpr;
+pub use ast::LetBind;
+pub use ast::UnOp;
+pub use print::RenderOptions;
+pub use print::RenderStyle;

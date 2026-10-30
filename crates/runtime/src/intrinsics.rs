@@ -1,7 +1,9 @@
-use cranelift_wasm::{FuncIndex, TypeIndex};
+use cranelift_wasm::FuncIndex;
+use cranelift_wasm::TypeIndex;
 use snafu::Snafu;
 
-use crate::{RuntimeFunction, RuntimeResultKind};
+use crate::RuntimeFunction;
+use crate::RuntimeResultKind;
 
 #[derive(Debug, Snafu)]
 pub enum IntrinsicCastError {

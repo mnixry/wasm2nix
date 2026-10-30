@@ -1,26 +1,40 @@
 use std::collections::BTreeMap;
 
-use cranelift_codegen::{
-    cursor::FuncCursor,
-    ir,
-    ir::{
-        InstBuilder,
-        condcodes::IntCC,
-        immediates::Imm64,
-        types::{F32, F64, I32, I64},
-    },
-    isa::{CallConv, TargetFrontendConfig},
-};
-use cranelift_entity::{EntityRef, PrimaryMap};
+use cranelift_codegen::cursor::FuncCursor;
+use cranelift_codegen::ir;
+use cranelift_codegen::ir::InstBuilder;
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::immediates::Imm64;
+use cranelift_codegen::ir::types::F32;
+use cranelift_codegen::ir::types::F64;
+use cranelift_codegen::ir::types::I32;
+use cranelift_codegen::ir::types::I64;
+use cranelift_codegen::isa::CallConv;
+use cranelift_codegen::isa::TargetFrontendConfig;
+use cranelift_entity::EntityRef;
+use cranelift_entity::PrimaryMap;
 use cranelift_frontend::FunctionBuilder;
-use cranelift_wasm::{
-    FuncEnvironment, FuncIndex, GlobalIndex, GlobalVariable, Heap, HeapData, HeapStyle,
-    MemoryIndex, TableIndex, TargetEnvironment, TypeConvert, TypeIndex, WASM32_MAX_SIZE, WasmError,
-    WasmHeapType, WasmResult,
-};
+use cranelift_wasm::FuncEnvironment;
+use cranelift_wasm::FuncIndex;
+use cranelift_wasm::GlobalIndex;
+use cranelift_wasm::GlobalVariable;
+use cranelift_wasm::Heap;
+use cranelift_wasm::HeapData;
+use cranelift_wasm::HeapStyle;
+use cranelift_wasm::MemoryIndex;
+use cranelift_wasm::TableIndex;
+use cranelift_wasm::TargetEnvironment;
+use cranelift_wasm::TypeConvert;
+use cranelift_wasm::TypeIndex;
+use cranelift_wasm::WASM32_MAX_SIZE;
+use cranelift_wasm::WasmError;
+use cranelift_wasm::WasmHeapType;
+use cranelift_wasm::WasmResult;
 use wasm2nix_runtime::intrinsics as intr;
 
-use crate::translator::{NixModuleInfo, clif_type, validate_memory_type};
+use crate::translator::NixModuleInfo;
+use crate::translator::clif_type;
+use crate::translator::validate_memory_type;
 
 macro_rules! intrinsic_abi_param {
     ($env:expr; vmctx) => {

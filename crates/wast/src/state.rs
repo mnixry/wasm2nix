@@ -3,17 +3,18 @@
 
 use cranelift_entity::EntityRef;
 use snafu::prelude::*;
-use wasm2nix::{
-    nix::{Expr, nix},
-    translator::NixModule,
-};
+use wasm2nix::nix::Expr;
+use wasm2nix::nix::nix;
+use wasm2nix::translator::NixModule;
 use wasm2nix_runtime::RuntimeFunction;
 
-use crate::{
-    error::{MissingTableExportSnafu, Result, UnknownModuleSnafu},
-    eval::nix_u64,
-    script::{HarnessModule, Session, resolve_alias},
-};
+use crate::error::MissingTableExportSnafu;
+use crate::error::Result;
+use crate::error::UnknownModuleSnafu;
+use crate::eval::nix_u64;
+use crate::script::HarnessModule;
+use crate::script::Session;
+use crate::script::resolve_alias;
 
 impl Session {
     pub fn set_state(&mut self, key: &str, state: Expr) {

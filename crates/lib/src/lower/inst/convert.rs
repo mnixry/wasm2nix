@@ -1,16 +1,18 @@
-use cranelift_codegen::ir::{
-    self, Opcode,
-    types::{F32, F64, I8, I16, I32, I64},
-};
+use cranelift_codegen::ir::Opcode;
+use cranelift_codegen::ir::types::F32;
+use cranelift_codegen::ir::types::F64;
+use cranelift_codegen::ir::types::I8;
+use cranelift_codegen::ir::types::I16;
+use cranelift_codegen::ir::types::I32;
+use cranelift_codegen::ir::types::I64;
+use cranelift_codegen::ir::{self};
 use wasm2nix_runtime::RuntimeFunction;
 
-use crate::{
-    lower::{
-        error::Result,
-        inst::{InstCtx, LoweredInst},
-    },
-    nix::{Expr, nix},
-};
+use crate::lower::error::Result;
+use crate::lower::inst::InstCtx;
+use crate::lower::inst::LoweredInst;
+use crate::nix::Expr;
+use crate::nix::nix;
 
 impl InstCtx<'_> {
     pub(super) fn lower_bitcast(&self) -> LoweredInst {

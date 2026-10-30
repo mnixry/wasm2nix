@@ -1,4 +1,5 @@
-use crate::{BinOp, Expr};
+use crate::BinOp;
+use crate::Expr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Prec {

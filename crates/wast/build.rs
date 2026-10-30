@@ -1,14 +1,16 @@
 //! Generates one test per spec WAST file, embedding the script with
 //! `include_str!` so the test binary does not read the spec tree at run time.
 
-use std::{
-    env,
-    error::Error,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::env;
+use std::error::Error;
+use std::fs;
+use std::path::Path;
+use std::path::PathBuf;
 
-use proc_macro2::{Ident, Literal, Span, TokenStream};
+use proc_macro2::Ident;
+use proc_macro2::Literal;
+use proc_macro2::Span;
+use proc_macro2::TokenStream;
 use quote::quote;
 
 fn main() -> Result<(), Box<dyn Error>> {

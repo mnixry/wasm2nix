@@ -1,28 +1,38 @@
 //! Nix evaluation. Harness steps queue up in a [`Batch`] and one `nix eval`
 //! evaluates all of them; module states stay Nix values between steps.
 
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
-    env, fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::env;
+use std::fs;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command;
 
 use serde_json::Value as JsonValue;
 use snafu::prelude::*;
 use tempfile::TempDir;
-use wasm2nix::nix::{AttrKey, Expr, nix};
-use wast::{WastArg, core::WastArgCore};
+use wasm2nix::nix::AttrKey;
+use wasm2nix::nix::Expr;
+use wasm2nix::nix::nix;
+use wast::WastArg;
+use wast::core::WastArgCore;
 
-use crate::{
-    error::{
-        CreateTempDirSnafu, DecodeEvalJsonSnafu, EncodeJsonSnafu, EvalNixFailedSnafu, EvalNixSnafu,
-        InvalidEvalCmdSnafu, NixIntegerOverflowSnafu, Result, UnknownModuleSnafu,
-        UnsupportedInvokeArgumentSnafu, WriteFileSnafu,
-    },
-    expect::Expected,
-    script::{HarnessModule, resolve_alias},
-};
+use crate::error::CreateTempDirSnafu;
+use crate::error::DecodeEvalJsonSnafu;
+use crate::error::EncodeJsonSnafu;
+use crate::error::EvalNixFailedSnafu;
+use crate::error::EvalNixSnafu;
+use crate::error::InvalidEvalCmdSnafu;
+use crate::error::NixIntegerOverflowSnafu;
+use crate::error::Result;
+use crate::error::UnknownModuleSnafu;
+use crate::error::UnsupportedInvokeArgumentSnafu;
+use crate::error::WriteFileSnafu;
+use crate::expect::Expected;
+use crate::script::HarnessModule;
+use crate::script::resolve_alias;
 
 /// Steps per `nix eval`. Every step's state stays reachable until the
 /// evaluation ends, so this bounds evaluator memory.

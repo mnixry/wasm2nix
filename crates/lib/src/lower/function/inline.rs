@@ -1,10 +1,11 @@
-use crate::{
-    lower::inst::{Force, Step, is_bit_op},
-    nix::{
-        BinOp, Expr, LetBind,
-        visit::{Visit, walk_expr},
-    },
-};
+use crate::lower::inst::Force;
+use crate::lower::inst::Step;
+use crate::lower::inst::is_bit_op;
+use crate::nix::BinOp;
+use crate::nix::Expr;
+use crate::nix::LetBind;
+use crate::nix::visit::Visit;
+use crate::nix::visit::walk_expr;
 
 pub(super) struct LoweredBlockBody {
     pub(super) binds: Vec<LetBind>,

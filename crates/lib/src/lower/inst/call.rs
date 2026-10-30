@@ -1,18 +1,21 @@
 use cranelift_codegen::ir::{self};
-use wasm2nix_runtime::{RuntimeFunction, RuntimeResultKind, intrinsics as intr};
+use wasm2nix_runtime::RuntimeFunction;
+use wasm2nix_runtime::RuntimeResultKind;
+use wasm2nix_runtime::intrinsics as intr;
 
-use crate::{
-    lower::{
-        error::{
-            MissingTypeSnafu, Result, UnknownExternalNamespaceSnafu, UnknownIntrinsicSnafu,
-            UnsupportedExternalNameSnafu,
-        },
-        inst::{InstCtx, LoweredInst, value_name},
-        state::{lower_table_entry, signature_id},
-    },
-    nix::{Expr, nix},
-    translator::NixModule,
-};
+use crate::lower::error::MissingTypeSnafu;
+use crate::lower::error::Result;
+use crate::lower::error::UnknownExternalNamespaceSnafu;
+use crate::lower::error::UnknownIntrinsicSnafu;
+use crate::lower::error::UnsupportedExternalNameSnafu;
+use crate::lower::inst::InstCtx;
+use crate::lower::inst::LoweredInst;
+use crate::lower::inst::value_name;
+use crate::lower::state::lower_table_entry;
+use crate::lower::state::signature_id;
+use crate::nix::Expr;
+use crate::nix::nix;
+use crate::translator::NixModule;
 
 impl InstCtx<'_> {
     pub(super) fn lower_call(&self) -> Result<LoweredInst> {

@@ -1,4 +1,5 @@
-use crate::nix::{Expr, nix};
+use crate::nix::Expr;
+use crate::nix::nix;
 
 /// An imported memory, table or global: either the value itself or an
 /// accessor whose `get` reads it from the exporting module's state.

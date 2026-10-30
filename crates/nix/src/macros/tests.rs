@@ -1,4 +1,6 @@
-use crate::{AttrKey, BinOp, Expr};
+use crate::AttrKey;
+use crate::BinOp;
+use crate::Expr;
 
 #[test]
 fn macro_builds_basic_forms() {

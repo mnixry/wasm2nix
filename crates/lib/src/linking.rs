@@ -1,12 +1,18 @@
-use std::{collections::BTreeMap, convert::Infallible, fmt};
+use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::fmt;
 
 use cranelift_codegen::ir;
-use cranelift_entity::{EntityRef, PrimaryMap};
-use cranelift_wasm::{Global, Memory, Table};
+use cranelift_entity::EntityRef;
+use cranelift_entity::PrimaryMap;
+use cranelift_wasm::Global;
+use cranelift_wasm::Memory;
+use cranelift_wasm::Table;
 use serde::Deserialize;
 use snafu::Snafu;
 
-use crate::translator::{Exportable, NixModule};
+use crate::translator::Exportable;
+use crate::translator::NixModule;
 
 pub type Result<T, E = Infallible> = std::result::Result<T, LinkError<E>>;
 

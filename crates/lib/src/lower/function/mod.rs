@@ -9,20 +9,24 @@ mod terminator;
 
 use std::cell::RefCell;
 
-use cranelift_codegen::ir::{self, ArgumentPurpose, Block};
+use cranelift_codegen::ir::ArgumentPurpose;
+use cranelift_codegen::ir::Block;
+use cranelift_codegen::ir::{self};
 use snafu::prelude::*;
 use wasm2nix_runtime::RuntimeFunction;
 
-use crate::{
-    lower::{
-        error::{MissingEntryBlockSnafu, MissingVmContextSnafu, Result},
-        function::{block::BlockLowering, cfg::ControlFlow, terminator::lower_jump_record},
-        inst::value_name,
-        lambda_chain,
-    },
-    nix::{AttrKey, Expr, nix},
-    translator::NixModule,
-};
+use crate::lower::error::MissingEntryBlockSnafu;
+use crate::lower::error::MissingVmContextSnafu;
+use crate::lower::error::Result;
+use crate::lower::function::block::BlockLowering;
+use crate::lower::function::cfg::ControlFlow;
+use crate::lower::function::terminator::lower_jump_record;
+use crate::lower::inst::value_name;
+use crate::lower::lambda_chain;
+use crate::nix::AttrKey;
+use crate::nix::Expr;
+use crate::nix::nix;
+use crate::translator::NixModule;
 
 pub(super) fn lower_function(
     module: &NixModule, func_index: u32, func: &ir::Function,

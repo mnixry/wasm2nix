@@ -9,13 +9,18 @@ mod memory;
 use std::collections::BTreeSet;
 
 pub(super) use arith::is_bit_op;
-use cranelift_codegen::ir::{self, Inst, InstructionData, Opcode, types::I8};
+use cranelift_codegen::ir::Inst;
+use cranelift_codegen::ir::InstructionData;
+use cranelift_codegen::ir::Opcode;
+use cranelift_codegen::ir::types::I8;
+use cranelift_codegen::ir::{self};
 
-use crate::{
-    lower::error::{Result, UnsupportedOpcodeSnafu},
-    nix::{BinOp, Expr, nix},
-    translator::NixModule,
-};
+use crate::lower::error::Result;
+use crate::lower::error::UnsupportedOpcodeSnafu;
+use crate::nix::BinOp;
+use crate::nix::Expr;
+use crate::nix::nix;
+use crate::translator::NixModule;
 
 pub(super) struct Step {
     pub(super) binds: Vec<(String, Expr)>,

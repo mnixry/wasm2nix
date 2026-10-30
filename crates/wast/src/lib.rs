@@ -6,5 +6,6 @@ mod expect;
 mod script;
 mod state;
 
-pub use error::{Error, Result};
+pub use error::Error;
+pub use error::Result;
 pub use script::run_wast_script;

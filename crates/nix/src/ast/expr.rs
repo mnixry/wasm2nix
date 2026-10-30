@@ -1,7 +1,13 @@
 use std::fmt;
 
-use super::{AttrBind, AttrKey, AttrPath, BinOp, LetBind, UnOp};
-use crate::print::{Printer, RenderOptions};
+use super::AttrBind;
+use super::AttrKey;
+use super::AttrPath;
+use super::BinOp;
+use super::LetBind;
+use super::UnOp;
+use crate::print::Printer;
+use crate::print::RenderOptions;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {

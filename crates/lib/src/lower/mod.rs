@@ -11,17 +11,19 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-pub use error::{LowerError, Result};
+pub use error::LowerError;
+pub use error::Result;
 
-use crate::{
-    lower::{
-        exports::{ExportKeyMode, lower_exports_attrset},
-        funcs::{lower_func_registry, lower_funcs_rec_attrset, lower_module_id, lower_start_state},
-        state::lower_initial_state,
-    },
-    nix::{Expr, nix},
-    translator::NixModule,
-};
+use crate::lower::exports::ExportKeyMode;
+use crate::lower::exports::lower_exports_attrset;
+use crate::lower::funcs::lower_func_registry;
+use crate::lower::funcs::lower_funcs_rec_attrset;
+use crate::lower::funcs::lower_module_id;
+use crate::lower::funcs::lower_start_state;
+use crate::lower::state::lower_initial_state;
+use crate::nix::Expr;
+use crate::nix::nix;
+use crate::translator::NixModule;
 
 /// Lowers the translated module metadata and functions to a Nix expression.
 ///

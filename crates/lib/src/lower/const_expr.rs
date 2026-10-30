@@ -1,15 +1,14 @@
-use cranelift_wasm::{ConstOp, WasmValType};
+use cranelift_wasm::ConstOp;
+use cranelift_wasm::WasmValType;
 use snafu::prelude::*;
 use wasm2nix_runtime::RuntimeFunction;
 
-use crate::{
-    lower::{
-        error::{MalformedConstExprSnafu, Result},
-        state::{global_bind_name, lower_table_entry},
-    },
-    nix::Expr,
-    translator::NixModule,
-};
+use crate::lower::error::MalformedConstExprSnafu;
+use crate::lower::error::Result;
+use crate::lower::state::global_bind_name;
+use crate::lower::state::lower_table_entry;
+use crate::nix::Expr;
+use crate::translator::NixModule;
 
 pub(super) fn lower_const_expr(
     module: &NixModule, expr: &cranelift_wasm::ConstExpr, ty: WasmValType,

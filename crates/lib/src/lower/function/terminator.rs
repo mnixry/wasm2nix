@@ -1,16 +1,18 @@
-use cranelift_codegen::ir::{self, Block, Inst, InstructionData, Opcode};
+use cranelift_codegen::ir::Block;
+use cranelift_codegen::ir::Inst;
+use cranelift_codegen::ir::InstructionData;
+use cranelift_codegen::ir::Opcode;
+use cranelift_codegen::ir::{self};
 
-use crate::{
-    lower::{
-        error::{Result, UnsupportedOpcodeSnafu},
-        function::{
-            block::{BlockLowering, MAX_INLINE_DEPTH},
-            block_name,
-        },
-        inst::truthy_value_expr,
-    },
-    nix::{AttrKey, Expr, nix},
-};
+use crate::lower::error::Result;
+use crate::lower::error::UnsupportedOpcodeSnafu;
+use crate::lower::function::block::BlockLowering;
+use crate::lower::function::block::MAX_INLINE_DEPTH;
+use crate::lower::function::block_name;
+use crate::lower::inst::truthy_value_expr;
+use crate::nix::AttrKey;
+use crate::nix::Expr;
+use crate::nix::nix;
 
 impl BlockLowering<'_> {
     pub(super) fn lower_terminator(

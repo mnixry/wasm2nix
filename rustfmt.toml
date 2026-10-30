@@ -1,10 +1,19 @@
+edition                  = "2024"
+fn_params_layout         = "Compressed"
+hex_literal_case         = "Lower"
+max_width                = 100
+newline_style            = "Unix"
+style_edition            = "2024"
+tab_spaces               = 4
+use_field_init_shorthand = true
+use_try_shorthand        = true
+
+# These options require the separately pinned nightly formatter.
 brace_style                  = "PreferSameLine"
 condense_wildcard_suffixes   = true
 enum_discrim_align_threshold = 20
-fn_params_layout             = "Compressed"
+format_macro_matchers        = true
 group_imports                = "StdExternalCrate"
-hex_literal_case             = "Upper"
-imports_granularity          = "Crate"
-tab_spaces                   = 4
+imports_granularity          = "Item"
 unstable_features            = true
 wrap_comments                = true

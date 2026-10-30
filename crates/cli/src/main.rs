@@ -1,13 +1,17 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
 use clap::Parser;
 use snafu::prelude::*;
-use wasm2nix::{
-    TranspileOptions, default_output_path, generated_nix_file,
-    linking::{self, ImportMap},
-    lower_wasm_to_nix, runtime_import_expr, runtime_path_for_output,
-    translator::NixModule,
-};
+use wasm2nix::TranspileOptions;
+use wasm2nix::default_output_path;
+use wasm2nix::generated_nix_file;
+use wasm2nix::linking::ImportMap;
+use wasm2nix::linking::{self};
+use wasm2nix::lower_wasm_to_nix;
+use wasm2nix::runtime_import_expr;
+use wasm2nix::runtime_path_for_output;
+use wasm2nix::translator::NixModule;
 use wasm2nix_runtime::runtime_nix;
 
 #[derive(Debug, Clone, Parser)]
@@ -153,7 +157,10 @@ fn parse_imports_manifest(path: &Path, source: &str) -> Result<ImportMap> {
 
 #[cfg(test)]
 mod tests {
-    use wasm2nix::linking::{FuncType, GlobalType, Limits, TableType};
+    use wasm2nix::linking::FuncType;
+    use wasm2nix::linking::GlobalType;
+    use wasm2nix::linking::Limits;
+    use wasm2nix::linking::TableType;
 
     use super::*;
 

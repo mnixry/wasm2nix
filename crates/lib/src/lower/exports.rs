@@ -1,11 +1,13 @@
 use cranelift_wasm::WasmValType;
-use wasm2nix_runtime::{RuntimeFunction, RuntimeNamespace};
+use wasm2nix_runtime::RuntimeFunction;
+use wasm2nix_runtime::RuntimeNamespace;
 
-use crate::{
-    lower::error::{Result, UnsupportedGlobalTypeSnafu},
-    nix::{AttrKey, Expr, nix},
-    translator::NixModule,
-};
+use crate::lower::error::Result;
+use crate::lower::error::UnsupportedGlobalTypeSnafu;
+use crate::nix::AttrKey;
+use crate::nix::Expr;
+use crate::nix::nix;
+use crate::translator::NixModule;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExportKeyMode {

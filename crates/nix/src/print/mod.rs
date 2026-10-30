@@ -5,10 +5,20 @@ mod prec;
 #[cfg(test)]
 mod tests;
 
-use doc::{Doc, attr_key, attr_path, join, parens, string_doc, text};
-use prec::{Assoc, ChildSide, Prec};
+use doc::Doc;
+use doc::attr_key;
+use doc::attr_path;
+use doc::join;
+use doc::parens;
+use doc::string_doc;
+use doc::text;
+use prec::Assoc;
+use prec::ChildSide;
+use prec::Prec;
 
-use crate::{AttrBind, BinOp, Expr};
+use crate::AttrBind;
+use crate::BinOp;
+use crate::Expr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderOptions {

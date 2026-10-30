@@ -1,7 +1,11 @@
 use std::convert::Infallible;
 
 use cranelift_entity::EntityRef;
-use cranelift_wasm::{ConstExpr, ConstOp, GlobalIndex, MemoryIndex, TableIndex};
+use cranelift_wasm::ConstExpr;
+use cranelift_wasm::ConstOp;
+use cranelift_wasm::GlobalIndex;
+use cranelift_wasm::MemoryIndex;
+use cranelift_wasm::TableIndex;
 use snafu::prelude::*;
 
 use crate::translator::NixModule;

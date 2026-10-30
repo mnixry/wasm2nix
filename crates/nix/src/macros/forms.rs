@@ -22,7 +22,7 @@ macro_rules! __nix_merge {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __nix_attr_key {
-    (#{ $expr:expr }) => {
+    (# { $expr:expr }) => {
         $crate::AttrKey::string($expr)
     };
     (($expr:expr)) => {

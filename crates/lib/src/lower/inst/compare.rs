@@ -1,17 +1,15 @@
-use cranelift_codegen::ir::{
-    self,
-    condcodes::{FloatCC, IntCC},
-    types::{I32, I64},
-};
+use cranelift_codegen::ir::condcodes::FloatCC;
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::types::I32;
+use cranelift_codegen::ir::types::I64;
+use cranelift_codegen::ir::{self};
 use wasm2nix_runtime::RuntimeFunction;
 
-use crate::{
-    lower::{
-        error::Result,
-        inst::{InstCtx, LoweredInst},
-    },
-    nix::{BinOp, Expr},
-};
+use crate::lower::error::Result;
+use crate::lower::inst::InstCtx;
+use crate::lower::inst::LoweredInst;
+use crate::nix::BinOp;
+use crate::nix::Expr;
 
 impl InstCtx<'_> {
     pub(super) fn lower_int_compare(&self, args: [ir::Value; 2], cond: IntCC) -> LoweredInst {

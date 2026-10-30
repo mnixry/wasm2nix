@@ -1,16 +1,21 @@
-use cranelift_codegen::ir::{
-    self, Opcode, Type,
-    types::{F32, F64, I8, I32, I64},
-};
+use cranelift_codegen::ir::Opcode;
+use cranelift_codegen::ir::Type;
+use cranelift_codegen::ir::types::F32;
+use cranelift_codegen::ir::types::F64;
+use cranelift_codegen::ir::types::I8;
+use cranelift_codegen::ir::types::I32;
+use cranelift_codegen::ir::types::I64;
+use cranelift_codegen::ir::{self};
 use wasm2nix_runtime::RuntimeFunction;
 
-use crate::{
-    lower::{
-        error::Result,
-        inst::{InstCtx, LoweredInst},
-    },
-    nix::{AttrKey, BinOp, Expr, UnOp, nix},
-};
+use crate::lower::error::Result;
+use crate::lower::inst::InstCtx;
+use crate::lower::inst::LoweredInst;
+use crate::nix::AttrKey;
+use crate::nix::BinOp;
+use crate::nix::Expr;
+use crate::nix::UnOp;
+use crate::nix::nix;
 
 impl InstCtx<'_> {
     pub(super) fn lower_iconst(&self, v: i64) -> LoweredInst {
@@ -147,7 +152,7 @@ impl InstCtx<'_> {
     }
 }
 
-const U32_MASK: i64 = 0xFFFF_FFFF;
+const U32_MASK: i64 = 0xffff_ffff;
 
 /// Integer operations cheap enough to emit as inline Nix instead of a runtime
 /// call. i32 values are canonical u32 and i64 values native int64, so bitwise

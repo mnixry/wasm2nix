@@ -1,4 +1,5 @@
-use wasm2nix_wast::{error::Result, run_wast_script};
+use wasm2nix_wast::error::Result;
+use wasm2nix_wast::run_wast_script;
 
 #[test]
 #[snafu::report]

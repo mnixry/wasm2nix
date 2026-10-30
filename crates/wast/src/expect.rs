@@ -2,12 +2,13 @@ use std::fmt;
 
 use serde_json::Value as JsonValue;
 use snafu::prelude::*;
-use wast::{
-    WastRet,
-    core::{NanPattern, WastRetCore},
-};
+use wast::WastRet;
+use wast::core::NanPattern;
+use wast::core::WastRetCore;
 
-use crate::error::{ExpectedIntegerResultSnafu, Result, UnsupportedAssertReturnResultSnafu};
+use crate::error::ExpectedIntegerResultSnafu;
+use crate::error::Result;
+use crate::error::UnsupportedAssertReturnResultSnafu;
 
 /// One expected `assert_return` result, in the JSON encoding the harness
 /// returns from Nix.
@@ -89,18 +90,18 @@ pub fn json_number_to_u64(value: &JsonValue) -> Result<u64> {
 }
 
 const fn f32_canonical_nan(bits: u32) -> bool {
-    (bits & 0x7F80_0000) == 0x7F80_0000 && (bits & 0x007F_FFFF) == 0x0040_0000
+    (bits & 0x7f80_0000) == 0x7f80_0000 && (bits & 0x007f_ffff) == 0x0040_0000
 }
 
 const fn f32_arithmetic_nan(bits: u32) -> bool {
-    (bits & 0x7F80_0000) == 0x7F80_0000 && (bits & 0x0040_0000) != 0
+    (bits & 0x7f80_0000) == 0x7f80_0000 && (bits & 0x0040_0000) != 0
 }
 
 const fn f64_canonical_nan(bits: u64) -> bool {
-    (bits & 0x7FF0_0000_0000_0000) == 0x7FF0_0000_0000_0000
-        && (bits & 0x000F_FFFF_FFFF_FFFF) == 0x0008_0000_0000_0000
+    (bits & 0x7ff0_0000_0000_0000) == 0x7ff0_0000_0000_0000
+        && (bits & 0x000f_ffff_ffff_ffff) == 0x0008_0000_0000_0000
 }
 
 const fn f64_arithmetic_nan(bits: u64) -> bool {
-    (bits & 0x7FF0_0000_0000_0000) == 0x7FF0_0000_0000_0000 && (bits & 0x0008_0000_0000_0000) != 0
+    (bits & 0x7ff0_0000_0000_0000) == 0x7ff0_0000_0000_0000 && (bits & 0x0008_0000_0000_0000) != 0
 }

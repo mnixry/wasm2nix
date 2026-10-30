@@ -1,12 +1,13 @@
 use cranelift_codegen::ir::{self};
 
-use crate::{
-    lower::{
-        error::Result, function::lower_function, imports::lower_imported_extern_state, lambda_chain,
-    },
-    nix::{AttrKey, Expr, nix},
-    translator::NixModule,
-};
+use crate::lower::error::Result;
+use crate::lower::function::lower_function;
+use crate::lower::imports::lower_imported_extern_state;
+use crate::lower::lambda_chain;
+use crate::nix::AttrKey;
+use crate::nix::Expr;
+use crate::nix::nix;
+use crate::translator::NixModule;
 
 pub(super) fn lower_module_id() -> Expr {
     nix!(if builtins.hasAttr("__moduleId", imports) then imports."__moduleId" else "__self")
